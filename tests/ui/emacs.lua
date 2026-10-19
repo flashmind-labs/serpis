@@ -1,0 +1,16 @@
+local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
+serpis.keys.scheme("emacs")
+local c = T.text_case
+c("C-k C-y", "hello world", "M-f C-k C-a C-y", " worldhello")
+c("C-e insert", "abc", "C-e x", "abcx")
+c("M-d", "foo bar", "M-d", " bar")
+c("mark region kill", "abcdef", "C-f C-SPC C-f C-f C-w", "adef")
+c("C-/ undo", "abc", "C-e x C-/", "abc")
+c("C-d", "abc", "C-d", "bc")
+-- Window commands.
+local before = serpis.window.count()
+serpis.keys.feed("C-x 3")
+T.check("C-x 3 splits", serpis.window.count(), before + 1)
+serpis.keys.feed("C-x 0")
+T.check("C-x 0 closes", serpis.window.count(), before)
+T.finish()

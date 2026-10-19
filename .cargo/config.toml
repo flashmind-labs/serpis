@@ -1,0 +1,4 @@
+# Host, libserpis and Rust plugins must share one std (and one copy of every crate
+# serpis re-exports), so everything links std dynamically.
+[build]
+rustflags = ["-C", "prefer-dynamic"]

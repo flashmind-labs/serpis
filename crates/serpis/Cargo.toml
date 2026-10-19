@@ -1,0 +1,36 @@
+[package]
+name = "serpis"
+description = "Serpis editor core: buffers, windows, keymaps, commands, hooks, Lua and Rust extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# A Rust dylib so the host binary and every Rust plugin share one copy of the core.
+crate-type = ["dylib"]
+
+[dependencies]
+serpis-ai.workspace = true
+serpis-agent.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+regex.workspace = true
+uuid.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "wayland", "x11"] }
+egui = "0.37"
+mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54" }
+nix = { version = "0.29", features = ["term", "fs", "signal", "process", "ioctl"] }
+libloading = "0.8"
+notify = "8"
+ropey = "1.6"
+slotmap = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+arboard = "3"
+url = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }

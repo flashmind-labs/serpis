@@ -1,0 +1,12 @@
+[package]
+name = "serpis-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "serpis"
+path = "src/main.rs"
+
+[dependencies]
+serpis.workspace = true
