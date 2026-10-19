@@ -229,6 +229,52 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));
     child.set_clip_rect(body);
     ed.with_buffer(id, |b, ed| b.ui(&mut child, body, focused, ed));
+    draw_flashes(ui, ed, id, body);
+}
+
+/// Paint fading highlights for `id` on top of its window.
+fn draw_flashes(ui: &mut egui::Ui, ed: &mut Editor, id: crate::BufferId, clip: Rect) {
+    ed.flashes.retain(|f| f.born.elapsed() < f.duration);
+    let flashes: Vec<_> = ed.flashes.iter().filter(|f| f.buffer == id).cloned().collect();
+    if flashes.is_empty() {
+        return;
+    }
+    let painter = ui.painter_at(clip);
+    let rects: Vec<(Rect, Color32)> = ed
+        .with_buffer(id, |b, _| {
+            let mut out = Vec::new();
+            let Some(s) = b.surface() else { return out };
+            s.undo_boundary();
+            let vis = s.visible_lines();
+            for f in &flashes {
+                // Fade out over the second half of the duration.
+                let t = f.born.elapsed().as_secs_f32() / f.duration.as_secs_f32();
+                let alpha = if t < 0.5 { 1.0 } else { (1.0 - t) * 2.0 };
+                let color = f.color.gamma_multiply(alpha.clamp(0.0, 1.0));
+                let first = f.start.line.max(vis.start);
+                let last = f.end.line.min(vis.end.saturating_sub(1));
+                for l in first..=last {
+                    let s_col = if l == f.start.line { f.start.col } else { 0 };
+                    let e_col = if l == f.end.line { f.end.col } else { s.line_len(l) };
+                    if l == f.end.line && e_col == 0 && l > f.start.line {
+                        continue; // exclusive end at a line start
+                    }
+                    let Some(a) = s.screen_rect(crate::Pos::new(l, s_col)) else { continue };
+                    let r = if e_col > s_col {
+                        s.screen_rect(crate::Pos::new(l, e_col - 1)).map(|b| a.union(b)).unwrap_or(a)
+                    } else {
+                        a
+                    };
+                    out.push((r, color));
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
+    for (r, c) in rects {
+        painter.rect_filled(r, 2.0, c);
+    }
+    ui.ctx().request_repaint();
 }
 
 fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {

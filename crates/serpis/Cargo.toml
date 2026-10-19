@@ -21,7 +21,7 @@ tracing.workspace = true
 dirs.workspace = true
 regex.workspace = true
 uuid.workspace = true
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "clipboard", "links", "default_fonts", "system_fonts", "wayland", "x11"] }
 egui = "0.37"
 mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54" }
@@ -34,3 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arboard = "3"
 url = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Same winit as eframe; used to drop the default app menu (Cmd-H/Cmd-Q would never reach keymaps).
+winit = "0.30"

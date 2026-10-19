@@ -368,6 +368,17 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
         e.buffer_directory(id).map(|d| d.to_string_lossy().into_owned())
     }))?)?;
+    // Highlight a range for a moment: start/end are {line, col} (1-based, end exclusive).
+    buf.set("highlight", lua.create_function(|_, (start, end, opts): (Vec<usize>, Vec<usize>, Option<Table>)| {
+        let duration = opts.as_ref().and_then(|o| o.get::<u64>("duration").ok()).unwrap_or(150);
+        let color = opts.as_ref().and_then(|o| o.get::<String>("color").ok()).and_then(|c| parse_hex(&c));
+        let buffer: Option<u64> = opts.as_ref().and_then(|o| o.get::<u64>("buffer").ok());
+        let pos = |v: &[usize]| crate::text::Pos::new(v.first().copied().unwrap_or(1).saturating_sub(1), v.get(1).copied().unwrap_or(1).saturating_sub(1));
+        ed(|e| {
+            let id = buffer.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+            e.flash_region(id, pos(&start), pos(&end), Duration::from_millis(duration), color);
+        })
+    })?)?;
     buf.set("text", lua.create_function(|_, ()| ed(|e| e.with_surface(|s, _| s.all_text())))?)?;
     buf.set("line", lua.create_function(|_, n: usize| ed(|e| e.with_surface(|s, _| s.line(n.saturating_sub(1)))))?)?;
     buf.set("insert", lua.create_function(|_, text: String| ed(|e| e.self_insert(&text)))?)?;
@@ -433,6 +444,24 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         e.buffer_directory(id).and_then(|d| crate::project::name(&d))
     }))?)?;
     s.set("project", project)?;
+
+    // `serpis.highlight.on_yank(event, opts)`: flash the yanked region, like Neovim's
+    // `vim.highlight.on_yank()` (call it from a `text-yanked` hook).
+    let hl = lua.create_table()?;
+    hl.set("on_yank", lua.create_function(|lua, (e, opts): (Table, Option<Table>)| {
+        let serpis: Table = lua.globals().get("serpis")?;
+        let buffer: Table = serpis.get("buffer")?;
+        let highlight: Function = buffer.get("highlight")?;
+        let o = match opts {
+            Some(o) => o,
+            None => lua.create_table()?,
+        };
+        if o.get::<LuaValue>("buffer")?.is_nil() {
+            o.set("buffer", e.get::<LuaValue>("buffer")?)?;
+        }
+        highlight.call::<()>((e.get::<LuaValue>("start")?, e.get::<LuaValue>("end")?, o))
+    })?)?;
+    s.set("highlight", hl)?;
 
     // UI segments.
     let ui = lua.create_table()?;

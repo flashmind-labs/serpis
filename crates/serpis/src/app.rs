@@ -36,6 +36,9 @@ impl eframe::App for App {
         // The text a key produces arrives in the same batch; never carry the skip over.
         ed.skip_text = false;
         for ev in events {
+            if matches!(ev, Event::Key { pressed: true, .. } | Event::Text(_) | Event::Paste(_) | Event::Copy | Event::Cut) {
+                tracing::debug!(target: "serpis::input", "{ev:?}");
+            }
             match ev {
                 Event::Key { key, pressed: true, modifiers, .. } => {
                     let Some(chord) = chord_from_egui(key, modifiers) else { continue };
@@ -60,7 +63,16 @@ impl eframe::App for App {
                     }
                     ed.handle_text_input(&t);
                 }
-                Event::Paste(t) => ed.handle_paste(&t),
+                // Cmd/Ctrl-V arrives as a paste event: route it through the `s-v`/`C-v`
+                // binding when there is one (the clipboard already holds `t`).
+                Event::Paste(t) => {
+                    let chord = command_chord('v');
+                    if ed.is_bound(&chord) {
+                        ed.handle_chord(chord);
+                    } else {
+                        ed.handle_paste(&t);
+                    }
+                }
                 Event::Copy => ed.handle_chord(command_chord('c')),
                 Event::Cut => ed.handle_chord(command_chord('x')),
                 other => keep.push(other),

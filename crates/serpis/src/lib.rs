@@ -162,6 +162,13 @@ pub fn run() -> anyhow::Result<()> {
             .with_title("serpis")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([480.0, 320.0]),
+        // winit's default macOS menu claims Cmd-H (hide), Cmd-Alt-H and Cmd-Q before the
+        // app sees them; without it every Cmd chord goes through serpis keymaps (`s-q` quits).
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|b| {
+            use winit::platform::macos::EventLoopBuilderExtMacOS;
+            b.with_default_menu(false);
+        })),
         ..Default::default()
     };
     eframe::run_native(

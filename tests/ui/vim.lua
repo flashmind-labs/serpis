@@ -21,4 +21,19 @@ c("D", "keep this", "w D", "keep ")
 c("xp", "ab", "x p", "ba")
 c("di(", "call(x, y)", "f x d i (", "call()")
 c("gg dG", "a\nb\nc", "G g g d G", "")
+-- text-yanked hook: ranges are 1-based {line, col}, end exclusive.
+local last
+serpis.hook.add("text-yanked", function(e) last = e end)
+local function yank_case(name, text, keys, want)
+  last = nil
+  local id = serpis.buffer.create("text", "*uitest*", { text = text })
+  serpis.buffer.show(id)
+  serpis.keys.feed(keys)
+  local got = last and (table.concat(last.start, ":") .. "-" .. table.concat(last["end"], ":") .. (last.linewise and " line" or "")) or "none"
+  T.check(name, got, want)
+  serpis.buffer.kill(id)
+end
+yank_case("yank hook yiw", "alpha beta", "w y i w", "1:7-1:11")
+yank_case("yank hook yy", "one\ntwo", "y y", "1:1-2:1 line")
+yank_case("yank hook visual", "abcdef", "v l l y", "1:1-1:4")
 T.finish()

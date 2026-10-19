@@ -589,16 +589,18 @@ pub fn install(ed: &mut Editor) {
     ed.define_command("copy-region-as-kill", "Copy the selection.", o, |ed, _| {
         set_mark_active(false);
         let t = ed.with_surface(|s, _| {
-            let t = s.selection().map(|(a, b)| s.text_range(a, b));
+            let t = s.selection().map(|(a, b)| (s.text_range(a, b), a, b));
             s.set_anchor(None);
             t
         });
-        if let Some(Some(t)) = t {
+        if let Some(Some((t, a, b))) = t {
             ed.copy_to_clipboard(&t);
+            ed.notify_yank(a, b, false);
             ed.message("Copied");
         }
         Ok(())
     });
+    ed.define_command("paste", "Paste from the clipboard (alias of yank).", o, |ed, a| ed.run_command("yank", a));
     ed.define_command("yank", "Paste from the clipboard.", o, |ed, _| {
         if let Some(t) = ed.clipboard_text() {
             ed.handle_paste(&t);
@@ -760,9 +762,10 @@ pub fn install(ed: &mut Editor) {
     ed.define_command("terminal-copy-mode", "Navigate the scrollback with motions.", o, |ed, _| with_terminal(ed, |t, _| t.enter_copy_mode()));
     ed.define_command("terminal-exit-copy-mode", "Return to live terminal input.", o, |ed, _| with_terminal(ed, |t, _| t.exit_copy_mode()));
     ed.define_command("terminal-copy", "Copy the copy-mode selection.", o, |ed, _| {
-        let t = with_terminal(ed, |t, _| t.selection().map(|(a, b)| t.text_range(a, b)))?;
-        if let Some(t) = t {
+        let t = with_terminal(ed, |t, _| t.selection().map(|(a, b)| (t.text_range(a, b), a, b)))?;
+        if let Some((t, a, b)) = t {
             ed.copy_to_clipboard(&t);
+            ed.notify_yank(a, b, false);
             ed.message("Copied");
         }
         Ok(())

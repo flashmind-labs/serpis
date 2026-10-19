@@ -101,6 +101,18 @@ pub struct Segment {
     pub f: SegmentFn,
 }
 
+/// A temporary highlight over a text range (yank flash, search hits, jump targets).
+#[derive(Debug, Clone)]
+pub struct Flash {
+    pub buffer: BufferId,
+    pub start: crate::text::Pos,
+    /// Exclusive end.
+    pub end: crate::text::Pos,
+    pub born: Instant,
+    pub duration: Duration,
+    pub color: egui::Color32,
+}
+
 /// Work sent to the UI thread from anywhere.
 pub type MainTask = Box<dyn FnOnce(&mut Editor) + Send>;
 
@@ -286,6 +298,8 @@ pub struct Editor {
     pub status_cache: Vec<String>,
     /// Layout seen at the end of the previous frame (for `window-layout-changed`).
     last_layout: Option<Value>,
+    /// Fading highlights drawn over buffers.
+    pub flashes: Vec<Flash>,
 }
 
 impl Editor {
@@ -345,6 +359,7 @@ impl Editor {
             header_segments: Vec::new(),
             status_cache: Vec::new(),
             last_layout: None,
+            flashes: Vec::new(),
         }
     }
 
@@ -840,6 +855,27 @@ impl Editor {
             "hollow" => Some(CursorShape::Hollow),
             _ => None,
         }
+    }
+
+    /// Highlight `start..end` in a buffer for `duration`, fading out (`color` defaults to the theme accent).
+    pub fn flash_region(&mut self, buffer: BufferId, start: crate::text::Pos, end: crate::text::Pos, duration: Duration, color: Option<egui::Color32>) {
+        let color = color.unwrap_or(self.theme.yellow.gamma_multiply(0.45));
+        self.flashes.retain(|f| f.buffer != buffer);
+        self.flashes.push(Flash { buffer, start, end, born: Instant::now(), duration, color });
+        self.ctx.request_repaint();
+    }
+
+    /// Announce that text was yanked (copied) from the focused buffer: runs `text-yanked`
+    /// with `{buffer, start = {line, col}, end = {line, col}, linewise}` (1-based, end exclusive).
+    pub fn notify_yank(&mut self, start: crate::text::Pos, end: crate::text::Pos, linewise: bool) {
+        let id = self.current_buffer();
+        let payload = serde_json::json!({
+            "buffer": buffer_id_to_u64(id),
+            "start": [start.line + 1, start.col + 1],
+            "end": [end.line + 1, end.col + 1],
+            "linewise": linewise,
+        });
+        self.run_hook("text-yanked", &payload);
     }
 
     pub fn copy_to_clipboard(&mut self, text: &str) {

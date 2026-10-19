@@ -502,6 +502,7 @@ fn apply_operator(ed: &mut Editor, vm: &mut Vim, op: char, a: Pos, b: Pos, kind:
             let t = if linewise && !text.ends_with('\n') { format!("{text}\n") } else { text };
             ed.copy_to_clipboard(&t);
             vm.yank_linewise = linewise;
+            ed.notify_yank(start, end, linewise);
             ed.with_surface(|s, _| {
                 s.set_anchor(None);
                 s.set_cursor(if linewise { Pos::new(start.line.min(a.line.min(b.line)), s.cursor().col.min(start.col)) } else { start });
