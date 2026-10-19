@@ -300,6 +300,10 @@ pub struct Editor {
     last_layout: Option<Value>,
     /// Fading highlights drawn over buffers.
     pub flashes: Vec<Flash>,
+    /// User-defined palettes (`serpis.theme.define`).
+    pub custom_themes: Vec<(String, crate::themes::ThemeSpec)>,
+    /// Bumped on every theme change so buffers can refresh derived colors.
+    pub theme_generation: u64,
 }
 
 impl Editor {
@@ -360,6 +364,8 @@ impl Editor {
             status_cache: Vec::new(),
             last_layout: None,
             flashes: Vec::new(),
+            custom_themes: Vec::new(),
+            theme_generation: 0,
         }
     }
 

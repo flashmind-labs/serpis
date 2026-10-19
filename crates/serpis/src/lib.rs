@@ -23,6 +23,7 @@ pub mod plugins;
 pub mod project;
 pub mod text;
 pub mod theme;
+pub mod themes;
 pub mod ui;
 
 pub use anyhow;
@@ -90,6 +91,12 @@ pub fn bootstrap(ed: &mut Editor) {
     });
     packages::install_base(ed);
     packages::set_scheme(ed, "regular");
+    // Last interactively chosen theme; init.lua may override it.
+    if let Some(t) = Editor::persisted_theme() {
+        if let Err(e) = ed.load_theme(&t) {
+            ed.warn(format!("{e:#}"));
+        }
+    }
 
     // User configuration (may switch the scheme, bind keys, define tools).
     lua::reload(ed);

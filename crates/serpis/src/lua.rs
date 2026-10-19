@@ -605,6 +605,17 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     // Theme.
     let theme = lua.create_table()?;
     theme.set("toggle", lua.create_function(|_, ()| ed(|e| e.call("toggle-theme")))?)?;
+    theme.set("load", lua.create_function(|_, name: String| {
+        ed(|e| e.load_theme(&name).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
+    })?)?;
+    theme.set("list", lua.create_function(|_, ()| ed(|e| e.theme_names()))?)?;
+    theme.set("current", lua.create_function(|_, ()| ed(|e| e.theme.name.clone()))?)?;
+    // Define a palette: {light=bool, bg=, fg=, bg_dim=, bg_inactive=, fg_dim=, border=, blue=,
+    // selection=, cursor=, red=, green=, yellow=, purple=, cyan=, diff_add=, diff_del=, ansi={16 colors}}.
+    theme.set("define", lua.create_function(|lua, (name, spec): (String, LuaValue)| {
+        let spec: crate::themes::ThemeSpec = lua.from_value(spec)?;
+        ed(|e| e.define_theme(&name, spec))
+    })?)?;
     theme.set(
         "set",
         lua.create_function(|_, t: Table| {

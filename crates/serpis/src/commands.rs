@@ -171,9 +171,57 @@ pub fn install(ed: &mut Editor) {
         }
         open_file(ed, path)
     });
-    ed.define_command("toggle-theme", "Switch between dark and light themes.", o, |ed, _| {
-        ed.theme = if ed.theme.dark { crate::theme::Theme::light() } else { crate::theme::Theme::dark() };
-        ed.theme.apply(&ed.ctx);
+    ed.define_command("toggle-theme", "Switch to the light/dark counterpart of the current theme.", o, |ed, _| {
+        let target = crate::themes::counterpart(&ed.theme.name);
+        let target = if ed.theme_names().contains(&target) { target } else if ed.theme.dark { "serpis-light".into() } else { "serpis-dark".into() };
+        ed.load_theme(&target)?;
+        ed.persist_theme(&target);
+        ed.message(format!("Theme: {target}"));
+        Ok(())
+    });
+    ed.define_command("select-theme", "Choose a theme with live preview (remembered across restarts).", o, |ed, a| {
+        if let Some(name) = a.str(0) {
+            ed.load_theme(name)?;
+            ed.persist_theme(name);
+            return Ok(());
+        }
+        let original = ed.theme.name.clone();
+        let cands = ed
+            .theme_names()
+            .into_iter()
+            .map(|n| {
+                let detail = if n == original { "current" } else { "" };
+                Candidate::new(n).detail(detail)
+            })
+            .collect();
+        ed.completing_read("Theme: ", cands, true, |ed, c, _| {
+            if let Some(c) = c {
+                if let Err(e) = ed.load_theme(&c.value) {
+                    ed.error(format!("{e:#}"));
+                    return;
+                }
+                ed.persist_theme(&c.value);
+                ed.message(format!("Theme: {}", c.value));
+            }
+        });
+        let restore = original.clone();
+        ed.minibuffer_preview(
+            Some(std::rc::Rc::new(|ed: &mut Editor, c: Option<&Candidate>| {
+                if let Some(c) = c {
+                    let _ = ed.load_theme(&c.value);
+                }
+            })),
+            Some(Box::new(move |ed: &mut Editor| {
+                let _ = ed.load_theme(&restore);
+            })),
+            true,
+        );
+        // Start on the current theme rather than the first entry.
+        if let Some(mb) = &mut ed.minibuffer {
+            if let Some(i) = mb.filtered.iter().position(|(ci, _)| mb.candidates[*ci].value == original) {
+                mb.selected = i;
+            }
+        }
         Ok(())
     });
     ed.define_command("text-scale-increase", "Increase font size.", o, |ed, _| {
@@ -182,7 +230,7 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("text-scale-reset", "Reset font sizes to the theme defaults.", o, |ed, _| {
-        let d = if ed.theme.dark { crate::theme::Theme::dark() } else { crate::theme::Theme::light() };
+        let d = crate::theme::Theme::default();
         ed.theme.font_size = d.font_size;
         ed.theme.mono_size = d.mono_size;
         Ok(())

@@ -34,6 +34,7 @@ pub enum Face {
 
 #[derive(Debug, Clone)]
 pub struct Theme {
+    pub name: String,
     pub dark: bool,
     pub bg: Color32,
     pub bg_alt: Color32,
@@ -55,6 +56,10 @@ pub struct Theme {
     pub cyan: Color32,
     pub diff_add_bg: Color32,
     pub diff_del_bg: Color32,
+    pub diff_add_fg: Color32,
+    pub diff_del_fg: Color32,
+    /// Terminal ANSI colors 0-15.
+    pub ansi: [Color32; 16],
     pub user_bg: Color32,
     pub tool_bg: Color32,
     pub font_size: f32,
@@ -71,6 +76,7 @@ impl Default for Theme {
 impl Theme {
     pub fn dark() -> Self {
         Theme {
+            name: "serpis-dark".into(),
             dark: true,
             bg: Color32::from_rgb(0x16, 0x17, 0x1d),
             bg_alt: Color32::from_rgb(0x1c, 0x1d, 0x25),
@@ -92,6 +98,9 @@ impl Theme {
             cyan: Color32::from_rgb(0x7d, 0xcf, 0xff),
             diff_add_bg: Color32::from_rgba_unmultiplied(0x9e, 0xce, 0x6a, 0x22),
             diff_del_bg: Color32::from_rgba_unmultiplied(0xf7, 0x76, 0x8e, 0x22),
+            diff_add_fg: Color32::from_rgb(0x9e, 0xce, 0x6a),
+            diff_del_fg: Color32::from_rgb(0xf7, 0x76, 0x8e),
+            ansi: [Color32::from_rgb(0x15, 0x16, 0x1e), Color32::from_rgb(0xf7, 0x76, 0x8e), Color32::from_rgb(0x9e, 0xce, 0x6a), Color32::from_rgb(0xe0, 0xaf, 0x68), Color32::from_rgb(0x7a, 0xa2, 0xf7), Color32::from_rgb(0xbb, 0x9a, 0xf7), Color32::from_rgb(0x7d, 0xcf, 0xff), Color32::from_rgb(0xa9, 0xb1, 0xd6), Color32::from_rgb(0x41, 0x48, 0x68), Color32::from_rgb(0xff, 0x89, 0x9d), Color32::from_rgb(0x9f, 0xe0, 0x44), Color32::from_rgb(0xfa, 0xba, 0x4a), Color32::from_rgb(0x8d, 0xb0, 0xff), Color32::from_rgb(0xc7, 0xa9, 0xff), Color32::from_rgb(0xa4, 0xda, 0xff), Color32::from_rgb(0xc0, 0xca, 0xf5)],
             user_bg: Color32::from_rgb(0x22, 0x24, 0x33),
             tool_bg: Color32::from_rgb(0x1b, 0x1c, 0x24),
             font_size: 14.5,
@@ -102,6 +111,7 @@ impl Theme {
 
     pub fn light() -> Self {
         Theme {
+            name: "serpis-light".into(),
             dark: false,
             bg: Color32::from_rgb(0xfa, 0xfa, 0xfb),
             bg_alt: Color32::from_rgb(0xf1, 0xf2, 0xf5),
@@ -123,6 +133,9 @@ impl Theme {
             cyan: Color32::from_rgb(0x0b, 0x7a, 0x9a),
             diff_add_bg: Color32::from_rgba_unmultiplied(0x38, 0x9a, 0x26, 0x24),
             diff_del_bg: Color32::from_rgba_unmultiplied(0xc4, 0x32, 0x4e, 0x22),
+            diff_add_fg: Color32::from_rgb(0x38, 0x7a, 0x26),
+            diff_del_fg: Color32::from_rgb(0xc4, 0x32, 0x4e),
+            ansi: [Color32::from_rgb(0xe9, 0xe9, 0xed), Color32::from_rgb(0xc4, 0x32, 0x4e), Color32::from_rgb(0x38, 0x7a, 0x26), Color32::from_rgb(0x9a, 0x6a, 0x00), Color32::from_rgb(0x2f, 0x5f, 0xc4), Color32::from_rgb(0x7a, 0x4c, 0xc4), Color32::from_rgb(0x0b, 0x7a, 0x9a), Color32::from_rgb(0x5c, 0x61, 0x73), Color32::from_rgb(0xa0, 0xa4, 0xb2), Color32::from_rgb(0xd6, 0x45, 0x5f), Color32::from_rgb(0x4a, 0x8f, 0x36), Color32::from_rgb(0xb0, 0x7d, 0x0a), Color32::from_rgb(0x41, 0x70, 0xd6), Color32::from_rgb(0x8c, 0x5e, 0xd6), Color32::from_rgb(0x1a, 0x8c, 0xad), Color32::from_rgb(0x24, 0x27, 0x33)],
             user_bg: Color32::from_rgb(0xec, 0xee, 0xf8),
             tool_bg: Color32::from_rgb(0xf4, 0xf5, 0xf8),
             font_size: 14.5,
@@ -157,8 +170,8 @@ impl Theme {
             Face::ToolOutput => (self.mono(), self.fg_dim, t),
             Face::ToolError => (self.mono(), self.red, t),
             Face::ToolOk => (self.mono(), self.green, t),
-            Face::DiffAdd => (self.mono(), self.green, self.diff_add_bg),
-            Face::DiffDel => (self.mono(), self.red, self.diff_del_bg),
+            Face::DiffAdd => (self.mono(), self.diff_add_fg, self.diff_add_bg),
+            Face::DiffDel => (self.mono(), self.diff_del_fg, self.diff_del_bg),
             Face::DiffContext => (self.mono(), self.fg_faint, t),
             Face::DiffHunk => (self.mono(), self.purple, t),
             Face::Error => (self.prop(), self.red, t),

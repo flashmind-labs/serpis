@@ -55,6 +55,8 @@ pub struct TerminalBuffer {
     out: Vec<u8>,
     title: String,
     cwd: std::path::PathBuf,
+    /// Theme generation whose colors were applied to the VT engine.
+    theme_gen: Option<u64>,
 }
 
 fn rgb(c: RgbColor) -> Color32 {
@@ -170,6 +172,7 @@ impl TerminalBuffer {
             out: Vec::new(),
             title: String::new(),
             cwd: ed.cwd.clone(),
+            theme_gen: None,
         })
     }
 
@@ -486,6 +489,20 @@ impl Buffer for TerminalBuffer {
             }
         }
 
+        // Theme colors become the terminal's defaults (apps can still override via OSC).
+        if self.theme_gen != Some(ed.theme_generation) {
+            self.theme_gen = Some(ed.theme_generation);
+            let c = |c: egui::Color32| RgbColor { r: c.r(), g: c.g(), b: c.b() };
+            if let Ok(mut pal) = self.term.default_color_palette() {
+                for (i, a) in theme.ansi.iter().enumerate() {
+                    pal.0[i] = c(*a);
+                }
+                let _ = self.term.set_default_color_palette(Some(pal));
+            }
+            let _ = self.term.set_default_fg_color(Some(c(theme.fg)));
+            let _ = self.term.set_default_bg_color(Some(c(theme.bg_alt)));
+            let _ = self.term.set_default_cursor_color(Some(c(theme.cursor)));
+        }
         let painter = ui.painter_at(rect);
         let origin = rect.min + Vec2::splat(PAD);
         self.origin = origin;
@@ -493,7 +510,7 @@ impl Buffer for TerminalBuffer {
         let colors = snapshot.colors().ok();
         let default_bg = colors.as_ref().map(|c| rgb(c.background)).unwrap_or(theme.bg);
         let default_fg = colors.as_ref().map(|c| rgb(c.foreground)).unwrap_or(theme.fg);
-        let bg = if theme.dark { theme.bg } else { default_bg };
+        let bg = default_bg;
         painter.rect_filled(rect, 0.0, bg);
         let Ok(mut row_iter) = self.rows_it.update(&snapshot) else { return };
         let mut y = origin.y;
