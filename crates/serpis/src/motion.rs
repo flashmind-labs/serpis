@@ -166,7 +166,8 @@ pub fn emacs_backward_word(s: &dyn TextSurface, p: Pos) -> Pos {
 }
 
 pub fn line_first_nonblank(s: &dyn TextSurface, line: usize) -> Pos {
-    let col = chars(s, line).iter().take_while(|c| c.is_whitespace()).count();
+    let start = s.text_start(line);
+    let col = start + chars(s, line).iter().skip(start).take_while(|c| c.is_whitespace()).count();
     Pos::new(line, col)
 }
 

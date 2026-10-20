@@ -31,7 +31,10 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 
 `set-keybinding-scheme` switches to `emacs` or `vim` (or call `serpis.keys.scheme("vim")` in
 `init.lua`). Vim works everywhere: in the chat transcript and prompt, in text buffers, and in
-terminals, where normal state navigates the scrollback. `SPC` is the leader and `C-w` the window prefix.
+terminals, where normal state navigates the scrollback and edits the command line after the prompt
+(`dw`, `ciw`, `A`, `p`, ...): edits are replayed to the program as keys, so they work in zsh, bash or
+Claude Code's prompt. zsh gets OSC 133 prompt marks automatically; other shells fall back to
+`terminal-prompt-regexp`. `SPC` is the leader and `C-w` the window prefix.
 Windows can also be split, closed and resized with the mouse (header buttons, draggable dividers).
 
 ## Extend

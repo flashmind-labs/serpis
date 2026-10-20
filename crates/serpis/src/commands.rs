@@ -67,7 +67,8 @@ fn repeat(n: usize, mut p: Pos, f: impl Fn(Pos) -> Pos) -> Pos {
 }
 
 /// Delete `from..to` on the focused surface, saving the text to the kill ring.
-pub fn kill(ed: &mut Editor, from: Pos, to: Pos, save: bool) {
+/// Delete `from..to` and return the text actually removed (surfaces may clamp the range).
+pub fn kill(ed: &mut Editor, from: Pos, to: Pos, save: bool) -> Option<String> {
     let text = ed
         .with_surface(|s, _| {
             let (a, b) = ordered(from, to);
@@ -80,9 +81,10 @@ pub fn kill(ed: &mut Editor, from: Pos, to: Pos, save: bool) {
             Some(t)
         })
         .flatten();
-    if let Some(t) = text.filter(|t| !t.is_empty() && save) {
-        ed.copy_to_clipboard(&t);
+    if let Some(t) = text.as_ref().filter(|t| !t.is_empty() && save) {
+        ed.copy_to_clipboard(t);
     }
+    text
 }
 
 fn current_chat(ed: &mut Editor) -> Option<BufferId> {

@@ -4,17 +4,23 @@
 //! Unbound keys are encoded by libghostty's key encoder (honouring application cursor mode,
 //! the Kitty keyboard protocol, ...). The scrollback is exposed as a [`TextSurface`]
 //! ("copy mode"), so vim normal state, search and yank work on terminal output.
+//!
+//! On the live input line (the shell's command line, or a full-screen app's prompt row such as
+//! Claude Code's) the surface is editable: motions move the copy cursor locally, and edits are replayed to the
+//! program as cursor keys, backspaces and pastes, each step confirmed by the echoed cursor.
 
 use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
 use libghostty_vt::key::{self, Key as GKey};
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
-use libghostty_vt::style::RgbColor;
+use libghostty_vt::screen::{CellSemanticContent, CellWide, Screen};
+use libghostty_vt::style::{RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport, Terminal};
 
 use crate::buffer::{Buffer, Modeline};
@@ -25,6 +31,10 @@ use crate::text::{Pos, TextSurface, char_len, ordered};
 
 const TERM: &str = "xterm-256color";
 const PAD: f32 = 6.0;
+/// How long to wait for the program to echo an editing key before giving up on it.
+const ECHO_TIMEOUT: Duration = Duration::from_millis(400);
+/// Fallback prompt detection when the shell doesn't mark prompts with OSC 133.
+pub const DEFAULT_PROMPT_REGEXP: &str = "^[^#$%>λ❯→➜]{0,60}[#$%>λ❯→➜]+[ \\x{a0}]*";
 
 enum PtyMsg {
     Data(Vec<u8>),
@@ -57,13 +67,43 @@ pub struct TerminalBuffer {
     cwd: std::path::PathBuf,
     /// Theme generation whose colors were applied to the VT engine.
     theme_gen: Option<u64>,
+    /// The PTY closed while an edit was waiting for echo; `poll` reports it.
+    exit_seen: bool,
+    prompt_re: Option<regex::Regex>,
+}
+
+/// The editable input on the terminal cursor's logical line (soft-wrapped rows included).
+#[derive(Debug, Clone, Copy)]
+struct Input {
+    /// First input character, just past the prompt.
+    start: Pos,
+    /// Just past the last typed character (excludes a trailing autosuggestion).
+    end: Pos,
+    first_line: usize,
+    last_line: usize,
 }
 
 fn rgb(c: RgbColor) -> Color32 {
     Color32::from_rgb(c.r, c.g, c.b)
 }
 
-fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16) -> anyhow::Result<(OwnedFd, nix::unistd::Pid)> {
+/// Write the shell integration scripts to a per-user temp dir; returns the dir.
+fn install_shell_integration() -> Option<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("serpis-shell-{}", unsafe { nix::libc::getuid() }));
+    std::fs::create_dir_all(dir.join("zsh")).ok()?;
+    for (path, body) in [
+        ("zsh/.zshenv", include_str!("../../shell/zsh/.zshenv")),
+        ("serpis.zsh", include_str!("../../shell/serpis.zsh")),
+    ] {
+        let p = dir.join(path);
+        if std::fs::read_to_string(&p).ok().as_deref() != Some(body) {
+            std::fs::write(&p, body).ok()?;
+        }
+    }
+    Some(dir)
+}
+
+fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -> anyhow::Result<(OwnedFd, nix::unistd::Pid)> {
     use nix::pty::{ForkptyResult, Winsize, forkpty};
     let ws = Winsize {
         ws_row: rows,
@@ -84,6 +124,15 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16) -> anyhow::Result<(O
     env.push(std::ffi::CString::new(format!("TERM={TERM}"))?);
     env.push(std::ffi::CString::new("COLORTERM=truecolor")?);
     env.push(std::ffi::CString::new("TERM_PROGRAM=serpis")?);
+    // zsh reads $ZDOTDIR/.zshenv first; ours restores ZDOTDIR and loads the prompt marks.
+    if let Some(dir) = (integration && base == "zsh").then(install_shell_integration).flatten() {
+        env.retain(|e| !e.as_bytes().starts_with(b"ZDOTDIR="));
+        if let Some(z) = std::env::var_os("ZDOTDIR") {
+            env.push(std::ffi::CString::new(format!("SERPIS_ZDOTDIR={}", z.to_string_lossy()))?);
+        }
+        env.push(std::ffi::CString::new(format!("ZDOTDIR={}", dir.join("zsh").display()))?);
+        env.push(std::ffi::CString::new(format!("SERPIS_SHELL_DIR={}", dir.display()))?);
+    }
     // SAFETY: the child only calls async-signal-safe functions (chdir, execve, _exit).
     match unsafe { forkpty(&ws, None)? } {
         ForkptyResult::Child => {
@@ -100,7 +149,8 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16) -> anyhow::Result<(O
 impl TerminalBuffer {
     pub fn new(ed: &mut Editor) -> anyhow::Result<Self> {
         let (cols, rows) = (100u16, 30u16);
-        let (master, child) = spawn_shell(&ed.cwd, cols, rows)?;
+        let integration = ed.var("terminal-shell-integration").and_then(serde_json::Value::as_bool).unwrap_or(true);
+        let (master, child) = spawn_shell(&ed.cwd, cols, rows, integration)?;
         let master = Arc::new(master);
         let reader = nix::unistd::dup(master.as_raw_fd())?;
         let (tx, rx) = mpsc::channel();
@@ -173,6 +223,8 @@ impl TerminalBuffer {
             title: String::new(),
             cwd: ed.cwd.clone(),
             theme_gen: None,
+            exit_seen: false,
+            prompt_re: regex::Regex::new(&ed.var_str("terminal-prompt-regexp").unwrap_or_else(|| DEFAULT_PROMPT_REGEXP.into())).ok(),
         })
     }
 
@@ -193,6 +245,10 @@ impl TerminalBuffer {
 
     pub fn paste(&mut self, text: &str) {
         self.exit_copy_mode();
+        self.paste_raw(text);
+    }
+
+    fn paste_raw(&self, text: &str) {
         let bracketed = self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
         let mut data = Vec::new();
         if bracketed {
@@ -259,6 +315,13 @@ impl TerminalBuffer {
 
     pub fn exit_copy_mode(&mut self) {
         if self.copy_mode {
+            // Leaving normal state on the input line: insert where the copy cursor is.
+            if let Some(inp) = self.input() {
+                if (inp.first_line..=inp.last_line).contains(&self.cursor.line) {
+                    let target = self.cursor.clamp(inp.start, inp.end);
+                    self.drive_to(target);
+                }
+            }
             self.copy_mode = false;
             self.anchor = None;
             self.term.scroll_viewport(ScrollViewport::Bottom);
@@ -278,29 +341,194 @@ impl TerminalBuffer {
     fn lines(&mut self) -> &Vec<String> {
         if self.text_cache.is_none() {
             let total = self.term.total_rows().unwrap_or(0);
-            let mut out = Vec::with_capacity(total);
-            let mut buf = ['\0'; 16];
-            for y in 0..total {
-                let mut s = String::new();
-                for x in 0..self.cols {
-                    let pt = Point::Screen(PointCoordinate { x, y: y as u32 });
-                    match self.term.grid_ref(pt) {
-                        Ok(r) => {
-                            let n = r.graphemes(&mut buf).unwrap_or(0);
-                            if n == 0 {
-                                s.push(' ');
-                            } else {
-                                s.extend(&buf[..n]);
-                            }
-                        }
-                        Err(_) => s.push(' '),
-                    }
-                }
-                out.push(s.trim_end().to_string());
-            }
+            let out = (0..total).map(|y| self.row_text(y).trim_end().to_string()).collect();
             self.text_cache = Some(out);
         }
         self.text_cache.as_ref().unwrap()
+    }
+
+    /// One screen row as text, one char per cell (blank and spacer cells are spaces).
+    fn row_text(&self, y: usize) -> String {
+        let mut buf = ['\0'; 16];
+        let mut s = String::new();
+        for x in 0..self.cols {
+            match self.term.grid_ref(Self::point(Pos::new(y, x as usize))) {
+                Ok(r) => match r.graphemes(&mut buf).unwrap_or(0) {
+                    0 => s.push(' '),
+                    n => s.extend(&buf[..n]),
+                },
+                Err(_) => s.push(' '),
+            }
+        }
+        s
+    }
+
+    fn point(p: Pos) -> Point {
+        Point::Screen(PointCoordinate { x: p.col as u16, y: p.line as u32 })
+    }
+
+    /// The terminal cursor in surface coordinates.
+    fn term_cursor(&self) -> Pos {
+        let sb = self.term.scrollback_rows().unwrap_or(0);
+        Pos::new(sb + self.term.cursor_y().unwrap_or(0) as usize, self.term.cursor_x().unwrap_or(0) as usize)
+    }
+
+    /// Feed PTY output until `done` holds or `timeout` passes; returns whether `done` held.
+    fn wait_until(&mut self, timeout: Duration, done: impl Fn(&Self) -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !done(self) {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
+            match self.rx.recv_timeout(left) {
+                Ok(PtyMsg::Data(d)) => {
+                    self.term.vt_write(&d);
+                    self.text_cache = None;
+                }
+                Ok(PtyMsg::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.exit_seen = true;
+                    return false;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => return false,
+            }
+        }
+        true
+    }
+
+    fn send_key(&mut self, name: &str, times: usize) {
+        for _ in 0..times {
+            self.encode(&KeyChord::named(name), None);
+        }
+        self.flush();
+    }
+
+    fn row_wraps(&self, y: usize) -> (bool, bool) {
+        let row = self.term.grid_ref(Self::point(Pos::new(y, 0))).and_then(|r| r.row());
+        row.map(|r| (r.is_wrap_continuation().unwrap_or(false), r.is_wrapped().unwrap_or(false))).unwrap_or((false, false))
+    }
+
+    /// Cells between `a` and `b` (a <= b) across soft-wrapped rows, and whether they are all ASCII
+    /// (then one cell is one character, and one cursor key moves over exactly one cell).
+    fn cell_distance(&self, a: Pos, b: Pos) -> (usize, bool) {
+        let cols = self.cols as usize;
+        let n = (b.line * cols + b.col).saturating_sub(a.line * cols + a.col);
+        let mut ascii = true;
+        let mut buf = ['\0'; 16];
+        let mut p = a;
+        for _ in 0..n {
+            if let Ok(r) = self.term.grid_ref(Self::point(p)) {
+                let k = r.graphemes(&mut buf).unwrap_or(0);
+                let wide = r.cell().and_then(|c| c.wide()).is_ok_and(|w| w != CellWide::Narrow);
+                if wide || k > 1 || (k == 1 && !buf[0].is_ascii()) {
+                    ascii = false;
+                    break;
+                }
+            }
+            p = if p.col + 1 >= cols { Pos::new(p.line + 1, 0) } else { Pos::new(p.line, p.col + 1) };
+        }
+        (n, ascii)
+    }
+
+    /// The live input region on the cursor's line, while the process runs.
+    fn input(&self) -> Option<Input> {
+        if self.exited {
+            return None;
+        }
+        // Full-screen apps edit only on a recognized prompt row (Claude Code's `❯`), so vim or
+        // less never get keys replayed at them.
+        let alt = self.term.active_screen().ok()? == Screen::Alternate;
+        if alt && !self.term.is_cursor_visible().unwrap_or(false) {
+            return None;
+        }
+        let cur = self.term_cursor();
+        let total = self.term.total_rows().ok()?;
+        let mut first = cur.line;
+        while first > 0 && self.row_wraps(first).0 {
+            first -= 1;
+        }
+        let mut last = cur.line;
+        while last + 1 < total && self.row_wraps(last).1 {
+            last += 1;
+        }
+        // Prompt end: past the last OSC 133 prompt cell before the cursor, else the regexp.
+        let mut start = None;
+        let mut p = Pos::new(first, 0);
+        while p < cur {
+            let prompt = self.term.grid_ref(Self::point(p)).and_then(|r| r.cell()).and_then(|c| c.semantic_content());
+            if prompt.is_ok_and(|c| c == CellSemanticContent::Prompt) {
+                start = Some(p);
+            }
+            p = if p.col + 1 >= self.cols as usize { Pos::new(p.line + 1, 0) } else { Pos::new(p.line, p.col + 1) };
+        }
+        let start = match start {
+            Some(p) if p.col + 1 >= self.cols as usize => Pos::new(p.line + 1, 0),
+            Some(p) => Pos::new(p.line, p.col + 1),
+            None => {
+                let text = self.row_text(first);
+                let m = self.prompt_re.as_ref().and_then(|re| re.find(&text)).map(|m| char_len(&text[..m.end()]));
+                if alt && m.is_none() {
+                    return None;
+                }
+                Pos::new(first, m.unwrap_or(0))
+            }
+        };
+        let start = start.min(cur);
+        let last_text = self.row_text(last);
+        let mut end = Pos::new(last, char_len(last_text.trim_end())).max(cur);
+        if end > cur && self.is_suggestion(cur, end) {
+            end = cur;
+        }
+        Some(Input { start, end, first_line: first, last_line: last })
+    }
+
+    /// Whether `from..to` is a greyed-out autosuggestion (zsh-autosuggestions, fish): one dim,
+    /// unsaturated color run that differs from the typed text before it. Moving right into it
+    /// would accept it.
+    fn is_suggestion(&self, from: Pos, to: Pos) -> bool {
+        let style = |p: Pos| self.term.grid_ref(Self::point(p)).and_then(|r| r.style()).ok();
+        let grey = |st: &libghostty_vt::style::Style| {
+            st.faint
+                || match st.fg_color {
+                    StyleColor::Palette(i) => i.0 == 8,
+                    StyleColor::Rgb(c) => {
+                        let (mx, mn) = (c.r.max(c.g).max(c.b), c.r.min(c.g).min(c.b));
+                        mx < 192 && mx - mn < 51
+                    }
+                    StyleColor::None => false,
+                }
+        };
+        let Some(first) = style(from) else { return false };
+        if !grey(&first) || from.col == 0 || style(Pos::new(from.line, from.col - 1)).is_some_and(|b| b.fg_color == first.fg_color && b.faint == first.faint) {
+            return false;
+        }
+        let mut p = from;
+        while p < to {
+            if style(p).is_none_or(|st| st.fg_color != first.fg_color || st.faint != first.faint) && self.term.grid_ref(Self::point(p)).and_then(|r| r.cell()).and_then(|c| c.has_text()).unwrap_or(false) {
+                return false;
+            }
+            p = if p.col + 1 >= self.cols as usize { Pos::new(p.line + 1, 0) } else { Pos::new(p.line, p.col + 1) };
+        }
+        true
+    }
+
+    /// Move the program's cursor to `target` with arrow keys, confirming each step by its echo.
+    /// Runs of ASCII cells go in one batch; anything else one key at a time.
+    fn drive_to(&mut self, target: Pos) -> bool {
+        loop {
+            let cur = self.term_cursor();
+            if cur == target {
+                return true;
+            }
+            let fwd = target > cur;
+            let (a, b) = ordered(cur, target);
+            let (n, ascii) = self.cell_distance(a, b);
+            let n = if ascii { n.max(1) } else { 1 };
+            self.send_key(if fwd { "right" } else { "left" }, n);
+            self.wait_until(ECHO_TIMEOUT, |t| t.term_cursor() == target);
+            let now = self.term_cursor();
+            let progressed = if fwd { now > cur && now <= target } else { now < cur && now >= target };
+            if !progressed {
+                return now == target;
+            }
+        }
     }
 
     fn viewport_top(&self) -> usize {
@@ -425,17 +653,16 @@ impl Buffer for TerminalBuffer {
                     self.term.vt_write(&d);
                     got = true;
                 }
-                PtyMsg::Exit => {
-                    if !self.exited {
-                        self.exited = true;
-                        let pid = self.child;
-                        std::thread::spawn(move || {
-                            let _ = nix::sys::wait::waitpid(pid, None);
-                        });
-                        ed.run_hook("terminal-exited", &serde_json::Value::Null);
-                    }
-                }
+                PtyMsg::Exit => self.exit_seen = true,
             }
+        }
+        if self.exit_seen && !self.exited {
+            self.exited = true;
+            let pid = self.child;
+            std::thread::spawn(move || {
+                let _ = nix::sys::wait::waitpid(pid, None);
+            });
+            ed.run_hook("terminal-exited", &serde_json::Value::Null);
         }
         if got {
             self.text_cache = None;
@@ -709,12 +936,13 @@ impl TextSurface for TerminalBuffer {
         self.text_cache.as_ref().map(Vec::len).unwrap_or_else(|| self.term.total_rows().unwrap_or(0)).max(1)
     }
     fn line(&self, i: usize) -> String {
-        // `lines()` needs `&mut self` to fill the cache; callers go through `surface()` which
-        // primes it via `cursor()`/`set_cursor()`.
-        self.text_cache.as_ref().and_then(|c| c.get(i).cloned()).unwrap_or_default()
+        match &self.text_cache {
+            Some(c) => c.get(i).cloned().unwrap_or_default(),
+            None => self.row_text(i).trim_end().to_string(),
+        }
     }
     fn cursor(&self) -> Pos {
-        self.cursor
+        if self.copy_mode { self.cursor } else { self.term_cursor() }
     }
     fn set_cursor(&mut self, p: Pos) {
         self.enter_copy_mode();
@@ -750,6 +978,78 @@ impl TextSurface for TerminalBuffer {
     }
     fn reveal_cursor(&mut self) {
         self.scroll_cursor_into_view();
+    }
+    /// The live input line is editable; so is the end of the line above it, so linewise
+    /// operators whose range starts at the previous newline still reach the input.
+    fn editable_at(&self, p: Pos) -> bool {
+        self.input().is_some_and(|i| (i.first_line..=i.last_line).contains(&p.line) || (p.line + 1 == i.first_line && p.col >= self.line_len(p.line)))
+    }
+    fn text_start(&self, line: usize) -> usize {
+        self.input().filter(|i| i.start.line == line).map_or(0, |i| i.start.col)
+    }
+    fn insert(&mut self, at: Pos, text: &str) -> Pos {
+        let Some(inp) = self.input() else { return at };
+        let at = at.clamp(inp.start, inp.end);
+        if !text.is_empty() && self.drive_to(at) {
+            let before = self.term_cursor();
+            if self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false) {
+                self.paste_raw(text);
+            } else {
+                for c in text.chars().filter(|c| *c != '\n') {
+                    self.encode(&KeyChord::ch(c), Some(c.to_string()));
+                }
+                self.flush();
+            }
+            let cols = self.cols as usize;
+            let expect = (text.is_ascii() && !text.contains('\n')).then(|| {
+                let i = before.line * cols + before.col + text.len();
+                Pos::new(i / cols, i % cols)
+            });
+            self.wait_until(ECHO_TIMEOUT, |t| expect.map_or(t.term_cursor() != before, |e| t.term_cursor() == e));
+        }
+        self.cursor = self.term_cursor();
+        let _ = self.lines();
+        self.cursor
+    }
+    fn delete(&mut self, from: Pos, to: Pos) -> String {
+        let Some(inp) = self.input() else { return String::new() };
+        let (a, b) = ordered(from, to);
+        let (a, b) = (a.clamp(inp.start, inp.end), b.clamp(inp.start, inp.end));
+        let _ = self.lines();
+        let text = if a < b { self.text_range(a, b) } else { String::new() };
+        if a < b && self.drive_to(b) {
+            // Backspace from the end, stopping on the echoed cursor rather than a key count:
+            // one backspace may remove a whole grapheme.
+            loop {
+                let cur = self.term_cursor();
+                if cur <= a {
+                    break;
+                }
+                let (n, ascii) = self.cell_distance(a, cur);
+                self.send_key("backspace", if ascii { n } else { 1 });
+                self.wait_until(ECHO_TIMEOUT, |t| t.term_cursor() <= a);
+                if self.term_cursor() >= cur {
+                    break;
+                }
+            }
+        }
+        self.cursor = self.term_cursor();
+        let _ = self.lines();
+        text
+    }
+    /// Line editors' undo (readline, zle, Claude Code) is C-_.
+    fn undo(&mut self) -> bool {
+        if self.input().is_none() {
+            return false;
+        }
+        let _ = self.lines();
+        self.write(b"\x1f");
+        if self.wait_until(ECHO_TIMEOUT, |t| t.text_cache.is_none()) {
+            self.wait_until(Duration::from_millis(30), |_| false);
+        }
+        self.cursor = self.term_cursor();
+        let _ = self.lines();
+        true
     }
     fn undo_boundary(&mut self) {
         // Prime the text cache so read-only queries see fresh scrollback.

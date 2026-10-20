@@ -81,6 +81,8 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
+    ed.defvar("terminal-shell-integration", json!(true), "Load serpis's zsh integration in new terminals (OSC 133 prompt marks).");
+    ed.defvar("terminal-prompt-regexp", json!(buffers::terminal::DEFAULT_PROMPT_REGEXP), "Prompt prefix regexp used when the shell doesn't mark prompts (OSC 133).");
 
     minibuffer::install(ed);
     commands::install(ed);

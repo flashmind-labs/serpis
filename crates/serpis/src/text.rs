@@ -82,6 +82,10 @@ pub trait TextSurface {
     }
     /// Start a new undo group (called before each command).
     fn undo_boundary(&mut self) {}
+    /// Column where the user's text starts on `line`: past a terminal prompt, else 0.
+    fn text_start(&self, _line: usize) -> usize {
+        0
+    }
     /// Lines currently on screen.
     fn visible_lines(&self) -> Range<usize>;
     /// Screen rectangle of the character at `p`, if visible. Used by overlays such as jump labels.

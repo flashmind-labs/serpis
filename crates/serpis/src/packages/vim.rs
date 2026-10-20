@@ -239,7 +239,6 @@ fn install_keymaps(ed: &mut Editor) {
     for (k, c) in [("RET", "chat-send"), ("TAB", "chat-toggle-fold"), ("C-c C-c", "chat-abort")] {
         ed.bind("vim-normal:chat", k, c, o);
     }
-    ed.bind("vim-normal:terminal", "p", "yank", o);
 }
 
 fn install_commands(ed: &mut Editor) {
@@ -268,7 +267,7 @@ fn install_commands(ed: &mut Editor) {
     });
     ed.define_command("vim-delete-to-line-start", "Delete from line start to point.", o, |ed, _| {
         if let Some((a, b)) = ed.with_surface(|s, _| (Pos::new(s.cursor().line, 0), s.cursor())) {
-            crate::commands::kill(ed, a, b, false);
+            let _ = crate::commands::kill(ed, a, b, false);
         }
         Ok(())
     });
@@ -515,10 +514,7 @@ fn apply_operator(ed: &mut Editor, vm: &mut Vim, op: char, a: Pos, b: Pos, kind:
             if !editable {
                 return false;
             }
-            let t = if linewise && !text.ends_with('\n') { format!("{text}\n") } else { text };
-            ed.copy_to_clipboard(&t);
-            vm.yank_linewise = linewise;
-            if op == 'c' && linewise {
+            let killed = if op == 'c' && linewise {
                 // `cc` keeps an empty line to type on.
                 let (s0, e0) = ed
                     .with_surface(|s, _| {
@@ -527,9 +523,14 @@ fn apply_operator(ed: &mut Editor, vm: &mut Vim, op: char, a: Pos, b: Pos, kind:
                     })
                     .unwrap();
                 crate::commands::kill(ed, s0, e0, false);
+                text
             } else {
-                crate::commands::kill(ed, start, end, false);
-            }
+                // The surface may clamp the range (a terminal keeps the prompt).
+                crate::commands::kill(ed, start, end, false).unwrap_or(text)
+            };
+            let t = if linewise && !killed.ends_with('\n') { format!("{killed}\n") } else { killed };
+            ed.copy_to_clipboard(&t);
+            vm.yank_linewise = linewise;
             if op == 'c' {
                 enter_insert(ed, None);
             } else if linewise {
@@ -589,8 +590,22 @@ fn paste(ed: &mut Editor, vm: &Vim, after: bool, count: usize) -> bool {
     let Some(text) = ed.clipboard_text() else { return false };
     let id = ed.current_buffer();
     if ed.meta(id).is_some_and(|m| m.major == "terminal") {
-        ed.handle_paste(&text);
-        return false;
+        // On the input line, paste at the cursor; elsewhere, at the program's cursor.
+        let body = text.trim_end_matches('\n').repeat(count);
+        let done = ed.with_surface(|s, _| {
+            let c = s.cursor();
+            if !s.editable_at(c) {
+                return false;
+            }
+            let at = if after && c.col < s.line_len(c.line) { Pos::new(c.line, c.col + 1) } else { c };
+            let end = s.insert(at, &body);
+            s.set_cursor(Pos::new(end.line, end.col.saturating_sub(1)));
+            true
+        });
+        if done != Some(true) {
+            ed.handle_paste(&text);
+        }
+        return done == Some(true);
     }
     let linewise = vm.yank_linewise || text.ends_with('\n');
     ed.with_surface(|s, _| {
