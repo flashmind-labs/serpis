@@ -91,7 +91,6 @@ pub fn install_base(ed: &mut Editor) {
         ("s-]", "other-window"),
         ("s-[", "previous-window"),
         ("s-f", "search-forward"),
-        ("s-g", "search-next"),
         ("s-G", "search-previous"),
         ("s-=", "text-scale-increase"),
         ("s-+", "text-scale-increase"),

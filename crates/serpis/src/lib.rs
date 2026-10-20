@@ -16,6 +16,7 @@ pub mod commands;
 pub mod editor;
 pub mod fonts;
 pub mod git;
+pub mod jump;
 pub mod keymap;
 pub mod layout;
 pub mod workspace;
@@ -109,6 +110,7 @@ pub fn bootstrap(ed: &mut Editor) {
     sidebar::install(ed);
     session_ui::install(ed);
     pickers::install(ed);
+    jump::install(ed);
     ed.define_buffer_kind("chat", o, |ed, p| Ok(Box::new(buffers::chat::ChatBuffer::new(ed, p))));
     ed.define_buffer_kind("terminal", o, |ed, p| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed, p)?)));
     ed.define_buffer_kind("text", o, |_, p| {

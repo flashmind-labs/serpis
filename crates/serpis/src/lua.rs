@@ -726,6 +726,62 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     sb.set("open", lua.create_function(|_, id: u64| ed(|e| e.open_buffer(buffer_id_from_u64(id))))?)?;
     s.set("sidebar", sb)?;
 
+    // Jumps (avy/hop): serpis.jump.run{regex = "...", group = 1 | "first", action = "goto" | "copy"
+    // | function(t) ... end, highlight = bool, all_windows = bool}. A function action gets
+    // {buffer, line, col, end_col, text}.
+    let jump = lua.create_table()?;
+    jump.set("run", lua.create_function(|lua, spec: Table| {
+        let pattern: String = spec.get("regex")?;
+        let re = regex::Regex::new(&pattern).map_err(|e| mlua::Error::runtime(e.to_string()))?;
+        let action = match spec.get::<LuaValue>("action")? {
+            LuaValue::Function(f) => {
+                let l = lua.clone();
+                crate::jump::Action::Custom(std::rc::Rc::new(move |e: &mut Editor, t: &crate::jump::Target| {
+                    let (part, start, end) = (t.part, t.start, t.end);
+                    let text = e
+                        .with_buffer(t.buffer, |b, _| {
+                            let original = b.part();
+                            b.set_part(part);
+                            let text = b.surface().map(|s| s.text_range(start, end));
+                            b.set_part(original);
+                            text
+                        })
+                        .flatten()
+                        .unwrap_or_default();
+                    let arg = json!({"buffer": buffer_id_to_u64(t.buffer), "line": start.line + 1, "col": start.col + 1, "end_col": end.col + 1, "text": text});
+                    call(e, &l, &f, &arg);
+                }))
+            }
+            LuaValue::String(s) if s.to_string_lossy() == "copy" => crate::jump::Action::Copy,
+            _ => crate::jump::Action::Goto,
+        };
+        let mut s = crate::jump::Spec::new(re, action);
+        s.group = match spec.get::<LuaValue>("group")? {
+            LuaValue::Integer(n) => crate::jump::Group::Nth(n.max(0) as usize),
+            LuaValue::String(g) if g.to_string_lossy() == "first" => crate::jump::Group::FirstMatched,
+            _ => crate::jump::Group::Whole,
+        };
+        s.highlight = spec.get::<Option<bool>>("highlight")?.unwrap_or(false);
+        s.all_windows = spec.get::<Option<bool>>("all_windows")?;
+        ed(|e| crate::jump::run(e, s))
+    })?)?;
+    // serpis.jump.labels(): the labels on screen, {label, buffer, line, col, text} (for tests).
+    jump.set("labels", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let Some(j) = &e.jump.active else { return Vec::new() };
+            let (targets, labels, typed) = (j.targets.clone(), j.labels.clone(), j.typed.clone());
+            targets
+                .iter()
+                .zip(labels)
+                .filter(|(_, l)| l.starts_with(&typed))
+                .map(|(t, l)| json!({"label": l, "buffer": buffer_id_to_u64(t.buffer), "line": t.start.line + 1, "col": t.start.col + 1, "part": t.part}))
+                .collect::<Vec<_>>()
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    jump.set("cancel", lua.create_function(|_, ()| ed(crate::jump::cancel))?)?;
+    s.set("jump", jump)?;
+
     // Sessions.
     let sess = lua.create_table()?;
     // serpis.session.list(function(list) ... end): saved sessions, newest first, as

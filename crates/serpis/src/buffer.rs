@@ -78,6 +78,16 @@ pub trait Buffer: Any {
         None
     }
 
+    /// Buffers with several text parts (a chat: transcript, then prompt) expose one at a time
+    /// as their surface. Jumps look at every part; `set_part` switches which one is the surface.
+    fn parts(&self) -> usize {
+        1
+    }
+    fn part(&self) -> usize {
+        0
+    }
+    fn set_part(&mut self, _part: usize) {}
+
     /// All of the buffer's text, for search and scripts (a chat's transcript and prompt, even
     /// though its surface is only the focused part).
     fn full_text(&mut self) -> Option<String> {

@@ -1673,6 +1673,16 @@ impl Buffer for ChatBuffer {
         Some(self.cwd.clone())
     }
 
+    fn parts(&self) -> usize {
+        2
+    }
+    fn part(&self) -> usize {
+        usize::from(self.focus == Focus::Prompt)
+    }
+    fn set_part(&mut self, part: usize) {
+        self.focus = if part == 0 { Focus::Transcript } else { Focus::Prompt };
+    }
+
     fn full_text(&mut self) -> Option<String> {
         let mut t: Vec<String> = self.lines.iter().map(|l| l.text.clone()).collect();
         t.extend(self.prompt.doc.lines.iter().cloned());

@@ -134,6 +134,7 @@ fn initial_state(ed: &Editor, major: &str) -> State {
 }
 
 pub fn enable(ed: &mut Editor) {
+    ed.defvar("vim-g-commands", json!({"w": "jump-word"}), "Commands for g-prefixed keys vim doesn't define itself, e.g. {w = \"jump-word\"} for gw.");
     VIM.with(|v| {
         *v.borrow_mut() = Some(Rc::new(RefCell::new(Vim {
             pending: Pending::default(),
@@ -902,7 +903,14 @@ fn handle(ed: &mut Editor, vm: &mut Vim, st: State, chord: &KeyChord) -> Step {
                         enter_insert(ed, None);
                         Step::Done { change: true }
                     }
-                    _ => Step::Invalid,
+                    // More g-commands come from `vim-g-commands` (gw → jump-word).
+                    other => match ed.var("vim-g-commands").and_then(|m| m.get(other.to_string())).and_then(Value::as_str).map(str::to_string) {
+                        Some(cmd) => {
+                            ed.call(&cmd);
+                            Step::Done { change: false }
+                        }
+                        None => Step::Invalid,
+                    },
                 };
             }
             'z' => {

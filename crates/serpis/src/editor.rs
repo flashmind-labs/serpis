@@ -230,6 +230,8 @@ pub struct Editor {
     pub frame_times: std::collections::VecDeque<f32>,
     /// Where named controls were drawn last frame (`serpis.debug.rect`, for tests).
     pub debug_rects: HashMap<&'static str, Rect>,
+    /// Jump labels on screen (avy/hop), and copies fading out.
+    pub jump: crate::jump::JumpState,
 }
 
 impl Editor {
@@ -302,6 +304,7 @@ impl Editor {
             sessions: Default::default(),
             frame_times: Default::default(),
             debug_rects: HashMap::new(),
+            jump: Default::default(),
         }
     }
 
@@ -937,6 +940,10 @@ impl Editor {
     }
 
     pub fn handle_chord(&mut self, chord: KeyChord) {
+        // Jump labels take keys first, in any buffer (terminals included).
+        if crate::jump::key(self, &chord) {
+            return;
+        }
         if self.describe_key_pending {
             self.pending_keys.push(chord);
             match self.lookup(&self.pending_keys.clone()) {

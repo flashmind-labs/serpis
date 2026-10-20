@@ -59,6 +59,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
         }
     }
     crate::mouse::update_drag(ui, ed);
+    crate::jump::draw(ui, ed);
     for o in &ed.overlays {
         let p = ui.painter();
         p.rect_filled(o.rect, 3.0, o.color);

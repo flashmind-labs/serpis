@@ -119,6 +119,17 @@ sidebar), `new-chat-in-folder`, `new-terminal-in-folder`, `project-add`, or `C-u
 the folders in your home folder; typed paths start from home (`src/app`, no `~/` needed) unless they
 begin with `/`, `~` or `.`; and Browse… opens the system's folder dialog.
 
+## Jumping and copying (avy, hop.nvim, ninja)
+
+`jump-word` (`M-g w`, vim `gw`), `jump-line` (`M-g l`), `jump-char` (`M-g c`), `jump-char-2`
+(`M-g C`) and `jump-pattern` (`M-g /`) label targets in every visible window (text buffers, chat
+transcripts and prompts, terminals) and jump to the one whose label you type; the nearest targets
+get single keys. ninja copies instead of jumping, without moving the cursor: `s-g l` a line,
+`s-g w` a word, `s-g h` a hash, `s-g u` a URL, `s-g q` a quoted string. Settings: `jump-keys`
+(hop's by default; `"abcdefghijklmnopqrstuvwxyz"` for avy's), `jump-all-windows`, `jump-dim`,
+`jump-label-colors`, `jump-single-candidate`, and `vim-g-commands` for vim's `g` keys. Lua:
+`serpis.jump.run{regex = "...", group = 1, action = "goto" | "copy" | function(t) ... end}`.
+
 ## Sessions
 
 Chats save themselves as they go, in pi's session format (JSONL, `~/.serpis/agent/sessions/`),
