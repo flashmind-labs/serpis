@@ -110,6 +110,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::session_ui::save_open(&mut self.ed);
         let ids: Vec<_> = self.ed.buffers.keys().collect();
         for id in ids {
             self.ed.kill_buffer(id);

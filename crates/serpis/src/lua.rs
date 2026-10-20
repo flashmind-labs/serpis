@@ -412,12 +412,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     }))?)?;
     buf.set("set_title", lua.create_function(|_, (id, title): (Option<u64>, Option<String>)| ed(|e| {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
-        if let Some(m) = e.meta_mut(id) {
-            match title.filter(|t| !t.is_empty()) {
-                Some(t) => m.vars.insert("title".into(), json!(t)),
-                None => m.vars.remove("title"),
-            };
-        }
+        e.set_buffer_title(id, title);
     }))?)?;
     buf.set("by_name", lua.create_function(|_, name: String| ed(|e| e.buffer_by_name(&name).map(buffer_id_to_u64)))?)?;
     buf.set("scratch", lua.create_function(|_, ()| ed(|e| buffer_id_to_u64(e.scratch_buffer())))?)?;
@@ -715,12 +710,51 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             Some(crate::sidebar::RowRef::Item(id)) => json!({"kind": "buffer", "id": buffer_id_to_u64(*id)}),
             Some(crate::sidebar::RowRef::Project(p)) => json!({"kind": "project", "path": p.to_string_lossy()}),
             Some(crate::sidebar::RowRef::Worktree(p)) => json!({"kind": "worktree", "path": p.to_string_lossy()}),
+            Some(crate::sidebar::RowRef::Session(p)) => json!({"kind": "session", "path": p.to_string_lossy()}),
             None => Value::Null,
         })?;
         lua.to_value(&v)
     })?)?;
     sb.set("open", lua.create_function(|_, id: u64| ed(|e| e.open_buffer(buffer_id_from_u64(id))))?)?;
     s.set("sidebar", sb)?;
+
+    // Sessions.
+    let sess = lua.create_table()?;
+    // serpis.session.list(function(list) ... end): saved sessions, newest first, as
+    // {path, id, cwd, project, name, title, first_prompt, last_prompt, messages, model, seconds}.
+    sess.set("list", lua.create_function(|lua, f: Function| {
+        let l = lua.clone();
+        ed(|e| crate::session_ui::scan_then(e, false, move |e| {
+            let v: Vec<Value> = e
+                .sessions
+                .list
+                .iter()
+                .map(|i| json!({
+                    "path": i.path.to_string_lossy(), "id": i.id, "cwd": i.cwd.to_string_lossy(),
+                    "project": i.project.as_ref().map(|p| p.to_string_lossy()), "name": i.name, "title": i.title(),
+                    "first_prompt": i.first_prompt, "last_prompt": i.last_prompt, "messages": i.messages, "model": i.model,
+                    "seconds": i.modified.and_then(|t| t.elapsed().ok()).map(|d| d.as_secs()),
+                }))
+                .collect();
+            call(e, &l, &f, &json!(v));
+        }))
+    })?)?;
+    // serpis.session.resume(path, {show = false}?): load a session into a chat; returns its buffer id.
+    sess.set("resume", lua.create_function(|_, (path, opts): (String, Option<Table>)| {
+        let show = opts.and_then(|o| o.get::<bool>("show").ok()).unwrap_or(true);
+        ed(|e| {
+            let p = crate::expand_home(&path);
+            let r = if show { crate::session_ui::resume(e, &p) } else { crate::session_ui::restore(e, &p, false) };
+            r.map(buffer_id_to_u64).map_err(|err| mlua::Error::runtime(format!("{err:#}")))
+        })?
+    })?)?;
+    // serpis.session.of(buffer?): the session file a chat records to.
+    sess.set("of", lua.create_function(|_, id: Option<u64>| ed(|e| {
+        let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+        crate::session_ui::session_of(e, id).map(|p| p.to_string_lossy().into_owned())
+    }))?)?;
+    sess.set("directory", lua.create_function(|_, ()| ed(|e| crate::session_ui::session_root(e).to_string_lossy().into_owned()))?)?;
+    s.set("session", sess)?;
 
     // `serpis.highlight.on_yank(event, opts)`: flash the yanked region, like Neovim's
     // `vim.highlight.on_yank()` (call it from a `text-yanked` hook).
@@ -884,6 +918,8 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
     agent.set("model", lua.create_function(|_, spec: String| ed(|e| e.set_var("agent-model", Value::String(spec))))?)?;
+    // serpis.agent.reload_models(): re-read models.json and auth.json.
+    agent.set("reload_models", lua.create_function(|_, ()| ed(|e| e.registry.reload()))?)?;
     s.set("agent", agent)?;
 
     // Fonts: serpis.font.set({ mono = "Intel One Mono", sans = ..., size = 15, mono_size = 14 }).
@@ -1095,6 +1131,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                         crate::sidebar::RowRef::Item(id) => json!({"kind": "buffer", "id": buffer_id_to_u64(*id)}),
                         crate::sidebar::RowRef::Project(p) => json!({"kind": "project", "path": p.to_string_lossy()}),
                         crate::sidebar::RowRef::Worktree(p) => json!({"kind": "worktree", "path": p.to_string_lossy()}),
+                        crate::sidebar::RowRef::Session(p) => json!({"kind": "session", "path": p.to_string_lossy()}),
                     };
                     o["x"] = json!(r.min.x);
                     o["y"] = json!(r.min.y);

@@ -59,6 +59,8 @@ pub enum RowRef {
     Project(PathBuf),
     Worktree(PathBuf),
     Item(BufferId),
+    /// A saved session no chat has open.
+    Session(PathBuf),
 }
 
 #[derive(Default)]
@@ -152,6 +154,8 @@ pub struct Project {
     pub name: String,
     pub git: bool,
     pub worktrees: Vec<WorktreeGroup>,
+    /// Recent sessions of this project that no chat has open.
+    pub sessions: Vec<crate::session::Info>,
 }
 
 impl Project {
@@ -208,6 +212,20 @@ impl Editor {
             return t.to_string();
         }
         self.buffers.get(id).and_then(|s| s.buf.as_ref()).map(|b| b.title()).unwrap_or_default()
+    }
+
+    /// Set (or with `None`, clear) a buffer's title; a chat also names its session.
+    pub fn set_buffer_title(&mut self, id: BufferId, title: Option<String>) {
+        let title = title.filter(|t| !t.is_empty());
+        if let Some(m) = self.meta_mut(id) {
+            match &title {
+                Some(t) => m.vars.insert("title".into(), json!(t)),
+                None => m.vars.remove("title"),
+            };
+        }
+        if let Some(t) = title {
+            self.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.set_session_name(ed, &t));
+        }
     }
 
     /// The repository around `dir` (cached for a few seconds).
@@ -416,6 +434,8 @@ pub fn projects(ed: &mut Editor) -> Vec<Project> {
     }
     let pinned = roots.len();
     let mut others = Vec::new();
+    let recent = ed.var("sidebar-recent-sessions").and_then(Value::as_u64).unwrap_or(3) as usize;
+    let open: HashSet<PathBuf> = ed.buffers.keys().collect::<Vec<_>>().into_iter().filter_map(|id| crate::session_ui::session_of(ed, id)).collect();
     for it in &all {
         if !kinds.is_empty() && !kinds.contains(&it.kind) {
             continue;
@@ -456,7 +476,8 @@ pub fn projects(ed: &mut Editor) -> Vec<Project> {
         if !show_empty {
             groups.retain(|g| g.main || !g.items.is_empty());
         }
-        out.push(Project { name: dir_name(&root), git: is_git, root: Some(root), worktrees: groups });
+        let sessions = ed.sessions.list.iter().filter(|i| i.project.as_ref() == Some(&root) && !open.contains(&i.path)).take(recent).cloned().collect();
+        out.push(Project { name: dir_name(&root), git: is_git, root: Some(root), worktrees: groups, sessions });
     }
     for it in all {
         let shown = it.project.is_some() && (kinds.is_empty() || kinds.contains(&it.kind));
@@ -470,6 +491,7 @@ pub fn projects(ed: &mut Editor) -> Vec<Project> {
             name: "Other buffers".into(),
             git: false,
             worktrees: vec![WorktreeGroup { path: PathBuf::new(), branch: String::new(), main: true, status: None, items: others }],
+            sessions: Vec::new(),
         });
     }
     out
@@ -650,8 +672,40 @@ fn activate(ed: &mut Editor, split: bool) {
             }
         }
         Some(RowRef::Project(p) | RowRef::Worktree(p)) => toggle_collapsed(ed, p),
+        Some(RowRef::Session(p)) => {
+            let r = if split {
+                crate::session_ui::restore(ed, &p, false).map(|id| {
+                    ed.sidebar.focused = false;
+                    ed.split_window(false);
+                    ed.show_buffer(id);
+                })
+            } else {
+                crate::session_ui::resume(ed, &p).map(|_| ())
+            };
+            if let Err(e) = r {
+                ed.error(format!("{e:#}"));
+            }
+        }
         None => {}
     }
+}
+
+/// Closed sessions matching `query`, best first.
+pub fn search_sessions(ed: &Editor, query: &str) -> Vec<crate::session::Info> {
+    let open: Vec<PathBuf> = ed.buffers.keys().filter_map(|id| crate::session_ui::session_of(ed, id)).collect();
+    let mut scored: Vec<(i64, &crate::session::Info)> = ed
+        .sessions
+        .list
+        .iter()
+        .filter(|i| !open.contains(&i.path))
+        .filter_map(|i| {
+            let project = i.project.as_deref().map(dir_name).unwrap_or_default();
+            let hay = format!("{} {} {project}", i.title(), i.last_prompt.chars().take(200).collect::<String>());
+            crate::minibuffer::fuzzy(query, &hay).map(|(s, _)| (s, i))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.modified.cmp(&a.1.modified)));
+    scored.into_iter().take(30).map(|(_, i)| i.clone()).collect()
 }
 
 fn toggle_collapsed(ed: &mut Editor, p: PathBuf) {
@@ -761,7 +815,6 @@ pub fn add_project(ed: &mut Editor, dir: &Path) {
         ed.persist_state("projects", json!(list));
     }
     ed.sidebar.collapsed.remove(&root);
-    ed.message(format!("Project {s}"));
 }
 
 pub fn remove_project(ed: &mut Editor, root: &Path) {
@@ -878,7 +931,7 @@ pub fn install(ed: &mut Editor) {
                     toggle_collapsed(ed, w);
                 }
             }
-            None => {}
+            Some(RowRef::Session(_)) | None => {}
         }
         Ok(())
     });
@@ -932,15 +985,7 @@ pub fn install(ed: &mut Editor) {
     });
     ed.define_command("buffer-set-title", "Set a buffer's title (params: buffer id, title; prompts without a title).", o, |ed, a| {
         let Some(id) = target_buffer(ed, a) else { return Ok(()) };
-        let set = move |ed: &mut Editor, t: String| {
-            if let Some(m) = ed.meta_mut(id) {
-                if t.is_empty() {
-                    m.vars.remove("title");
-                } else {
-                    m.vars.insert("title".into(), json!(t));
-                }
-            }
-        };
+        let set = move |ed: &mut Editor, t: String| ed.set_buffer_title(id, Some(t));
         match a.str(1) {
             Some(t) => set(ed, t.to_string()),
             None => {
@@ -1030,6 +1075,7 @@ pub fn install(ed: &mut Editor) {
     ed.define_command("project-add", "Always list a project in the sidebar (param: directory; prompts otherwise).", o, |ed, a| {
         if let Some(d) = a.str(0) {
             add_project(ed, &crate::expand_home(d));
+            ed.message(format!("Project {d} added"));
             return Ok(());
         }
         let start = format!("{}/", ed.cwd.parent().unwrap_or(&ed.cwd).display());
@@ -1037,6 +1083,7 @@ pub fn install(ed: &mut Editor) {
             let path = crate::expand_home(&c.map(|c| c.value).unwrap_or(input));
             if path.is_dir() {
                 add_project(ed, &path);
+                ed.message(format!("Project {} added", path.display()));
             } else {
                 ed.error(format!("Not a directory: {}", path.display()));
             }
@@ -1100,6 +1147,7 @@ enum Act {
     Open(BufferId),
     Select(usize),
     Toggle(PathBuf),
+    Resume(PathBuf),
     Run(String, Vec<Value>),
     Focus,
 }
@@ -1121,7 +1169,7 @@ fn project_color(t: &crate::theme::Theme, name: &str) -> Color32 {
     palette[h as usize % palette.len()]
 }
 
-fn fmt_age(d: Duration) -> String {
+pub fn fmt_age(d: Duration) -> String {
     let s = d.as_secs();
     match s {
         0..=59 => format!("{s}s"),
@@ -1275,8 +1323,10 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     child.set_clip_rect(list_rect);
     let projects = if query.is_empty() { projects(ed) } else { Vec::new() };
     let found = if query.is_empty() { Vec::new() } else { search(ed, &query) };
+    let found_sessions = if query.is_empty() { Vec::new() } else { search_sessions(ed, &query) };
     let roots: Vec<PathBuf> = projects.iter().filter(|p| p.git).filter_map(|p| p.root.clone()).collect();
     refresh_git(ed, &roots, false);
+    crate::session_ui::scan_then(ed, false, |_| {});
     let bmenu = ed.var("sidebar-buffer-menu").cloned().unwrap_or(Value::Null);
     let pmenu = ed.var("sidebar-project-menu").cloned().unwrap_or(Value::Null);
     let wmenu = ed.var("sidebar-worktree-menu").cloned().unwrap_or(Value::Null);
@@ -1411,6 +1461,60 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             }
         };
 
+        // A closed session: one line, resumes on click.
+        let session_row = |ui: &mut egui::Ui, i: &crate::session::Info, indent: f32, sub: bool, rows: &mut Vec<RowRef>, acts: &mut Vec<Act>| {
+            let idx = rows.len();
+            rows.push(RowRef::Session(i.path.clone()));
+            let h = if sub { ROW_ITEM } else { 26.0 };
+            let (r, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
+            rects.borrow_mut().push(r);
+            let is_sel = sb_focused && idx == selected;
+            if is_sel && reveal {
+                ui.scroll_to_rect(r, None);
+            }
+            let resp = ui.interact(r, ui.scope_id().with(("sb-session", i.path.to_string_lossy().into_owned())), Sense::click());
+            let p = ui.painter();
+            let card = r.shrink2(egui::vec2(4.0, 1.0));
+            if is_sel || resp.hovered() {
+                p.rect_filled(card, 6, theme.border);
+            }
+            if is_sel {
+                p.rect_stroke(card, 6, Stroke::new(1.0, theme.border_focused), StrokeKind::Inside);
+            }
+            let x = card.left() + 10.0 + indent;
+            let y1 = if sub { card.top() + 12.0 } else { card.center().y };
+            // A clock face.
+            let c = egui::pos2(x + 5.0, y1);
+            p.circle_stroke(c, 4.5, Stroke::new(1.1, theme.fg_faint));
+            p.line_segment([c, c + egui::vec2(0.0, -2.8)], Stroke::new(1.1, theme.fg_faint));
+            p.line_segment([c, c + egui::vec2(2.2, 0.0)], Stroke::new(1.1, theme.fg_faint));
+            let age = i.modified.and_then(|t| t.elapsed().ok()).map(fmt_age).unwrap_or_default();
+            let g = p.layout_no_wrap(age, small.clone(), theme.fg_faint);
+            let rx = card.right() - 8.0 - g.size().x;
+            p.galley(egui::pos2(rx, y1 - g.size().y / 2.0), g, theme.fg_faint);
+            text(p, egui::pos2(x + 16.0, y1), &i.title(), small.clone(), theme.fg_dim, rx - x - 22.0);
+            if sub {
+                let project = i.project.as_deref().map(dir_name).unwrap_or_else(|| dir_name(&i.cwd));
+                text(p, egui::pos2(x + 16.0, card.bottom() - 11.0), &format!("{project} · {} msgs · saved session", i.messages), small.clone(), theme.fg_faint, card.right() - x - 26.0);
+            }
+            let resp = resp.on_hover_text(format!("Resume · {}", i.path.display()));
+            if resp.clicked() {
+                acts.push(Act::Select(idx));
+                acts.push(Act::Resume(i.path.clone()));
+            }
+            let path = i.path.to_string_lossy().into_owned();
+            resp.context_menu(|ui| {
+                if ui.button("Resume").clicked() {
+                    acts.push(Act::Resume(i.path.clone()));
+                    ui.close();
+                }
+                if ui.button("Delete session…").clicked() {
+                    acts.push(Act::Run("session-delete".into(), vec![json!(path)]));
+                    ui.close();
+                }
+            });
+        };
+
         if !query.is_empty() {
             let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), Sense::hover());
             let n = found.len();
@@ -1422,6 +1526,13 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                     _ => project,
                 };
                 item_row(ui, it, 0.0, &mut rows, &mut acts, &mut any_working, Some(sub));
+            }
+            if !found_sessions.is_empty() {
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), Sense::hover());
+                text(ui.painter(), egui::pos2(hr.left() + 10.0, hr.center().y + 2.0), &format!("Saved sessions ({})", found_sessions.len()), small.clone(), theme.fg_faint, w);
+                for i in &found_sessions {
+                    session_row(ui, i, 0.0, true, &mut rows, &mut acts);
+                }
             }
             return;
         }
@@ -1611,6 +1722,13 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                     item_row(ui, it, if show_wt { 22.0 } else { 12.0 }, &mut rows, &mut acts, &mut any_working, None);
                 }
             }
+            if !pr.sessions.is_empty() {
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 20.0), Sense::hover());
+                text(ui.painter(), egui::pos2(hr.left() + 32.0, hr.center().y + 2.0), "Recent sessions", small.clone(), theme.fg_faint, w);
+                for i in &pr.sessions {
+                    session_row(ui, i, 22.0, false, &mut rows, &mut acts);
+                }
+            }
             ui.add_space(6.0);
         }
         if projects.is_empty() {
@@ -1632,6 +1750,11 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             Act::Open(id) => ed.open_buffer(id),
             Act::Select(i) => ed.sidebar.selected = i,
             Act::Toggle(p) => toggle_collapsed(ed, p),
+            Act::Resume(p) => {
+                if let Err(e) = crate::session_ui::resume(ed, &p) {
+                    ed.error(format!("{e:#}"));
+                }
+            }
             Act::Focus => focus(ed),
             Act::Run(cmd, params) => crate::mouse::run_action(ed, (cmd, params)),
         }

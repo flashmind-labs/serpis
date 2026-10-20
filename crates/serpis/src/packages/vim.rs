@@ -236,6 +236,7 @@ fn install_keymaps(ed: &mut Editor) {
         ("<leader> p w", "worktree-switch"),
         ("<leader> a m", "chat-select-model"),
         ("<leader> a t", "chat-cycle-thinking"),
+        ("<leader> a T", "chat-select-thinking"),
         ("<leader> o t", "new-terminal"),
         ("<leader> h k", "describe-key"),
         ("<leader> h f", "describe-command"),

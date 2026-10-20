@@ -59,6 +59,7 @@ pub fn install_base(ed: &mut Editor) {
         ("C-c C-c", "chat-abort"),
         ("C-c C-m", "chat-select-model"),
         ("C-c C-t", "chat-cycle-thinking"),
+        ("C-c C-s", "chat-select-thinking"),
         ("C-c C-l", "chat-clear"),
         ("C-c C-p", "chat-history-previous"),
         ("C-c C-n", "chat-history-next"),

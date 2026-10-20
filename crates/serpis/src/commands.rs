@@ -671,6 +671,29 @@ pub fn install(ed: &mut Editor) {
         ed.message(format!("Thinking: {}", lvl.as_str()));
         Ok(())
     });
+    ed.define_command("chat-select-thinking", "Choose the thinking level from a picker.", o, |ed, _| {
+        let (levels, current) = with_chat(ed, |c, _| {
+            let levels = c.model.as_ref().map(serpis_ai::supported_thinking_levels).unwrap_or_else(|| serpis_ai::ThinkingLevel::ALL.to_vec());
+            (levels, c.thinking)
+        })?;
+        let cands = levels
+            .iter()
+            .map(|l| {
+                let c = Candidate::new(l.as_str());
+                if *l == current { c.detail("current") } else { c }
+            })
+            .collect();
+        ed.completing_read("Thinking: ", cands, true, move |ed, c, _| {
+            let Some(c) = c else { return };
+            let Some(l) = serpis_ai::ThinkingLevel::parse(&c.value) else { return };
+            let Ok(l) = with_chat(ed, |chat, _| {
+                chat.set_thinking(l);
+                l
+            }) else { return };
+            ed.message(format!("Thinking: {}", l.as_str()));
+        });
+        Ok(())
+    });
     ed.define_command("chat-toggle-fold", "Expand or collapse the tool output at point.", o, |ed, _| {
         with_chat(ed, |c, _| {
             c.toggle_fold_at_cursor();

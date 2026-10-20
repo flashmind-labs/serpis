@@ -23,6 +23,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `s-n` / `s-t` | new chat / new terminal (in the current buffer's project) |
 | `s-N` / `s-T` | new chat in a new git worktree / new terminal |
 | `s-b` / `s-e` | toggle the sidebar / search it |
+| `s-r` / `C-c C-r` | resume a saved chat session (`chat-resume`) |
 | `s-\` / `s-\|` | split right / below |
 | `s-]` `s-[` `s-1..9` | move between windows |
 | `s-w` / `s-W` | close window (the buffer stays) / kill buffer |
@@ -95,6 +96,24 @@ serpis.hook.add("buffer-activity-changed", function(e)
 end)
 ```
 
+## Sessions
+
+Chats save themselves as they go, in pi's session format (JSONL, `~/.serpis/agent/sessions/`),
+so serpis resumes pi's sessions and pi resumes serpis's. `chat-resume` (`s-r`, like `/resume`)
+picks from the current project's sessions in `session-directory` and `session-directories` (pi's
+`~/.pi/agent/sessions` by default), newest first, and continues the chosen one in place: new
+messages append to the same file. `C-u s-r` lists every project. `chat-continue` resumes the latest
+session of the project, `session-delete` removes one, and `chat-clear` starts a new one.
+
+Chats left open come back after a restart (`session-restore-on-start`), and the sidebar lists each
+project's latest closed sessions under it (`sidebar-recent-sessions`, click to resume). Its search
+covers saved sessions too. A project you chat in stays listed (`project-remember`).
+Branches and compactions written by pi are followed: the active branch is resumed, with the
+compaction summary in place of what it replaced. `session-save` turns recording off.
+
+From Lua: `serpis.session.list(fn)`, `serpis.session.resume(path, {show})`, `serpis.session.of(buffer)`,
+`serpis.session.directory()`, and the hook `session-resumed` ({buffer, path, id, messages}).
+
 ## Windows and workspaces
 
 Layout works like i3/sway. A window is a view onto a buffer, and closing it (`close-window`, `:q`)
@@ -155,5 +174,5 @@ docs/PLAN.md          design and roadmap
 
 ```sh
 cargo test                 # unit tests
-scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces, sidebar
+scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces, sidebar, sessions
 ```

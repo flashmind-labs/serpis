@@ -27,6 +27,8 @@ pub mod mouse;
 pub mod packages;
 pub mod plugins;
 pub mod project;
+pub mod session;
+pub mod session_ui;
 pub mod sidebar;
 pub mod text;
 pub mod theme;
@@ -101,6 +103,7 @@ pub fn bootstrap(ed: &mut Editor) {
     workspace::install(ed);
     mouse::install(ed);
     sidebar::install(ed);
+    session_ui::install(ed);
     ed.define_buffer_kind("chat", o, |ed, p| Ok(Box::new(buffers::chat::ChatBuffer::new(ed, p))));
     ed.define_buffer_kind("terminal", o, |ed, p| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed, p)?)));
     ed.define_buffer_kind("text", o, |_, p| {
@@ -141,6 +144,7 @@ pub fn bootstrap(ed: &mut Editor) {
     if let Ok(id) = ed.create_buffer("chat", Some("*chat*"), &Value::Null) {
         ed.show_buffer(id);
     }
+    session_ui::restore_open(ed);
     if let Some(script) = std::env::var_os("SERPIS_TEST_SCRIPT") {
         lua::run_file(ed, std::path::Path::new(&script));
     }

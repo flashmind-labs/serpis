@@ -224,6 +224,8 @@ pub struct Editor {
     pub theme_generation: u64,
     /// The project/agent sidebar's state.
     pub sidebar: crate::sidebar::Sidebar,
+    /// Saved chat sessions, as last read.
+    pub sessions: crate::session_ui::Sessions,
 }
 
 impl Editor {
@@ -293,6 +295,7 @@ impl Editor {
             custom_themes: Vec::new(),
             theme_generation: 0,
             sidebar: Default::default(),
+            sessions: Default::default(),
         }
     }
 

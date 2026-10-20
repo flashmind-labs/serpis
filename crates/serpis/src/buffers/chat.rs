@@ -80,6 +80,9 @@ pub struct ChatBuffer {
     pub title: String,
     /// Error of the last run, if it failed.
     last_error: Option<String>,
+    /// Where the conversation is recorded (created with the first prompt).
+    pub session: Option<crate::session::SessionWriter>,
+    session_failed: bool,
 }
 
 const PREVIEW_LINES: usize = 10;
@@ -121,6 +124,8 @@ impl ChatBuffer {
             history_index: None,
             title: String::new(),
             last_error: None,
+            session: None,
+            session_failed: false,
         };
         if chat.model.is_none() {
             chat.entries.push(Entry::Info {
@@ -149,6 +154,7 @@ impl ChatBuffer {
         self.session_id = uuid::Uuid::new_v4().to_string();
         self.title.clear();
         self.last_error = None;
+        self.session = None;
         self.dirty = true;
     }
 
@@ -162,6 +168,11 @@ impl ChatBuffer {
         let levels = self.model.as_ref().map(supported_thinking_levels).unwrap_or_else(|| ThinkingLevel::ALL.to_vec());
         let i = levels.iter().position(|l| *l == self.thinking).map(|i| (i + 1) % levels.len()).unwrap_or(0);
         self.thinking = levels[i];
+    }
+
+    pub fn set_thinking(&mut self, level: ThinkingLevel) {
+        self.thinking = self.model.as_ref().map(|m| clamp_thinking_level(m, level)).unwrap_or(level);
+        self.dirty = true;
     }
 
     /// Send the prompt: start a run, or steer the running one.
@@ -196,6 +207,11 @@ impl ChatBuffer {
             ed.error("No model selected (chat-select-model)");
             return;
         };
+        if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
+            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd));
+        }
+        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
+        self.record(ed, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
         let payload = serde_json::json!({"text": text, "model": format!("{}/{}", model.provider, model.id)});
         ed.run_hook("before-prompt", &payload);
         let mut tools = serpis_agent::builtin_tools();
@@ -379,6 +395,7 @@ impl ChatBuffer {
                     let payload = serde_json::json!({"text": a.text(), "stopReason": format!("{:?}", a.stop_reason)});
                     ed.run_hook("assistant-message", &payload);
                 }
+                self.record(ed, |w| w.message(&m).map(|_| ()));
                 self.history.push(m);
             }
             AgentEvent::ToolStart { id, name, args } => {
@@ -570,6 +587,103 @@ impl ChatBuffer {
 
     fn t_len(&self) -> usize {
         self.lines.len()
+    }
+
+    /// Write to the session file; the first failure is reported, later ones are silent.
+    fn record(&mut self, ed: &mut Editor, f: impl FnOnce(&mut crate::session::SessionWriter) -> std::io::Result<()>) {
+        let Some(w) = self.session.as_mut() else { return };
+        let existed = w.exists();
+        if let Err(e) = f(w) {
+            if !self.session_failed {
+                self.session_failed = true;
+                ed.warn(format!("session {}: {e}", w.path.display()));
+            }
+        }
+        if !existed && w.exists() {
+            // A project you have chatted in stays in the sidebar with its sessions.
+            if ed.var("project-remember").and_then(Value::as_bool).unwrap_or(true) {
+                let cwd = self.cwd.clone();
+                if let Some(root) = ed.project_root_of(&cwd) {
+                    crate::sidebar::add_project(ed, &root);
+                }
+            }
+            crate::session_ui::rescan(ed);
+        }
+    }
+
+    /// Name the session (`session_info`), e.g. after `buffer-set-title`.
+    pub fn set_session_name(&mut self, ed: &mut Editor, name: &str) {
+        if self.session.as_ref().is_some_and(|w| w.exists()) {
+            self.record(ed, |w| w.set_name(name).map(|_| ()));
+        }
+    }
+
+    /// Show a saved conversation and continue it: later messages append to the same file.
+    pub fn restore(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
+        self.abort();
+        self.entries.clear();
+        self.totals = Usage::default();
+        self.history = l.messages.clone();
+        if l.cwd.is_dir() {
+            self.cwd = l.cwd.clone();
+        }
+        if let Some((p, id)) = &l.model {
+            match ed.registry.find(p, id) {
+                Some(m) => self.set_model(m),
+                None => self.entries.push(Entry::Info { text: format!("Model {p}/{id} of this session isn't available; using the current one."), face: Face::Warning }),
+            }
+        }
+        if let Some(t) = l.thinking.as_deref().and_then(ThinkingLevel::parse) {
+            self.thinking = self.model.as_ref().map(|m| clamp_thinking_level(m, t)).unwrap_or(t);
+        }
+        for m in &l.messages {
+            match m {
+                Message::User { content, .. } => {
+                    let text = content
+                        .iter()
+                        .map(|c| match c {
+                            UserContent::Text { text } => text.clone(),
+                            UserContent::Image { mime_type, .. } => format!("[image {mime_type}]"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.prompt_history.push(text.clone());
+                    self.entries.push(Entry::User { text, queued: false });
+                }
+                Message::Assistant(a) => {
+                    add_usage(&mut self.totals, &a.usage);
+                    let failed = matches!(a.stop_reason, StopReason::Error | StopReason::Aborted);
+                    self.entries.push(Entry::Assistant {
+                        blocks: a.content.clone(),
+                        model: a.model.clone(),
+                        streaming: false,
+                        continuation: false,
+                        usage: Some(a.usage.clone()),
+                        error: failed.then(|| a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason))),
+                    });
+                    for tc in a.tool_calls() {
+                        self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, expanded: None, started: None, elapsed: None });
+                    }
+                }
+                Message::ToolResult(r) => {
+                    let id = r.tool_call_id.clone();
+                    if let Some(Entry::Tool { result, .. }) = self.tool_entry(&id) {
+                        *result = Some(r.clone());
+                    }
+                }
+            }
+        }
+        self.title = l.name.clone().unwrap_or_else(|| {
+            let first = self.prompt_history.first().cloned().unwrap_or_default();
+            title_from(&first)
+        });
+        let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| crate::sidebar::fmt_age(d) + " ago").unwrap_or_default();
+        self.entries.push(Entry::Info { text: format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), face: Face::Dim });
+        self.session = Some(crate::session::SessionWriter::resume(l));
+        self.session_failed = false;
+        self.last_error = None;
+        self.view.follow_tail = true;
+        self.dirty = true;
     }
 
     /// What the running agent is doing right now.
