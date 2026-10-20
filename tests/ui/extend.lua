@@ -117,6 +117,29 @@ steps({
     serpis.command.run("max-money", 1.5)
     T.check("limit recorded in the session", serpis.chat.entries(chat, "max-money")[1].limit, 1.5)
     T.check("limit message", last_message(), "Will stop once the session spends more than $1.50")
+    -- The presets command: a list to pick from.
+    serpis.var.set("model-presets", {
+      fast = { model = "mock/m2", label = "M2 fast", thinking = "high" },
+      plain = { model = "mock/m", label = "M plain", thinking = "off" },
+    })
+    serpis.reload()
+    serpis.chat.set_thinking(chat, "off")
+  end,
+  function()
+    serpis.command.run("presets")
+  end,
+  function()
+    local c = d.candidates()
+    T.check("presets lists them in order", #c == 2 and c[1].label .. "|" .. c[2].label, "fast|plain")
+    T.check("with what they switch to", c[1].detail, "M2 fast")
+    T.check("marking the current one", c[2].detail, "M plain  ✓")
+    d.key("Enter")
+  end,
+  function()
+    T.check("picking one switches the chat", serpis.chat.info(chat).model, "mock/m2")
+    T.check("the picker closes", d.minibuffer(), nil)
+    serpis.chat.set_model(chat, "mock/m")
+    serpis.chat.set_thinking(chat, "off")
   end,
   function(go)
     T.check("back on mock/m", serpis.chat.info(chat).model, "mock/m")
