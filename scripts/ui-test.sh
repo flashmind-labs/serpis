@@ -11,11 +11,13 @@ mkdir -p "$tmp/home"
 touch "$tmp/home/.zshrc"
 for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; done
 fail=0
-for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer}"; do
+for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers}"; do
   for name in $t; do
     out="$tmp/$name.out"
+    # Each test starts from fresh state; sessions_restore checks what sessions left behind.
+    state="${name%_restore}"
     SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \
-      SERPIS_CONFIG_DIR="$tmp/cfg" SERPIS_AGENT_DIR="$tmp/agent" HOME="$tmp/home" \
+      SERPIS_CONFIG_DIR="$tmp/cfg-$state" SERPIS_AGENT_DIR="$tmp/agent-$state" HOME="$tmp/home" \
       timeout 60 "$root/target/debug/serpis" >"$tmp/$name.log" 2>&1 || true
     if [[ ! -s "$out" ]]; then echo "FAIL $name (no results; see $tmp/$name.log)"; fail=1; continue; fi
     sed "s/^/[$name] /" "$out"

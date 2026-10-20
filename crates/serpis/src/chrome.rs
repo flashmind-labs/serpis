@@ -190,6 +190,23 @@ pub fn lines(p: &egui::Painter, r: Rect, c: Color32) {
     }
 }
 
+pub fn folder(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.3, c);
+    let top = r.top() + r.height() * 0.18;
+    let tab_w = r.width() * 0.4;
+    p.add(egui::Shape::closed_line(
+        vec![
+            egui::pos2(r.left(), top),
+            egui::pos2(r.left() + tab_w, top),
+            egui::pos2(r.left() + tab_w + r.width() * 0.1, top + r.height() * 0.14),
+            egui::pos2(r.right(), top + r.height() * 0.14),
+            egui::pos2(r.right(), r.bottom() - r.height() * 0.08),
+            egui::pos2(r.left(), r.bottom() - r.height() * 0.08),
+        ],
+        s,
+    ));
+}
+
 pub fn magnifier(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
     p.circle_stroke(c, r, Stroke::new(1.3, color));
     p.line_segment([c + egui::vec2(r * 0.72, r * 0.72), c + egui::vec2(r * 1.5, r * 1.5)], Stroke::new(1.4, color));

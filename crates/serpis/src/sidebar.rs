@@ -112,8 +112,9 @@ pub struct Item {
 }
 
 impl Item {
+    /// The display name (see `Editor::buffer_display_name`).
     pub fn label(&self) -> String {
-        if self.title.is_empty() { crate::chrome::pretty_name(&self.name) } else { self.title.clone() }
+        if self.title.trim().is_empty() { crate::chrome::pretty_name(&self.name) } else { self.title.clone() }
     }
 
     pub fn to_json(&self) -> Value {
@@ -1078,15 +1079,9 @@ pub fn install(ed: &mut Editor) {
             ed.message(format!("Project {d} added"));
             return Ok(());
         }
-        let start = format!("{}/", ed.cwd.parent().unwrap_or(&ed.cwd).display());
-        ed.completing_read_dynamic("Add project: ", &start, crate::commands::file_candidates, |ed, c, input| {
-            let path = crate::expand_home(&c.map(|c| c.value).unwrap_or(input));
-            if path.is_dir() {
-                add_project(ed, &path);
-                ed.message(format!("Project {} added", path.display()));
-            } else {
-                ed.error(format!("Not a directory: {}", path.display()));
-            }
+        ed.read_directory("Add project: ", |ed, path| {
+            add_project(ed, &path);
+            ed.message(format!("Project {} added", crate::pickers::tilde(&path)));
         });
         Ok(())
     });
@@ -1236,7 +1231,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     // Actions: a "New chat" button, then terminal and worktree as icon buttons.
     let act_y = search_r.bottom() + 8.0 * k;
     let bh = (32.0 * k).round();
-    let new_r = Rect::from_min_size(egui::pos2(inner.left(), act_y), egui::vec2(inner.width() - 2.0 * (bh + 4.0 * k), bh));
+    let new_r = Rect::from_min_size(egui::pos2(inner.left(), act_y), egui::vec2(inner.width() - 3.0 * (bh + 4.0 * k), bh));
     let nresp = ui.interact(new_r, ui.scope_id().with("sidebar-new"), Sense::click()).on_hover_text("New chat in this project");
     let p = ui.painter();
     p.rect_filled(new_r, 8.0 * k, if nresp.hovered() { chrome::tint(t.accent, 0.22) } else { chrome::tint(t.accent, 0.13) });
@@ -1253,6 +1248,10 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     let wt_r = Rect::from_min_size(egui::pos2(term_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
     if chrome::ghost_button(ui, wt_r, ui.scope_id().with("sidebar-wt"), t, "New chat in a new worktree (⌘⇧N)", |p, r, c| chrome::branch(p, r.expand(1.0), c)).clicked() {
         acts.push(Act::Run("worktree-new-chat".into(), Vec::new()));
+    }
+    let open_r = Rect::from_min_size(egui::pos2(wt_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
+    if chrome::ghost_button(ui, open_r, ui.scope_id().with("sidebar-open"), t, "Open a folder as a project (⌘⇧O)", |p, r, c| chrome::folder(p, r.expand(1.5), c)).clicked() {
+        acts.push(Act::Run("project-open".into(), Vec::new()));
     }
 
     // The list.
@@ -1608,7 +1607,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         }
         if projects.is_empty() {
             let (er, _) = ui.allocate_exact_size(egui::vec2(w, 40.0 * k), Sense::hover());
-            chrome::text(ui.painter(), egui::pos2(x0 + 4.0, er.center().y), "No projects yet: start a chat or run project-add", small.clone(), t.fg_faint, w - 20.0);
+            chrome::text(ui.painter(), egui::pos2(x0 + 4.0, er.center().y), "No projects yet. Open a folder with ⌘⇧O.", small.clone(), t.fg_faint, w - 20.0);
         }
     });
     if any_working {

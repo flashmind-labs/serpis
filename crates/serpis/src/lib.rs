@@ -26,6 +26,7 @@ pub mod minibuffer;
 pub mod motion;
 pub mod mouse;
 pub mod packages;
+pub mod pickers;
 pub mod plugins;
 pub mod project;
 pub mod session;
@@ -107,6 +108,7 @@ pub fn bootstrap(ed: &mut Editor) {
     mouse::install(ed);
     sidebar::install(ed);
     session_ui::install(ed);
+    pickers::install(ed);
     ed.define_buffer_kind("chat", o, |ed, p| Ok(Box::new(buffers::chat::ChatBuffer::new(ed, p))));
     ed.define_buffer_kind("terminal", o, |ed, p| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed, p)?)));
     ed.define_buffer_kind("text", o, |_, p| {

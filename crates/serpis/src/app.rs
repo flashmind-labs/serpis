@@ -96,7 +96,7 @@ impl eframe::App for App {
         }
         let title = {
             let id = self.ed.current_buffer();
-            self.ed.meta(id).map(|m| format!("{} — serpis", m.name)).unwrap_or_else(|| "serpis".into())
+            if self.ed.meta(id).is_some() { format!("{} — serpis", self.ed.buffer_display_name(id)) } else { "serpis".into() }
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }

@@ -30,7 +30,10 @@ impl Editor {
     /// Kill a buffer as a user action: confirm per `confirm-kill-processes` and the
     /// `kill-buffer-query` hook, then kill.
     pub fn kill_buffer_interactive(&mut self, id: BufferId) {
-        let Some(name) = self.meta(id).map(|m| m.name.clone()) else { return };
+        if self.meta(id).is_none() {
+            return;
+        }
+        let name = self.buffer_display_name(id);
         let status = self.process_status(id);
         let mut ask = self.should_confirm("confirm-kill-processes", &status);
         let process = match &status {
@@ -65,7 +68,7 @@ impl Editor {
         for id in self.buffers.keys().collect::<Vec<_>>() {
             let status = self.process_status(id);
             if self.should_confirm("confirm-quit-processes", &status) {
-                let name = self.meta(id).map(|m| m.name.clone()).unwrap_or_default();
+                let name = self.buffer_display_name(id);
                 running.push(match status {
                     ProcessStatus::Running(p) => format!("{name} ({p})"),
                     _ => name,
@@ -214,11 +217,8 @@ pub fn install(ed: &mut Editor) {
             }
             return Ok(());
         }
-        let cands = ed
-            .buffers
-            .iter()
-            .map(|(id, s)| Candidate::new(s.meta.name.clone()).detail(s.meta.major.clone()).value(buffer_id_to_u64(id).to_string()))
-            .collect();
+        let ids: Vec<BufferId> = ed.buffers.keys().collect();
+        let cands = ids.into_iter().map(|id| ed.buffer_candidate(id)).collect();
         ed.completing_read("Kill buffer: ", cands, true, |ed, c, _| {
             if let Some(c) = c {
                 ed.kill_buffer_interactive(buffer_id_from_u64(c.value.parse().unwrap_or(0)));
@@ -231,14 +231,7 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("switch-to-hidden-buffer", "Show a buffer that no window shows (like i3's scratchpad).", o, |ed, _| {
-        let cands: Vec<Candidate> = ed
-            .hidden_buffers()
-            .into_iter()
-            .map(|id| {
-                let m = &ed.buffers[id].meta;
-                Candidate::new(m.name.clone()).detail(m.major.clone()).value(buffer_id_to_u64(id).to_string())
-            })
-            .collect();
+        let cands: Vec<Candidate> = ed.hidden_buffers().into_iter().map(|id| ed.buffer_candidate(id)).collect();
         if cands.is_empty() {
             ed.message("No hidden buffers");
             return Ok(());

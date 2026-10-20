@@ -80,7 +80,7 @@ impl Editor {
     /// A short label for a dragged node.
     pub fn node_label(&self, r: NodeRef) -> String {
         match r {
-            NodeRef::Window(w) => self.windows.get(w).and_then(|w| self.meta(w.buffer)).map(|m| m.name.clone()).unwrap_or_default(),
+            NodeRef::Window(w) => self.windows.get(w).map(|w| self.buffer_display_name(w.buffer)).unwrap_or_default(),
             NodeRef::Container(_) => {
                 let mut ws = Vec::new();
                 if let Some(n) = self.layout.node(r) {

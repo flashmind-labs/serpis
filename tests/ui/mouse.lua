@@ -33,10 +33,19 @@ end
 -- Run steps one frame-ish apart.
 local queue = {}
 local function step(f) table.insert(queue, f) end
+local tries = 0
 local function run()
   local f = table.remove(queue, 1)
   if not f then return end
-  f()
+  -- A window that was just created may not be drawn yet (no rectangle): try again next frame.
+  local ok, err = pcall(f)
+  if not ok then
+    tries = tries + 1
+    if tries > 20 then error(err) end
+    table.insert(queue, 1, f)
+    return serpis.defer(60, run)
+  end
+  tries = 0
   serpis.defer(60, run)
 end
 -- Press at (x, y), move in a few steps to (tx, ty), release.

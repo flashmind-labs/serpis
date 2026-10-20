@@ -58,6 +58,9 @@ pub struct Minibuffer {
     pub(crate) previewed: Option<Option<String>>,
     /// Typing a candidate's first letter accepts it at once (`y_or_n`).
     pub instant: bool,
+    /// With a dynamic source, typed text wins over an unselected first candidate (file
+    /// paths); pickers that offer named choices turn this off.
+    pub prefer_input: bool,
 }
 
 /// Subsequence fuzzy match; returns a score (higher is better) and matched char positions.
@@ -158,6 +161,7 @@ impl Editor {
             keep_order: false,
             previewed: None,
             instant: false,
+            prefer_input: true,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -188,6 +192,7 @@ impl Editor {
             keep_order: false,
             previewed: None,
             instant: false,
+            prefer_input: true,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -214,7 +219,7 @@ pub fn accept(ed: &mut Editor) {
         return;
     }
     // With dynamic sources (paths), the typed text wins unless a candidate was moved to.
-    let cand = if mb.dynamic.is_some() && mb.selected == 0 && !input.ends_with('/') && cand.as_ref().is_none_or(|c| c.value != input) {
+    let cand = if mb.dynamic.is_some() && mb.prefer_input && mb.selected == 0 && !input.ends_with('/') && cand.as_ref().is_none_or(|c| c.value != input) {
         cand.filter(|c| c.value.ends_with(&input))
     } else {
         cand

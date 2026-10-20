@@ -92,16 +92,7 @@ fn draw_layout(ui: &mut egui::Ui, ed: &mut Editor, body: Rect) {
 /// A short title for a tab or stack entry: the buffer name, or an i3-style summary.
 fn node_title(ed: &Editor, n: &Node) -> String {
     match n {
-        Node::Window(w) => {
-            let id = ed.windows[*w].buffer;
-            let title = ed.buffer_title(id);
-            match ed.meta(id) {
-                Some(m) if m.major == "chat" && !title.is_empty() => title,
-                Some(m) if m.major == "chat" => "New chat".into(),
-                Some(m) => crate::chrome::pretty_name(&m.name),
-                None => String::new(),
-            }
-        }
+        Node::Window(w) => ed.buffer_display_name(ed.windows[*w].buffer),
         Node::Container(c) => {
             let k = match c.kind {
                 Kind::SplitH => "H",
@@ -380,12 +371,9 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         .and_then(|s| s.buf.as_ref())
         .map(|b| (b.modeline(), b.is_modified()))
         .unwrap_or_default();
-    let title = ed.buffer_title(id);
-    let (primary, secondary) = match meta.major.as_str() {
-        "chat" if !title.is_empty() => (title.clone(), String::new()),
-        "chat" => ("New chat".to_string(), String::new()),
-        _ => (crate::chrome::pretty_name(&meta.name), modeline.title.clone()),
-    };
+    // The same name the sidebar and the buffer pickers use.
+    let primary = ed.buffer_display_name(id);
+    let secondary = String::new();
     let place = ed.buffer_directory(id).map(|d| {
         let repo = ed.repo_of(&d);
         let root = repo.as_ref().map(|r| r.main.clone()).or_else(|| crate::project::root(&d)).unwrap_or(d);

@@ -1157,6 +1157,13 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })?;
         lua.to_value(&v)
     })?)?;
+    // The open prompt's visible candidates, best first: {label, detail}.
+    debug.set("candidates", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            e.minibuffer.as_ref().map(|m| m.filtered.iter().map(|(i, _)| json!({"label": m.candidates[*i].label, "detail": m.candidates[*i].detail})).collect::<Vec<_>>()).unwrap_or_default()
+        })?;
+        lua.to_value(&v)
+    })?)?;
     // The open prompt's text, or nil.
     debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
     debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;

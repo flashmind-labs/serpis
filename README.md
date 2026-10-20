@@ -21,6 +21,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `s-P` / `M-x` | run any command |
 | `s-p` | switch buffer |
 | `s-n` / `s-t` | new chat / new terminal (in the current buffer's project) |
+| `s-O` | open a folder as a project (pick a known one, type a path, or Browse… for the system dialog) |
 | `s-N` / `s-T` | new chat in a new git worktree / new terminal |
 | `s-b` / `s-e` | toggle the sidebar / search it |
 | `s-r` / `C-c C-r` | resume a saved chat session (`chat-resume`) |
@@ -101,6 +102,16 @@ serpis.hook.add("buffer-activity-changed", function(e)
   end
 end)
 ```
+
+Buffers show the same name everywhere (sidebar, switcher, tabs, headers, the window title): a
+chat's title, else a readable name like `Chat 2` or `Terminal`. Internal names (`*chat*<2>`) stay
+as stable identifiers for scripts.
+
+Commands that need a folder take it as a parameter when scripted (`serpis.command.run("new-chat",
+"~/src/app")`) and ask when run by hand: `project-open` (`s-O`, also the folder button in the
+sidebar), `new-chat-in-folder`, `new-terminal-in-folder`, `project-add`, or `C-u` before `new-chat`
+/ `new-terminal` in the emacs and vim schemes. The folder picker lists projects you have worked in,
+completes typed paths, and has Browse… for the system's folder dialog.
 
 ## Sessions
 

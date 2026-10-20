@@ -7,7 +7,7 @@ use crate::buffer::{Buffer, BufferId};
 use crate::buffers::chat::{ChatBuffer, Focus};
 use crate::buffers::terminal::TerminalBuffer;
 use crate::buffers::text::TextBuffer;
-use crate::editor::{Args, BUILTIN, Editor, buffer_id_to_u64};
+use crate::editor::{Args, BUILTIN, Editor};
 use crate::minibuffer::Candidate;
 use crate::motion;
 use crate::text::{Pos, TextArea, TextSurface, char_len, ordered};
@@ -273,13 +273,7 @@ pub fn install(ed: &mut Editor) {
         ids.sort_by_key(|id| std::cmp::Reverse(hist.iter().position(|h| h == id).map(|p| p + 1).unwrap_or(0)));
         ids.retain(|id| *id != cur);
         ids.push(cur);
-        let cands = ids
-            .into_iter()
-            .map(|id| {
-                let m = &ed.buffers[id].meta;
-                Candidate::new(m.name.clone()).detail(m.major.clone()).value(buffer_id_to_u64(id).to_string())
-            })
-            .collect();
+        let cands = ids.into_iter().map(|id| ed.buffer_candidate(id)).collect();
         ed.completing_read("Switch to buffer: ", cands, false, |ed, c, input| match c {
             Some(c) => {
                 let id = crate::editor::buffer_id_from_u64(c.value.parse().unwrap_or(0));
@@ -322,14 +316,20 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
-    ed.define_command("new-chat", "Open a new agent chat (param: directory; default per new-buffer-directory).", o, |ed, a| {
-        let dir = a.str(0).map(crate::expand_home).unwrap_or_else(|| ed.new_buffer_directory());
-        ed.new_buffer_in("chat", &dir)?;
+    ed.define_command("new-chat", "Open a new agent chat in the current project. With C-u, choose the folder (scripts pass it as a parameter).", o, |ed, a| {
+        crate::pickers::with_directory(ed, a, "New chat in: ", |ed, dir| {
+            if let Err(e) = ed.new_buffer_in("chat", &dir) {
+                ed.error(format!("{e:#}"));
+            }
+        });
         Ok(())
     });
-    ed.define_command("new-terminal", "Open a new terminal (param: directory; default per new-buffer-directory).", o, |ed, a| {
-        let dir = a.str(0).map(crate::expand_home).unwrap_or_else(|| ed.new_buffer_directory());
-        ed.new_buffer_in("terminal", &dir)?;
+    ed.define_command("new-terminal", "Open a new terminal in the current project. With C-u, choose the folder (scripts pass it as a parameter).", o, |ed, a| {
+        crate::pickers::with_directory(ed, a, "New terminal in: ", |ed, dir| {
+            if let Err(e) = ed.new_buffer_in("terminal", &dir) {
+                ed.error(format!("{e:#}"));
+            }
+        });
         Ok(())
     });
     ed.define_command("new-scratch", "Open a new scratch buffer.", o, |ed, _| {
