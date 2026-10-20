@@ -13,6 +13,7 @@ pub mod buffers;
 pub mod clipboard;
 pub mod commands;
 pub mod editor;
+pub mod fonts;
 pub mod keymap;
 pub mod keys;
 pub mod lua;
@@ -93,6 +94,7 @@ pub fn bootstrap(ed: &mut Editor) {
     });
     packages::install_base(ed);
     packages::set_scheme(ed, "regular");
+    fonts::install(ed);
     // Last interactively chosen theme; init.lua may override it.
     if let Some(t) = Editor::persisted_theme() {
         if let Err(e) = ed.load_theme(&t) {
@@ -103,6 +105,8 @@ pub fn bootstrap(ed: &mut Editor) {
     // User configuration (may switch the scheme, bind keys, define tools).
     lua::reload(ed);
     plugins::reload_all(ed);
+    fonts::apply(ed);
+    fonts::reset_sizes(ed);
     for e in ed.registry.load_errors() {
         ed.warn(e);
     }
@@ -126,37 +130,6 @@ pub fn bootstrap(ed: &mut Editor) {
     if let Some(script) = std::env::var_os("SERPIS_TEST_SCRIPT") {
         lua::run_file(ed, std::path::Path::new(&script));
     }
-}
-
-fn load_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    let candidates_mono = [
-        "/System/Library/Fonts/SFNSMono.ttf",
-        "/System/Library/Fonts/Menlo.ttc",
-        "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    ];
-    let candidates_prop = [
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/usr/share/fonts/truetype/inter/Inter-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ];
-    let user = config_dir().join("fonts");
-    let pick = |name: &str, list: &[&str]| -> Option<Vec<u8>> {
-        let custom = user.join(name);
-        std::iter::once(custom).chain(list.iter().map(PathBuf::from)).find_map(|p| std::fs::read(p).ok())
-    };
-    if let Some(bytes) = pick("mono.ttf", &candidates_mono) {
-        fonts.font_data.insert("serpis-mono".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-        fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "serpis-mono".into());
-    }
-    if let Some(bytes) = pick("sans.ttf", &candidates_prop) {
-        fonts.font_data.insert("serpis-sans".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "serpis-sans".into());
-    }
-    ctx.set_fonts(fonts);
 }
 
 /// Run serpis.
@@ -184,7 +157,6 @@ pub fn run() -> anyhow::Result<()> {
         "serpis",
         options,
         Box::new(move |cc| {
-            load_fonts(&cc.egui_ctx);
             let mut ed = Editor::new(cc.egui_ctx.clone(), handle);
             ed.theme.apply(&cc.egui_ctx);
             bootstrap(&mut ed);

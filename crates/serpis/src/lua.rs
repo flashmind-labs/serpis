@@ -602,6 +602,34 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     agent.set("model", lua.create_function(|_, spec: String| ed(|e| e.set_var("agent-model", Value::String(spec))))?)?;
     s.set("agent", agent)?;
 
+    // Fonts: serpis.font.set({ mono = "Intel One Mono", sans = ..., size = 15, mono_size = 14 }).
+    let font = lua.create_table()?;
+    font.set("set", lua.create_function(|_, t: Table| {
+        ed(|e| {
+            for (key, var) in [("mono", "font-mono"), ("sans", "font-sans")] {
+                if let Ok(v) = t.get::<String>(key) {
+                    e.set_var(var, Value::String(v));
+                }
+            }
+            for (key, var) in [("size", "font-size"), ("mono_size", "font-mono-size")] {
+                if let Ok(v) = t.get::<f64>(key) {
+                    e.set_var(var, json!(v));
+                }
+            }
+        })
+    })?)?;
+    font.set("get", lua.create_function(|lua, ()| {
+        let v = ed(|e| json!({
+            "mono": e.var("font-mono"),
+            "sans": e.var("font-sans"),
+            "size": e.theme.font_size,
+            "mono_size": e.theme.mono_size,
+        }))?;
+        lua.to_value(&v)
+    })?)?;
+    font.set("list", lua.create_function(|_, ()| Ok(crate::fonts::families()))?)?;
+    s.set("font", font)?;
+
     // Theme.
     let theme = lua.create_table()?;
     theme.set("toggle", lua.create_function(|_, ()| ed(|e| e.call("toggle-theme")))?)?;

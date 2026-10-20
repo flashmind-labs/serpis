@@ -227,14 +227,11 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("text-scale-increase", "Increase font size.", o, |ed, _| {
-        ed.theme.font_size += 1.0;
-        ed.theme.mono_size += 1.0;
+        crate::fonts::scale(ed, 1.0);
         Ok(())
     });
-    ed.define_command("text-scale-reset", "Reset font sizes to the theme defaults.", o, |ed, _| {
-        let d = crate::theme::Theme::default();
-        ed.theme.font_size = d.font_size;
-        ed.theme.mono_size = d.mono_size;
+    ed.define_command("text-scale-reset", "Reset font sizes to font-size / font-mono-size.", o, |ed, _| {
+        crate::fonts::reset_sizes(ed);
         Ok(())
     });
     ed.define_command("send-key-to-buffer", "Give the invoking key to the buffer itself (e.g. a terminal), bypassing keymaps.", o, |ed, a| {
@@ -245,8 +242,7 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("text-scale-decrease", "Decrease font size.", o, |ed, _| {
-        ed.theme.font_size = (ed.theme.font_size - 1.0).max(8.0);
-        ed.theme.mono_size = (ed.theme.mono_size - 1.0).max(8.0);
+        crate::fonts::scale(ed, -1.0);
         Ok(())
     });
 

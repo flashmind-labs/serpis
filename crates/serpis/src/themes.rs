@@ -218,17 +218,26 @@ impl Editor {
 
     /// Remember `name` as the theme to start with.
     pub fn persist_theme(&self, name: &str) {
-        let path = state_path();
-        let mut state: serde_json::Value = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
-        state["theme"] = serde_json::Value::String(name.to_string());
-        let _ = std::fs::create_dir_all(crate::config_dir());
-        let _ = std::fs::write(path, serde_json::to_string_pretty(&state).unwrap_or_default());
+        self.persist_state("theme", serde_json::Value::String(name.to_string()));
     }
 
     /// Theme remembered by `persist_theme`, if any.
     pub fn persisted_theme() -> Option<String> {
+        Self::persisted_state("theme")?.as_str().map(str::to_string)
+    }
+
+    /// Remember an interactive choice across restarts (`state.json`).
+    pub fn persist_state(&self, key: &str, value: serde_json::Value) {
+        let path = state_path();
+        let mut state: serde_json::Value = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
+        state[key] = value;
+        let _ = std::fs::create_dir_all(crate::config_dir());
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&state).unwrap_or_default());
+    }
+
+    pub fn persisted_state(key: &str) -> Option<serde_json::Value> {
         let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(state_path()).ok()?).ok()?;
-        state.get("theme")?.as_str().map(str::to_string)
+        state.get(key).cloned()
     }
 }
 

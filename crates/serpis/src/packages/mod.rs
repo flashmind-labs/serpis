@@ -94,6 +94,7 @@ pub fn install_base(ed: &mut Editor) {
         ("s-=", "text-scale-increase"),
         ("s-+", "text-scale-increase"),
         ("s--", "text-scale-decrease"),
+        ("s-0", "text-scale-reset"),
         ("s-,", "open-config"),
         ("s-q", "quit"),
         ("s-R", "reload-config"),

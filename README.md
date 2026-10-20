@@ -28,6 +28,11 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `ESC` or `C-c C-c` | abort the agent |
 | `TAB` | fold/unfold the tool output at point |
 | `s-,` | open `init.lua` (saved changes reload live) |
+| `s-=` / `s--` / `s-0` | bigger / smaller / reset font size |
+
+Fonts are set in `init.lua` with an installed family name or a font file, e.g.
+`serpis.font.set({ mono = "Intel One Mono", sans = "Inter", mono_size = 14 })`, or picked with
+`select-font` / `select-ui-font`.
 
 `set-keybinding-scheme` switches to `emacs` or `vim` (or call `serpis.keys.scheme("vim")` in
 `init.lua`). Vim works everywhere: in the chat transcript and prompt, in text buffers, and in

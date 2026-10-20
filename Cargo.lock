@@ -3163,6 +3163,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "fontique",
  "futures",
  "image",
  "libghostty-vt",

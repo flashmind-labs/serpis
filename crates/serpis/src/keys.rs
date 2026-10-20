@@ -238,6 +238,8 @@ pub fn chord_from_egui(key: egui::Key, m: egui::Modifiers) -> Option<KeyChord> {
         K::F10 => named("f10"),
         K::F11 => named("f11"),
         K::F12 => named("f12"),
+        // egui names this key with the typographic minus sign (U+2212).
+        K::Minus => printable('-'),
         other => {
             let name = other.symbol_or_name();
             let mut it = name.chars();
