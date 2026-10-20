@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, Rect, Stroke};
+use egui::{Color32, Rect, Stroke, Vec2};
 use serde_json::Value;
 use serpis_agent::{AgentConfig, AgentEvent, AgentHandle, ToolGate, ToolHooks, ToolResult};
 use serpis_ai::*;
@@ -1467,14 +1467,18 @@ impl Buffer for ChatBuffer {
         let id = ed.current_buffer();
         let shape = if focused { ed.cursor_shape(id) } else { None }.unwrap_or(CursorShape::Bar);
 
-        // Prompt geometry: grows with content up to 40% of the window.
+        // The composer: a floating card on the reading column, growing with its text up to 40%
+        // of the window, with a toolbar (model, thinking, usage, send).
+        let k = theme.ui_scale();
         let row_h = ui.fonts_mut(|f| f.row_height(&theme.prop()));
-        let footer_h = (22.0 * theme.ui_scale()).round();
+        let toolbar_h = (38.0 * k).round();
+        self.prompt.view.padding = egui::vec2(16.0 * k, 12.0 * k);
         let prompt_lines = self.prompt.doc.lines.len().max(1) as f32;
-        let prompt_h = (prompt_lines * row_h + 2.0 * self.prompt.view.padding.y + footer_h).min(rect.height() * 0.4).max(row_h + 2.0 * self.prompt.view.padding.y + footer_h);
-        let margin = 10.0;
-        let prompt_rect = Rect::from_min_max(egui::pos2(rect.left() + margin, rect.bottom() - prompt_h - margin), egui::pos2(rect.right() - margin, rect.bottom() - margin));
-        let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), prompt_rect.top() - 4.0));
+        let text_h = (prompt_lines * row_h + 2.0 * self.prompt.view.padding.y).min(rect.height() * 0.4 - toolbar_h).max(row_h + 2.0 * self.prompt.view.padding.y);
+        let col_w = (rect.width() - 2.0 * self.view.padding.x).min(self.view.max_width).max(80.0);
+        let left = rect.center().x - col_w / 2.0;
+        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
+        let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k));
 
         // Transcript.
         let t_focus = focused && self.focus == Focus::Transcript;
@@ -1490,17 +1494,24 @@ impl Buffer for ChatBuffer {
             }
         }
 
-        // Prompt box.
         let painter = ui.painter().clone();
         let p_focus = focused && self.focus == Focus::Prompt;
-        painter.rect_filled(prompt_rect, theme.radius + 4, theme.bg_elevated);
-        painter.rect_stroke(
-            prompt_rect,
-            theme.radius + 4,
-            Stroke::new(1.0, if p_focus { theme.border_focused } else { theme.border }),
-            egui::StrokeKind::Inside,
-        );
-        let text_rect = Rect::from_min_max(prompt_rect.min, egui::pos2(prompt_rect.right(), prompt_rect.bottom() - footer_h));
+        let radius = (14.0 * k).round() as u8;
+        // The transcript fades out behind the composer instead of ending at a hard edge.
+        let fade_h = 18.0 * k;
+        for i in 0..6 {
+            let a = (i + 1) as f32 / 6.0;
+            let band = Rect::from_min_max(egui::pos2(rect.left() + 1.0, card.top() - fade_h + fade_h * i as f32 / 6.0), egui::pos2(rect.right() - 6.0, card.top() - fade_h + fade_h * (i + 1) as f32 / 6.0));
+            painter.rect_filled(band, 0.0, crate::chrome::tint(theme.bg_alt, a * 0.9));
+        }
+        painter.rect_filled(Rect::from_min_max(egui::pos2(rect.left() + 1.0, card.top()), egui::pos2(rect.right() - 6.0, rect.bottom() - 1.0)), 0.0, theme.bg_alt);
+        let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 22, spread: 0, color: Color32::from_black_alpha(if theme.dark { 90 } else { 28 }) };
+        painter.add(shadow.as_shape(card, radius));
+        painter.rect_filled(card, radius, theme.bg_elevated);
+        let outline = if p_focus { crate::chrome::tint(theme.accent, 0.6) } else { theme.border };
+        painter.rect_stroke(card, radius, Stroke::new(1.0, outline), egui::StrokeKind::Inside);
+
+        let text_rect = Rect::from_min_max(card.min, egui::pos2(card.right(), card.bottom() - toolbar_h));
         let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::Default };
         let presp = self.prompt.view.show(ui, text_rect, &src, &theme, &ViewOptions {
             focused: p_focus,
@@ -1511,43 +1522,97 @@ impl Buffer for ChatBuffer {
             self.focus = Focus::Prompt;
         }
         if self.prompt.doc.is_empty() {
-            let hint = if self.running() { "Steer the agent… (RET queues, M-RET follow-up, C-c C-c abort)" } else { "Ask anything…  RET send · S-RET newline · C-c C-m model" };
-            painter.text(text_rect.min + self.prompt.view.padding + egui::vec2(4.0, 0.0), egui::Align2::LEFT_TOP, hint, theme.prop(), theme.fg_faint);
+            let hint = if self.running() { "Steer the agent…" } else { "Ask anything…" };
+            painter.text(text_rect.min + self.prompt.view.padding + egui::vec2(2.0, 0.0), egui::Align2::LEFT_TOP, hint, theme.prop(), theme.fg_faint);
         }
 
-        // Footer: model, thinking, usage, activity.
-        let footer = Rect::from_min_max(egui::pos2(prompt_rect.left() + 14.0, prompt_rect.bottom() - footer_h), egui::pos2(prompt_rect.right() - 14.0, prompt_rect.bottom() - 4.0));
+        // Toolbar. Clicks run commands after this frame (the buffer is busy drawing itself).
+        let bar = Rect::from_min_max(egui::pos2(card.left() + 8.0 * k, card.bottom() - toolbar_h), egui::pos2(card.right() - 8.0 * k, card.bottom() - 4.0 * k));
+        let cy = bar.center().y;
         let small = egui::FontId::proportional(theme.font_size - 2.0);
-        let model = self.model.as_ref().map(|m| format!("{} · {}", m.provider, short_model(&m.id))).unwrap_or_else(|| "no model".into());
-        let left = format!("{model}  ·  thinking {}", self.thinking.as_str());
+        let id = ui.scope_id().with("composer");
+        let mut run: Option<&'static str> = None;
+        let pill = |ui: &mut egui::Ui, x: f32, key: &str, label: &str, tip: &str, icon: Option<Color32>| -> (Rect, bool) {
+            let w = crate::chrome::text_width(&painter, label, small.clone()) + if icon.is_some() { 30.0 } else { 20.0 } * k;
+            let r = Rect::from_min_size(egui::pos2(x, cy - 13.0 * k), egui::vec2(w, 26.0 * k));
+            let resp = ui.interact(r, id.with(key), egui::Sense::click()).on_hover_text(tip);
+            if resp.hovered() {
+                painter.rect_filled(r, 8.0 * k, crate::chrome::hover_bg(&theme));
+            }
+            let mut tx = r.left() + 10.0 * k;
+            if let Some(c) = icon {
+                crate::chrome::diamond(&painter, egui::pos2(tx + 4.0 * k, cy), 4.5 * k, c);
+                tx += 14.0 * k;
+            }
+            crate::chrome::text(&painter, egui::pos2(tx, cy), label, small.clone(), if resp.hovered() { theme.fg } else { theme.fg_dim }, w);
+            (r, resp.clicked())
+        };
+        let model = self.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
+        let (mr, clicked) = pill(ui, bar.left(), "model", &model, "Model (chat-select-model)", Some(theme.accent));
+        if clicked {
+            run = Some("chat-select-model");
+        }
+        let thinking = format!("Thinking · {}", self.thinking.as_str());
+        let (tr, clicked) = pill(ui, mr.right() + 2.0 * k, "thinking", &thinking, "Thinking level (chat-select-thinking)", None);
+        if clicked {
+            run = Some("chat-select-thinking");
+        }
 
-        let mut right = String::new();
+        // Send (or stop) on the right.
+        let d = 28.0 * k;
+        let send = Rect::from_center_size(egui::pos2(bar.right() - d / 2.0, cy), Vec2::splat(d));
+        let has_text = !self.prompt.doc.is_empty();
+        let sresp = ui.interact(send, id.with("send"), egui::Sense::click()).on_hover_text(if self.running() { "Stop (C-c C-c)" } else { "Send (RET)" });
+        if self.running() {
+            painter.circle_filled(send.center(), d / 2.0, if sresp.hovered() { theme.fg } else { theme.fg_dim });
+            painter.rect_filled(Rect::from_center_size(send.center(), Vec2::splat(9.0 * k)), 2.0, theme.bg_elevated);
+            if sresp.clicked() {
+                run = Some("chat-abort");
+            }
+        } else {
+            let bg = if has_text { if sresp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent } } else { theme.chip() };
+            painter.circle_filled(send.center(), d / 2.0, bg);
+            let fg = if has_text { if theme.dark { theme.bg } else { Color32::WHITE } } else { theme.fg_faint };
+            crate::chrome::arrow_up(&painter, Rect::from_center_size(send.center(), Vec2::splat(11.0 * k)), fg);
+            if sresp.clicked() && has_text {
+                run = Some("chat-send");
+            }
+        }
+
+        // Activity or usage between the pills and the send button.
+        let right = send.left() - 12.0 * k;
         if self.running() {
             let secs = self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-            let spin = ["◐", "◓", "◑", "◒"][((ui.input(|i| i.time) * 6.0) as usize) % 4];
-            right.push_str(&format!("{spin} working {secs}s  ·  "));
-        }
-        right.push_str(&format!("{} tok", fmt_tokens(self.totals.total_tokens)));
-        if self.totals.cost.total > 0.0 {
-            right.push_str(&format!("  ·  ${:.3}", self.totals.cost.total));
-        }
-        if let Some(m) = &self.model {
-            if m.context_window > 0 {
+            let label = format!("Working {secs}s");
+            let w = crate::chrome::text_width(&painter, &label, small.clone());
+            if right - w - 18.0 * k > tr.right() {
+                crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.accent, w + 1.0);
+                crate::chrome::spinner(&painter, egui::pos2(right - w - 11.0 * k, cy), 5.0 * k, ui.input(|i| i.time), theme.accent);
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(60));
+        } else {
+            let mut usage = vec![format!("{} tok", fmt_tokens(self.totals.total_tokens))];
+            if self.totals.cost.total > 0.0 {
+                usage.push(format!("${:.2}", self.totals.cost.total));
+            }
+            if let Some(m) = self.model.as_ref().filter(|m| m.context_window > 0) {
                 let last = self.history.iter().rev().find_map(|m| match m {
                     Message::Assistant(a) => Some(a.usage.input + a.usage.cache_read + a.usage.cache_write + a.usage.output),
                     _ => None,
                 });
                 if let Some(used) = last {
-                    right.push_str(&format!("  ·  {:.0}% ctx", used as f64 * 100.0 / m.context_window as f64));
+                    usage.push(format!("{:.0}% context", used as f64 * 100.0 / m.context_window as f64));
                 }
             }
+            let label = usage.join("  ·  ");
+            let w = crate::chrome::text_width(&painter, &label, small.clone());
+            if right - w > tr.right() + 8.0 * k {
+                crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
+            }
         }
-        let r = painter.text(footer.right_center(), egui::Align2::RIGHT_CENTER, right, small.clone(), if self.running() { theme.yellow } else { theme.fg_faint });
-        // Model and thinking take the room left of the activity and usage.
-        let clip = Rect::from_min_max(footer.min, egui::pos2(r.left() - 12.0, footer.max.y + 4.0));
-        painter.with_clip_rect(clip.intersect(painter.clip_rect())).text(footer.left_center(), egui::Align2::LEFT_CENTER, left, small, theme.fg_dim);
-        if self.running() {
-            ui.ctx().request_repaint_after(Duration::from_millis(120));
+        if let Some(cmd) = run {
+            self.focus = Focus::Prompt;
+            ed.main_sender().send(move |ed| ed.call(cmd));
         }
     }
 
@@ -1573,7 +1638,6 @@ impl Buffer for ChatBuffer {
         if let Some(m) = &self.model {
             status.push(short_model(&m.id).to_string());
         }
-        status.push(self.cwd.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
         Modeline {
             title: self.title.clone(),
             status,

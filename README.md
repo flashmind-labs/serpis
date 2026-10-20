@@ -39,7 +39,9 @@ Fonts are set in `init.lua` with an installed family name or a font file, e.g.
 macOS) and SF Mono. Variable fonts are set up the way browsers set them up: the optical size
 follows the text size (`font-optical-size`), weights come from `font-sans-weight` /
 `font-mono-weight`, bold and headings use `font-bold-weight`, and the font's own tracking table
-spaces UI text (`font-tracking`). Markdown tables in chats render as aligned grids.
+spaces UI text (`font-tracking`). Markdown tables in chats render as aligned grids. Prompts (`M-x`, pickers) open as a floating command palette;
+`minibuffer-style` = `"bottom"` puts them in the echo area, Emacs style. `chat-max-width` sets the
+width of a chat's reading column.
 
 `set-keybinding-scheme` switches to `emacs` or `vim` (or call `serpis.keys.scheme("vim")` in
 `init.lua`). Vim works everywhere: in the chat transcript and prompt, in text buffers, and in

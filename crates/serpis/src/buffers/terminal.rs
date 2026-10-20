@@ -1014,7 +1014,6 @@ impl Buffer for TerminalBuffer {
                 status.push(pwd.rsplit('/').next().unwrap_or(pwd).to_string());
             }
         }
-        status.push(format!("{}x{}", self.cols, self.rows));
         Modeline {
             title: self.title.clone(),
             status,

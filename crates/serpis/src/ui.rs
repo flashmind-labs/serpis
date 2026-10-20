@@ -31,8 +31,9 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
         // Set in points at the default font size; it grows with the text like the rest of the chrome.
         let w = ed.var("sidebar-width").and_then(Value::as_f64).unwrap_or(270.0) as f32 * ed.theme.ui_scale();
         let w = w.clamp(180.0, (body.width() - 200.0).max(180.0));
-        let side = Rect::from_min_size(body.min, egui::vec2(w, body.height()));
-        body.min.x = side.right() + GAP;
+        // Flush with the window edge, on the app background like a native sidebar.
+        let side = Rect::from_min_max(full.min, egui::pos2(full.left() + w, full.bottom() - echo_h));
+        body.min.x = side.right() + GAP / 2.0;
         crate::sidebar::draw(ui, ed, side);
         crate::sidebar::draw_handle(ui, ed, Rect::from_min_max(egui::pos2(side.right(), side.top()), egui::pos2(body.left(), side.bottom())));
     } else {
@@ -40,9 +41,14 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
     }
     draw_layout(ui, ed, body);
     let echo = Rect::from_min_max(egui::pos2(full.left() + GAP, full.bottom() - echo_h), egui::pos2(full.right() - GAP, full.bottom()));
-    draw_echo(ui, ed, echo);
+    let palette = ed.var_str("minibuffer-style").as_deref() != Some("bottom");
+    draw_echo(ui, ed, echo, palette);
     if ed.minibuffer.is_some() {
-        draw_minibuffer_popup(ui, ed, echo);
+        if palette {
+            draw_palette(ui, ed, full);
+        } else {
+            draw_minibuffer_popup(ui, ed, echo);
+        }
     } else if let Some(t) = ed.pending_since {
         if !ed.pending_keys.is_empty() {
             if t.elapsed() > Duration::from_millis(350) {
@@ -86,7 +92,16 @@ fn draw_layout(ui: &mut egui::Ui, ed: &mut Editor, body: Rect) {
 /// A short title for a tab or stack entry: the buffer name, or an i3-style summary.
 fn node_title(ed: &Editor, n: &Node) -> String {
     match n {
-        Node::Window(w) => ed.meta(ed.windows[*w].buffer).map(|m| m.name.clone()).unwrap_or_default(),
+        Node::Window(w) => {
+            let id = ed.windows[*w].buffer;
+            let title = ed.buffer_title(id);
+            match ed.meta(id) {
+                Some(m) if m.major == "chat" && !title.is_empty() => title,
+                Some(m) if m.major == "chat" => "New chat".into(),
+                Some(m) => crate::chrome::pretty_name(&m.name),
+                None => String::new(),
+            }
+        }
         Node::Container(c) => {
             let k = match c.kind {
                 Kind::SplitH => "H",
@@ -123,8 +138,9 @@ enum TabAct {
 fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rects: &mut Vec<(u64, Rect)>) {
     let n = c.children.len();
     let tabbed = c.kind == Kind::Tabbed;
-    let tab_h = (TAB_H * ed.theme.ui_scale()).round();
-    let bar_h = tab_h * if tabbed { 1.0 } else { n as f32 };
+    let k = ed.theme.ui_scale();
+    let tab_h = (TAB_H * k * if tabbed { 1.3 } else { 1.15 }).round();
+    let bar_h = tab_h * if tabbed { 1.0 } else { n as f32 } + if tabbed { 0.0 } else { 4.0 * k };
     let bar = Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_h));
     let grip_w = 20.0;
     let theme = ed.theme.clone();
@@ -138,38 +154,43 @@ fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rect
     let mut acts = Vec::new();
     let mut tab_rects = Vec::new();
     let font = FontId::proportional(theme.font_size - 1.5);
+    let mut active_tab = None;
     for (i, ch) in c.children.iter().enumerate() {
         let r = if tabbed {
-            let w = (rect.width() - grip_w) / n as f32;
-            Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, tab_h - 2.0))
+            // Browser-style tabs: content-sized up to a cap, left-aligned.
+            let w = ((rect.width() - grip_w) / n as f32).min(220.0 * k);
+            Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, tab_h))
         } else {
             Rect::from_min_size(egui::pos2(rect.left(), rect.top() + tab_h * i as f32), egui::vec2(rect.width() - grip_w - 2.0, tab_h - 2.0))
         };
         tab_rects.push(r);
         let active = i == focused_child;
         let resp = ui.interact(r, ui.scope_id().with(("tab", c.id, i)), Sense::click_and_drag());
-        let bg = if active && holds_focus(ch) {
-            theme.accent.gamma_multiply(0.35)
-        } else if active {
-            theme.bg_elevated
-        } else if resp.hovered() {
-            theme.border
-        } else {
-            theme.bg_alt
-        };
         let p = ui.painter();
-        p.rect_filled(r, 4, bg);
+        let radius = (8.0 * k).round() as u8;
+        if tabbed && active {
+            // The active tab is part of the window below: same surface, joined outline.
+            let cr = CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 };
+            p.rect_filled(r, cr, theme.bg_alt);
+            let outline = if holds_focus(ch) { crate::chrome::tint(theme.accent, 0.55) } else { theme.border };
+            p.rect_stroke(r, cr, Stroke::new(1.0, outline), StrokeKind::Inside);
+            active_tab = Some((r, outline));
+        } else if active {
+            p.rect_filled(r, radius, if holds_focus(ch) { crate::chrome::selected_bg(&theme) } else { crate::chrome::hover_bg(&theme) });
+        } else if resp.hovered() {
+            p.rect_filled(r.shrink2(egui::vec2(0.0, 3.0 * k)), radius, crate::chrome::hover_bg(&theme));
+        }
         let show_x = active || resp.hovered();
-        let text_clip = Rect::from_min_max(r.min + egui::vec2(2.0, 2.0), egui::pos2(r.right() - if show_x { 20.0 } else { 4.0 }, r.bottom() - 2.0));
-        let g = p.layout_no_wrap(node_title(ed, ch), font.clone(), if active { theme.fg } else { theme.fg_dim });
-        p.with_clip_rect(text_clip).galley(egui::pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, theme.fg);
+        let leaf = ch.focus_leaf().and_then(|w| ed.windows.get(w)).map(|w| w.buffer);
+        let kind = leaf.and_then(|b| ed.meta(b)).map(|m| m.major.clone()).unwrap_or_default();
+        let ic = egui::pos2(r.left() + 14.0 * k, r.center().y);
+        let icol = if active && holds_focus(ch) { theme.accent } else { theme.fg_faint };
+        crate::chrome::kind_icon(p, ic, 10.0 * k, if matches!(ch, Node::Container(_)) { "" } else { &kind }, icol);
+        let text_right = r.right() - if show_x { 26.0 * k } else { 8.0 * k };
+        crate::chrome::text(p, egui::pos2(r.left() + 26.0 * k, r.center().y), &node_title(ed, ch), font.clone(), if active { theme.fg } else { theme.fg_dim }, text_right - r.left() - 26.0 * k);
         if show_x {
-            let xr = Rect::from_center_size(egui::pos2(r.right() - 10.0, r.center().y), Vec2::splat(14.0));
-            let xresp = ui.interact(xr, ui.scope_id().with(("tab-x", c.id, i)), Sense::click());
-            let col = if xresp.hovered() { theme.fg } else { theme.fg_faint };
-            let k = xr.shrink(3.5);
-            ui.painter().line_segment([k.left_top(), k.right_bottom()], Stroke::new(1.2, col));
-            ui.painter().line_segment([k.right_top(), k.left_bottom()], Stroke::new(1.2, col));
+            let xr = Rect::from_center_size(egui::pos2(r.right() - 14.0 * k, r.center().y), Vec2::splat(20.0 * k));
+            let xresp = crate::chrome::ghost_button(ui, xr, ui.scope_id().with(("tab-x", c.id, i)), &theme, "Close", crate::chrome::cross);
             if xresp.clicked() {
                 acts.push(TabAct::Close(i));
                 continue;
@@ -222,6 +243,11 @@ fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rect
     let body = Rect::from_min_max(egui::pos2(rect.left(), rect.top() + bar_h), rect.max);
     if let Some(ch) = c.children.get(focused_child) {
         draw_child(ui, ed, ch, body, rects);
+    }
+    // Open the window's top edge under the active tab so they read as one surface.
+    if let Some((r, _)) = active_tab {
+        let seam = Rect::from_min_max(egui::pos2(r.left() + 1.0, body.top() - 1.0), egui::pos2(r.right() - 1.0, body.top() + 1.5));
+        ui.painter().rect_filled(seam, 0.0, theme.bg_alt);
     }
 
     for act in acts {
@@ -324,16 +350,6 @@ fn draw_container(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect,
     }
 }
 
-fn icon_button(ui: &mut egui::Ui, rect: Rect, id: egui::Id, color: Color32, hover_bg: Color32, paint: impl FnOnce(&egui::Painter, Rect, Stroke)) -> egui::Response {
-    let resp = ui.interact(rect, id, Sense::click());
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect, 4.0, hover_bg);
-    }
-    paint(p, rect.shrink(6.0), Stroke::new(1.3, if resp.hovered() { color.gamma_multiply(1.4) } else { color }));
-    resp
-}
-
 fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     if !ed.windows.contains_key(w) {
         return;
@@ -344,112 +360,112 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let is_focus_win = ed.focused == w;
     let id = ed.windows[w].buffer;
     let theme = ed.theme.clone();
-    let r = theme.radius + 2;
+    let k = theme.ui_scale();
+    let r = theme.radius + 4;
     let p = ui.painter();
+    // The focused window gets a soft accent outline; the others a hairline.
     p.rect_filled(rect, r, theme.bg_alt);
-    p.rect_stroke(rect, r, Stroke::new(1.0, if is_focus_win { theme.border_focused } else { theme.border }), StrokeKind::Inside);
+    let outline = if is_focus_win { crate::chrome::tint(theme.accent, 0.55) } else { theme.border };
+    p.rect_stroke(rect, r, Stroke::new(1.0, outline), StrokeKind::Inside);
 
-    // Header.
-    let header = Rect::from_min_size(rect.min, egui::vec2(rect.width(), (HEADER_H * theme.ui_scale()).round()));
-    p.rect_filled(header.shrink(1.0), CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, theme.bg_elevated);
+    // Header: what the buffer is (a chat's title, else its name), where it works (project and
+    // branch), its status, then ghost buttons.
+    let header = Rect::from_min_size(rect.min, egui::vec2(rect.width(), (HEADER_H * 1.2 * k).round()));
     p.line_segment([egui::pos2(header.left() + 1.0, header.bottom()), egui::pos2(header.right() - 1.0, header.bottom())], Stroke::new(1.0, theme.border));
     let meta = ed.meta(id).cloned().unwrap_or_default();
     let header_extra = ed.header_text(id);
-    let p = ui.painter();
     let (modeline, modified) = ed
         .buffers
         .get(id)
         .and_then(|s| s.buf.as_ref())
         .map(|b| (b.modeline(), b.is_modified()))
         .unwrap_or_default();
-    let icon = match meta.major.as_str() {
-        "chat" => "◆",
-        "terminal" => "❯",
-        "help" => "?",
-        _ => "≡",
+    let title = ed.buffer_title(id);
+    let (primary, secondary) = match meta.major.as_str() {
+        "chat" if !title.is_empty() => (title.clone(), String::new()),
+        "chat" => ("New chat".to_string(), String::new()),
+        _ => (crate::chrome::pretty_name(&meta.name), modeline.title.clone()),
     };
-    let small = FontId::proportional(theme.font_size - 1.5);
-    let mut x = header.left() + 12.0;
-    let cy = header.center().y;
-    let icon_color = if modeline.busy { theme.yellow } else if is_focus_win { theme.accent } else { theme.fg_faint };
-    let g = p.layout_no_wrap(icon.to_string(), FontId::proportional(theme.font_size), icon_color);
-    p.galley(egui::pos2(x, cy - g.size().y / 2.0), g.clone(), icon_color);
-    x += g.size().x + 8.0;
-    let name = format!("{}{}", meta.name, if modified { " ●" } else { "" });
-    let ng = p.layout_no_wrap(name, FontId::proportional(theme.font_size), if is_focus_win { theme.fg } else { theme.fg_dim });
-    let name_rect = Rect::from_min_size(egui::pos2(x, cy - ng.size().y / 2.0), ng.size());
-    p.galley(name_rect.min, ng.clone(), theme.fg);
-    x += ng.size().x + 10.0;
-    let title_x = x;
-
-    // Right side: buttons, then state badge and status entries.
-    let bsz = (22.0 * theme.ui_scale()).round();
-    let mut bx = header.right() - 8.0 - bsz;
-    let wid = ui.scope_id().with(("win", format!("{w:?}")));
-    let hover = theme.border;
-    let fg = theme.fg_faint;
-    let close = icon_button(ui, Rect::from_min_size(egui::pos2(bx, cy - bsz / 2.0), Vec2::splat(bsz)), wid.with("close"), fg, hover, |p, r, s| {
-        p.line_segment([r.left_top(), r.right_bottom()], s);
-        p.line_segment([r.right_top(), r.left_bottom()], s);
-    })
-    .on_hover_text("Close window (the buffer stays open)");
-    bx -= bsz + 2.0;
-    let below = icon_button(ui, Rect::from_min_size(egui::pos2(bx, cy - bsz / 2.0), Vec2::splat(bsz)), wid.with("below"), fg, hover, |p, r, s| {
-        p.rect_stroke(r, 2.0, s, StrokeKind::Inside);
-        p.line_segment([r.left_center(), r.right_center()], s);
-    })
-    .on_hover_text("Split below");
-    bx -= bsz + 2.0;
-    let right = icon_button(ui, Rect::from_min_size(egui::pos2(bx, cy - bsz / 2.0), Vec2::splat(bsz)), wid.with("right"), fg, hover, |p, r, s| {
-        p.rect_stroke(r, 2.0, s, StrokeKind::Inside);
-        p.line_segment([r.center_top(), r.center_bottom()], s);
-    })
-    .on_hover_text("Split right");
-    let buttons_left = bx - 2.0;
-    bx -= 10.0;
+    let place = ed.buffer_directory(id).map(|d| {
+        let repo = ed.repo_of(&d);
+        let root = repo.as_ref().map(|r| r.main.clone()).or_else(|| crate::project::root(&d)).unwrap_or(d);
+        let name = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        (name, repo.map(|r| r.head_label()))
+    });
     let p = ui.painter();
+    let small = FontId::proportional(theme.font_size - 2.0);
+    let cy = header.center().y;
+    let mut x = header.left() + 14.0 * k;
+    let icon_color = if modeline.busy { theme.yellow } else if is_focus_win { theme.accent } else { theme.fg_faint };
+    crate::chrome::kind_icon(p, egui::pos2(x + 6.0 * k, cy), 12.0 * k, &meta.major, icon_color);
+    x += 22.0 * k;
+
+    // Right side first: buttons, badges, status pills; the title gets what is left.
+    let bsz = (26.0 * k).round();
+    let mut bx = header.right() - 6.0 * k - bsz;
+    let wid = ui.scope_id().with(("win", format!("{w:?}")));
+    let button = |ui: &mut egui::Ui, bx: f32, name: &str, tip: &str, paint: fn(&egui::Painter, Rect, Color32)| {
+        crate::chrome::ghost_button(ui, Rect::from_min_size(egui::pos2(bx, cy - bsz / 2.0), Vec2::splat(bsz)), wid.with(name), &theme, tip, paint)
+    };
+    let close = button(ui, bx, "close", "Close window (the buffer stays open)", crate::chrome::cross);
+    bx -= bsz;
+    let below = button(ui, bx, "below", "Split below", crate::chrome::split_below);
+    bx -= bsz;
+    let right = button(ui, bx, "right", "Split right", crate::chrome::split_right);
+    let buttons_left = bx - 2.0;
+    bx -= 8.0 * k;
+    let p = ui.painter();
+    let badge_font = FontId::proportional(theme.font_size - 3.0);
     // Fullscreen (monocle): say so, with how many windows it hides; clicking restores.
     let mut fullscreen_badge = None;
     let indicator = ed.var_str("fullscreen-indicator").unwrap_or_default();
     if ed.layout.fullscreen == Some(w) && !indicator.is_empty() {
         let hidden = ed.layout.leaves().len().saturating_sub(1);
         let label = if hidden > 0 { format!("{indicator} +{hidden}") } else { indicator };
-        let g = p.layout_no_wrap(label, FontId::monospace(10.5), theme.bg);
-        let badge = Rect::from_min_size(egui::pos2(bx - g.size().x - 12.0, cy - 9.0), egui::vec2(g.size().x + 12.0, 18.0));
-        p.rect_filled(badge, 9.0, theme.yellow);
-        p.galley(badge.center() - g.size() / 2.0, g, theme.bg);
-        bx = badge.left() - 8.0;
+        let badge = crate::chrome::pill(p, bx, cy, &label, badge_font.clone(), theme.yellow, crate::chrome::tint(theme.yellow, 0.16), true);
+        bx = badge.left() - 6.0 * k;
         fullscreen_badge = Some(badge);
     }
     if let Some(st) = vim::state_of(ed, id) {
-        let label = st.label();
         let color = match st {
             vim::State::Normal => theme.accent,
             vim::State::Insert => theme.green,
             _ => theme.purple,
         };
-        let g = p.layout_no_wrap(label.to_string(), FontId::monospace(10.5), theme.bg);
-        let badge = Rect::from_min_size(egui::pos2(bx - g.size().x - 12.0, cy - 9.0), egui::vec2(g.size().x + 12.0, 18.0));
-        p.rect_filled(badge, 9.0, if is_focus_win { color } else { color.gamma_multiply(0.45) });
-        p.galley(badge.center() - g.size() / 2.0, g, theme.bg);
-        bx = badge.left() - 10.0;
+        let color = if is_focus_win { color } else { theme.fg_faint };
+        let badge = crate::chrome::pill(p, bx, cy, st.label(), badge_font.clone(), color, crate::chrome::tint(color, 0.14), true);
+        bx = badge.left() - 6.0 * k;
     }
+    let name_font = FontId::proportional(theme.font_size - 0.5);
+    let min_title = 80.0 * k;
     let mut status_left = bx;
-    for s in header_extra.iter().chain(modeline.status.iter()).rev() {
-        let g = p.layout_no_wrap(s.clone(), small.clone(), theme.fg_faint);
-        bx -= g.size().x;
-        if bx < name_rect.right() + 20.0 {
+    for st in header_extra.iter().chain(modeline.status.iter()).rev() {
+        if crate::chrome::text_width(p, st, small.clone()) + 20.0 > bx - (x + min_title) {
             break;
         }
-        p.galley(egui::pos2(bx, cy - g.size().y / 2.0), g, theme.fg_faint);
-        status_left = bx;
-        bx -= 14.0;
+        let pr = crate::chrome::pill(p, bx, cy, st, small.clone(), theme.fg_dim, theme.chip(), true);
+        bx = pr.left() - 6.0 * k;
+        status_left = pr.left();
     }
-    // The title takes what is left between the name and the status entries.
-    if !modeline.title.is_empty() && status_left - 12.0 > title_x {
-        let tg = p.layout_no_wrap(modeline.title.clone(), small.clone(), theme.fg_faint);
-        let clip = Rect::from_min_max(egui::pos2(title_x, header.top()), egui::pos2(status_left - 12.0, header.bottom()));
-        p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(title_x, cy - tg.size().y / 2.0), tg, theme.fg_faint);
+    // Where it works: project · branch, quietly.
+    if let Some((proj, branch)) = place.filter(|(n, _)| !n.is_empty()) {
+        let label = match branch.filter(|b| !b.is_empty()) {
+            Some(b) => format!("{proj}  ·  {b}"),
+            None => proj,
+        };
+        let w = crate::chrome::text_width(p, &label, small.clone());
+        if w + 20.0 < status_left - (x + min_title) {
+            let right_edge = status_left - 10.0 * k;
+            crate::chrome::text(p, egui::pos2(right_edge - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
+            status_left = right_edge - w;
+        }
+    }
+    let label = format!("{primary}{}", if modified { "  ●" } else { "" });
+    let title_room = status_left - 16.0 * k - x;
+    let name_w = crate::chrome::text(p, egui::pos2(x, cy), &label, name_font.clone(), if is_focus_win { theme.fg } else { theme.fg_dim }, title_room);
+    let name_rect = Rect::from_min_size(egui::pos2(x, cy - 9.0), egui::vec2(name_w, 18.0));
+    if !secondary.is_empty() && title_room - name_w > 40.0 {
+        crate::chrome::text(p, egui::pos2(x + name_w + 10.0 * k, cy), &secondary, small.clone(), theme.fg_faint, title_room - name_w - 10.0 * k);
     }
 
     // Header interactions: click the name for the buffer switcher, drag to move the window
@@ -568,10 +584,10 @@ fn draw_flashes(ui: &mut egui::Ui, ed: &mut Editor, id: crate::BufferId, clip: R
     ui.ctx().request_repaint();
 }
 
-fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
+fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect, palette: bool) {
     let theme = ed.theme.clone();
-    let font = FontId::proportional(theme.font_size - 0.5);
-    if let Some(mb) = &mut ed.minibuffer {
+    let font = FontId::proportional(theme.font_size - 1.0);
+    if let Some(mb) = ed.minibuffer.as_mut().filter(|_| !palette) {
         let p = ui.painter();
         p.rect_filled(rect, theme.radius, theme.bg_elevated);
         p.rect_stroke(rect, theme.radius, Stroke::new(1.0, theme.border_focused), StrokeKind::Inside);
@@ -613,6 +629,114 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         let line = msg.lines().next().unwrap_or("");
         let clip = Rect::from_min_max(rect.min, egui::pos2(chips_left - 12.0, rect.bottom()));
         ui.painter().with_clip_rect(clip.intersect(ui.clip_rect())).text(egui::pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, line, font.clone(), color);
+    }
+}
+
+/// The minibuffer as a floating command palette: a card near the top with the prompt and
+/// input, then ranked candidates (matched characters highlighted, details on the right).
+fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
+    use crate::chrome;
+    let theme = ed.theme.clone();
+    let t = &theme;
+    let k = t.ui_scale();
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("serpis-palette"));
+    let mut pui = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(full));
+    let painter = pui.painter().clone();
+    // Dim what is behind, like a modal.
+    painter.rect_filled(full, 0.0, Color32::from_black_alpha(if t.dark { 70 } else { 30 }));
+    let Some(mb) = ed.minibuffer.as_mut() else { return };
+    let w = (680.0 * k).min(full.width() - 40.0);
+    let row_h = (34.0 * k).round();
+    let input_h = (46.0 * k).round();
+    let max_rows = 10usize;
+    let n = mb.filtered.len().min(max_rows);
+    let list_h = if n > 0 { n as f32 * row_h + 12.0 * k } else { 0.0 };
+    let card = Rect::from_min_size(egui::pos2(full.center().x - w / 2.0, full.top() + (full.height() * 0.12).max(40.0)), egui::vec2(w, input_h + list_h));
+    let radius = (12.0 * k).round() as u8;
+    let shadow = egui::epaint::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if t.dark { 140 } else { 50 }) };
+    painter.add(shadow.as_shape(card, radius));
+    painter.rect_filled(card, radius, t.bg_elevated);
+    painter.rect_stroke(card, radius, Stroke::new(1.0, t.border), StrokeKind::Inside);
+
+    // Input row: icon, prompt, text, count.
+    let input = Rect::from_min_size(card.min, egui::vec2(w, input_h));
+    let cy = input.center().y;
+    chrome::magnifier(&painter, egui::pos2(input.left() + 20.0 * k, cy - 1.0), 5.5 * k, t.fg_faint);
+    let prompt = mb.prompt.trim_end().trim_end_matches(':').trim_end().to_string();
+    let small = FontId::proportional(t.font_size - 2.0);
+    let mut x = input.left() + 38.0 * k;
+    if !prompt.is_empty() {
+        let pr = chrome::pill(&painter, x, cy, &prompt, small.clone(), t.accent, chrome::tint(t.accent, 0.14), false);
+        x = pr.right() + 8.0 * k;
+    }
+    let count = if !mb.candidates.is_empty() || mb.dynamic.is_some() { format!("{} of {}", mb.filtered.len(), mb.candidates.len()) } else { String::new() };
+    let count_w = chrome::text_width(&painter, &count, small.clone());
+    let input_rect = Rect::from_min_max(egui::pos2(x, input.top()), egui::pos2(input.right() - count_w - 24.0 * k, input.bottom()));
+    mb.input.view.padding = egui::vec2(2.0, (input_h - t.font_size * 1.4) / 2.0);
+    mb.input.view.wrap = false;
+    let src = PlainLines { lines: &mb.input.doc.lines, face: Face::Default };
+    mb.input.view.show(&mut pui, input_rect, &src, t, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true });
+    if !count.is_empty() {
+        chrome::text(&painter, egui::pos2(input.right() - 16.0 * k - count_w, cy), &count, small.clone(), t.fg_faint, count_w + 1.0);
+    }
+
+    // Candidates.
+    let mut clicked = None;
+    if n > 0 {
+        painter.hline(card.left()..=card.right(), input.bottom(), Stroke::new(1.0, t.border));
+        let start = mb.selected.saturating_sub(max_rows - 1);
+        let font = FontId::proportional(t.font_size - 0.5);
+        for (i, (ci, positions)) in mb.filtered.iter().enumerate().skip(start).take(max_rows) {
+            let c = &mb.candidates[*ci];
+            let y = input.bottom() + 6.0 * k + (i - start) as f32 * row_h;
+            let r = Rect::from_min_size(egui::pos2(card.left() + 6.0 * k, y), egui::vec2(w - 12.0 * k, row_h));
+            let resp = pui.interact(r, egui::Id::unique(("palette-row", i)), Sense::click());
+            if i == mb.selected {
+                painter.rect_filled(r, 8.0 * k, chrome::selected_bg(t));
+            } else if resp.hovered() {
+                painter.rect_filled(r, 8.0 * k, chrome::hover_bg(t));
+            }
+            if resp.clicked() {
+                clicked = Some(i);
+            }
+            let mut job = egui::text::LayoutJob::default();
+            for (ix, ch) in c.label.chars().enumerate() {
+                let mut f = t.format(if positions.contains(&ix) { Face::Bold } else { Face::Default });
+                f.font_id = font.clone();
+                f.color = if positions.contains(&ix) { t.accent } else { t.fg };
+                job.append(&ch.to_string(), 0.0, f);
+            }
+            let g = painter.layout_job(job);
+            let label_w = g.size().x;
+            painter.galley(egui::pos2(r.left() + 12.0 * k, r.center().y - g.size().y / 2.0), g, t.fg);
+            if !c.detail.is_empty() {
+                // "s-| Split the window" → a keycap on the right, the description before it.
+                let (keys, doc) = match c.detail.split_once("   ") {
+                    Some((k, d)) if !k.is_empty() && !k.contains(' ') || k.split(' ').all(|t| t.len() <= 8 && t.contains('-')) => (Some(k.to_string()), d.to_string()),
+                    _ => (None, c.detail.clone()),
+                };
+                let mut right = r.right() - 10.0 * k;
+                if let Some(keys) = keys {
+                    let kc = chrome::keycap(&painter, right, r.center().y, &keys, t);
+                    right = kc.left() - 10.0 * k;
+                }
+                let max_w = right - (r.left() + 12.0 * k + label_w) - 24.0 * k;
+                if max_w > 40.0 {
+                    let dw = chrome::text_width(&painter, &doc, small.clone()).min(max_w);
+                    chrome::text(&painter, egui::pos2(right - dw, r.center().y), &doc, small.clone(), t.fg_faint, max_w);
+                }
+            }
+        }
+    }
+    // A click outside the palette dismisses it.
+    let outside = pui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !card.contains(p)));
+    if let Some(i) = clicked {
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.selected = i;
+        }
+        crate::minibuffer::accept(ed);
+    } else if outside {
+        crate::minibuffer::cancel(ed);
     }
 }
 

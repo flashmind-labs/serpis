@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, FontId, Rect, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::{Value, json};
 
 use crate::buffer::{Activity, ActivityState, BufferId};
@@ -112,8 +112,8 @@ pub struct Item {
 }
 
 impl Item {
-    pub fn label(&self) -> &str {
-        if self.title.is_empty() { &self.name } else { &self.title }
+    pub fn label(&self) -> String {
+        if self.title.is_empty() { crate::chrome::pretty_name(&self.name) } else { self.title.clone() }
     }
 
     pub fn to_json(&self) -> Value {
@@ -1138,11 +1138,6 @@ pub fn install(ed: &mut Editor) {
 // Drawing
 // ---------------------------------------------------------------------------------------------
 
-/// Row heights at the default font size; they grow with `Theme::ui_scale`.
-const ROW_PROJECT: f32 = 32.0;
-const ROW_WORKTREE: f32 = 24.0;
-const ROW_ITEM: f32 = 42.0;
-
 /// Something a row asked for this frame (applied after drawing).
 enum Act {
     Open(BufferId),
@@ -1173,148 +1168,95 @@ fn project_color(t: &crate::theme::Theme, name: &str) -> Color32 {
 pub fn fmt_age(d: Duration) -> String {
     let s = d.as_secs();
     match s {
-        0..=59 => format!("{s}s"),
+        0..=59 => "now".into(),
         60..=3599 => format!("{}m", s / 60),
         3600..=86_399 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86_400),
     }
 }
 
-fn paint_spinner(p: &egui::Painter, c: egui::Pos2, r: f32, t: f64, color: Color32) {
-    let a0 = (t * 5.0) as f32;
-    let pts: Vec<egui::Pos2> = (0..=14).map(|i| a0 + i as f32 * 0.32).map(|a| c + Vec2::angled(a) * r).collect();
-    p.add(egui::Shape::line(pts, Stroke::new(1.6, color)));
-}
-
-fn paint_branch(p: &egui::Painter, r: Rect, color: Color32) {
-    let s = Stroke::new(1.2, color);
-    let a = egui::pos2(r.left() + 2.5, r.top() + 2.0);
-    let b = egui::pos2(r.left() + 2.5, r.bottom() - 2.0);
-    let c = egui::pos2(r.right() - 2.5, r.top() + 3.5);
-    p.line_segment([a, b], s);
-    p.add(egui::Shape::line(vec![c, egui::pos2(c.x, r.center().y), egui::pos2(a.x, r.center().y + 3.0)], s));
-    for q in [a, b, c] {
-        p.circle_filled(q, 1.8, color);
+/// The line under an item's title: what it is doing, or what it is.
+fn status_line(it: &Item) -> String {
+    match (it.activity.state, it.agent) {
+        (ActivityState::Working, _) => it.activity.detail.clone(),
+        (ActivityState::Waiting, true) => format!("Waiting for you · {}", it.activity.detail),
+        (ActivityState::Waiting, false) => format!("Waiting · {}", it.activity.detail),
+        (ActivityState::Error, _) => it.activity.detail.clone(),
+        (ActivityState::Exited, _) => "Exited".into(),
+        (ActivityState::Idle, _) if !it.activity.detail.is_empty() => it.activity.detail.clone(),
+        (ActivityState::Idle, _) => if it.kind == "terminal" { "Shell".into() } else { it.kind.clone() },
     }
 }
 
-fn paint_chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
-    let pts = if open {
-        vec![c + egui::vec2(-3.5, -1.5), c + egui::vec2(3.5, -1.5), c + egui::vec2(0.0, 2.5)]
-    } else {
-        vec![c + egui::vec2(-1.5, -3.5), c + egui::vec2(-1.5, 3.5), c + egui::vec2(2.5, 0.0)]
-    };
-    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
-}
-
-/// A small icon button that only shows while its row is hovered.
-fn row_button(ui: &mut egui::Ui, rect: Rect, id: egui::Id, theme: &crate::theme::Theme, tip: &str, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
-    let resp = ui.interact(rect, id, Sense::click()).on_hover_text(tip);
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect, 4, theme.border);
-    }
-    paint(p, rect.shrink(5.0), if resp.hovered() { theme.fg } else { theme.fg_dim });
-    resp.clicked()
-}
-
-fn plus(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.4, c);
-    p.line_segment([r.center_top(), r.center_bottom()], s);
-    p.line_segment([r.left_center(), r.right_center()], s);
-}
-
-fn prompt_icon(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.4, c);
-    p.add(egui::Shape::line(vec![r.left_top() + egui::vec2(0.0, 1.0), egui::pos2(r.center().x - 1.0, r.center().y), r.left_bottom() - egui::vec2(0.0, 1.0)], s));
-    p.line_segment([egui::pos2(r.center().x + 1.0, r.bottom() - 1.0), egui::pos2(r.right(), r.bottom() - 1.0)], s);
-}
-
-fn cross(p: &egui::Painter, r: Rect, c: Color32) {
-    let r = r.shrink(1.0);
-    let s = Stroke::new(1.3, c);
-    p.line_segment([r.left_top(), r.right_bottom()], s);
-    p.line_segment([r.right_top(), r.left_bottom()], s);
-}
-
-fn text(p: &egui::Painter, pos: egui::Pos2, s: &str, font: FontId, color: Color32, max_w: f32) -> f32 {
-    let mut g = p.layout_no_wrap(s.to_string(), font.clone(), color);
-    if g.size().x > max_w && max_w > 10.0 {
-        let mut n = s.chars().count();
-        while n > 1 && g.size().x > max_w {
-            n = n * 9 / 10;
-            g = p.layout_no_wrap(format!("{}…", s.chars().take(n).collect::<String>()), font.clone(), color);
-        }
-    }
-    let w = g.size().x;
-    p.galley(egui::pos2(pos.x, pos.y - g.size().y / 2.0), g, color);
-    w
-}
-
-/// Paint the sidebar into `rect`.
+/// Paint the sidebar into `rect`: a flush panel on the app background.
 pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
+    use crate::chrome;
     let theme = ed.theme.clone();
-    let p = ui.painter();
-    let r = theme.radius + 2;
-    p.rect_filled(rect, r, theme.bg_alt);
-    p.rect_stroke(rect, r, Stroke::new(1.0, if ed.sidebar.focused { theme.border_focused } else { theme.border }), StrokeKind::Inside);
+    let t = &theme;
+    let k = t.ui_scale();
     let time = ui.input(|i| i.time);
     let mut acts: Vec<Act> = Vec::new();
-    let k = theme.ui_scale();
+    let pad = 10.0 * k;
+    let inner = rect.shrink2(egui::vec2(pad, 0.0));
+    let title_font = FontId::proportional(t.font_size - 1.0);
+    let small = FontId::proportional(t.font_size - 2.5);
+    let tiny = FontId::proportional(t.font_size - 3.5);
 
-    // Search box.
-    let search_r = Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(rect.width() - 20.0, (30.0 * k).round()));
+    // Search.
+    let search_r = Rect::from_min_size(egui::pos2(inner.left(), rect.top() + 10.0 * k), egui::vec2(inner.width(), (32.0 * k).round()));
     let sresp = ui.interact(search_r, ui.scope_id().with("sidebar-search"), Sense::click());
     if sresp.clicked() {
         acts.push(Act::Focus);
     }
     let p = ui.painter();
-    p.rect_filled(search_r, 6, theme.bg_elevated);
-    p.rect_stroke(search_r, 6, Stroke::new(1.0, if ed.sidebar.focused { theme.border_focused } else { theme.border }), StrokeKind::Inside);
-    let mag = egui::pos2(search_r.left() + 15.0, search_r.center().y - 1.0);
-    p.circle_stroke(mag, 4.5, Stroke::new(1.3, theme.fg_faint));
-    p.line_segment([mag + egui::vec2(3.2, 3.2), mag + egui::vec2(6.5, 6.5)], Stroke::new(1.3, theme.fg_faint));
-    let small = FontId::proportional(theme.font_size - 2.0);
-    let font = FontId::proportional(theme.font_size - 0.5);
-    let tx = search_r.left() + 28.0;
+    let focused = ed.sidebar.focused;
+    p.rect_filled(search_r, 8.0 * k, if focused { t.bg_elevated } else { chrome::hover_bg(t) });
+    if focused {
+        p.rect_stroke(search_r, 8.0 * k, Stroke::new(1.0, chrome::tint(t.accent, 0.6)), StrokeKind::Inside);
+    }
+    let cy = search_r.center().y;
+    chrome::magnifier(p, egui::pos2(search_r.left() + 14.0 * k, cy - 1.0), 4.5 * k, t.fg_faint);
+    let tx = search_r.left() + 28.0 * k;
+    let query_font = FontId::proportional(t.font_size - 1.0);
     if ed.sidebar.query.is_empty() {
-        let hint = if ed.sidebar.focused { "Search chats, terminals, projects…" } else { "Search  (s-e)" };
-        text(p, egui::pos2(tx, search_r.center().y), hint, font.clone(), theme.fg_faint, search_r.width() - 36.0);
+        chrome::text(p, egui::pos2(tx, cy), if focused { "Search everything…" } else { "Search" }, query_font.clone(), t.fg_faint, search_r.width() - 70.0 * k);
+        if !focused {
+            chrome::keycap(p, search_r.right() - 8.0 * k, cy, "s-e", t);
+        }
     } else {
-        let w = text(p, egui::pos2(tx, search_r.center().y), &ed.sidebar.query, font.clone(), theme.fg, search_r.width() - 36.0);
-        if ed.sidebar.focused && (time * 2.0) as i64 % 2 == 0 {
-            p.line_segment([egui::pos2(tx + w + 1.5, search_r.top() + 8.0), egui::pos2(tx + w + 1.5, search_r.bottom() - 8.0)], Stroke::new(1.5, theme.cursor));
+        let w = chrome::text(p, egui::pos2(tx, cy), &ed.sidebar.query, query_font, t.fg, search_r.width() - 40.0 * k);
+        if focused && (time * 2.0) as i64 % 2 == 0 {
+            p.line_segment([egui::pos2(tx + w + 1.5, cy - 8.0 * k), egui::pos2(tx + w + 1.5, cy + 8.0 * k)], Stroke::new(1.5, t.cursor));
         }
     }
-    if ed.sidebar.focused {
+    if focused {
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
 
-    // Footer.
-    let footer_h = (34.0 * k).round();
-    let footer = Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.bottom() - footer_h), egui::pos2(rect.right() - 8.0, rect.bottom() - 6.0));
-    let list_rect = Rect::from_min_max(egui::pos2(rect.left() + 4.0, search_r.bottom() + 8.0), egui::pos2(rect.right() - 4.0, footer.top() - 4.0));
-    ui.painter().line_segment([egui::pos2(rect.left() + 8.0, footer.top() - 2.0), egui::pos2(rect.right() - 8.0, footer.top() - 2.0)], Stroke::new(1.0, theme.border));
-    let buttons = [("New chat", "project-new-chat", "s-n"), ("Terminal", "project-new-terminal", "s-T"), ("Worktree", "worktree-new-chat", "s-N")];
-    let bw = (footer.width() - 8.0) / 3.0;
-    for (i, (label, cmd, key)) in buttons.iter().enumerate() {
-        let br = Rect::from_min_size(egui::pos2(footer.left() + i as f32 * (bw + 4.0), footer.top() + 2.0), egui::vec2(bw, footer.height() - 4.0));
-        let resp = ui.interact(br, ui.scope_id().with(("sidebar-footer", i)), Sense::click()).on_hover_text(format!("{cmd}  ({key})"));
-        let p = ui.painter();
-        p.rect_filled(br, 6, if resp.hovered() { theme.border } else { theme.bg_elevated });
-        let ic = Rect::from_center_size(egui::pos2(br.left() + 13.0, br.center().y), Vec2::splat(9.0));
-        match i {
-            0 => plus(p, ic, theme.accent),
-            1 => prompt_icon(p, ic, theme.green),
-            _ => paint_branch(p, ic.expand(1.5), theme.purple),
-        }
-        text(p, egui::pos2(br.left() + 23.0, br.center().y), label, small.clone(), theme.fg_dim, br.width() - 26.0);
-        if resp.clicked() {
-            acts.push(Act::Run(cmd.to_string(), Vec::new()));
-        }
+    // Actions: a "New chat" button, then terminal and worktree as icon buttons.
+    let act_y = search_r.bottom() + 8.0 * k;
+    let bh = (32.0 * k).round();
+    let new_r = Rect::from_min_size(egui::pos2(inner.left(), act_y), egui::vec2(inner.width() - 2.0 * (bh + 4.0 * k), bh));
+    let nresp = ui.interact(new_r, ui.scope_id().with("sidebar-new"), Sense::click()).on_hover_text("New chat in this project");
+    let p = ui.painter();
+    p.rect_filled(new_r, 8.0 * k, if nresp.hovered() { chrome::tint(t.accent, 0.22) } else { chrome::tint(t.accent, 0.13) });
+    chrome::plus(p, Rect::from_center_size(egui::pos2(new_r.left() + 15.0 * k, new_r.center().y), Vec2::splat(9.0 * k)), t.accent);
+    chrome::text(p, egui::pos2(new_r.left() + 28.0 * k, new_r.center().y), "New chat", FontId::proportional(t.font_size - 1.0), t.accent, new_r.width() - 70.0 * k);
+    chrome::keycap(p, new_r.right() - 8.0 * k, new_r.center().y, "s-n", t);
+    if nresp.clicked() {
+        acts.push(Act::Run("project-new-chat".into(), Vec::new()));
+    }
+    let term_r = Rect::from_min_size(egui::pos2(new_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
+    if chrome::ghost_button(ui, term_r, ui.scope_id().with("sidebar-term"), t, "New terminal (⌘⇧T)", chrome::prompt).clicked() {
+        acts.push(Act::Run("project-new-terminal".into(), Vec::new()));
+    }
+    let wt_r = Rect::from_min_size(egui::pos2(term_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
+    if chrome::ghost_button(ui, wt_r, ui.scope_id().with("sidebar-wt"), t, "New chat in a new worktree (⌘⇧N)", |p, r, c| chrome::branch(p, r.expand(1.0), c)).clicked() {
+        acts.push(Act::Run("worktree-new-chat".into(), Vec::new()));
     }
 
-    // List.
+    // The list.
+    let list_rect = Rect::from_min_max(egui::pos2(rect.left(), act_y + bh + 10.0 * k), egui::pos2(rect.right(), rect.bottom() - 6.0 * k));
     let query = ed.sidebar.query.clone();
     let mut rows: Vec<RowRef> = Vec::new();
     let rects = std::cell::RefCell::new(Vec::new());
@@ -1337,113 +1279,84 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     egui::ScrollArea::vertical().id_salt("sidebar-scroll").auto_shrink([false, false]).show(&mut child, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
         let w = ui.available_width();
-        let item_row = |ui: &mut egui::Ui, it: &Item, indent: f32, rows: &mut Vec<RowRef>, acts: &mut Vec<Act>, any_working: &mut bool, subtitle: Option<String>| {
+        let x0 = rect.left() + pad;
+        let x1 = rect.left() + w - pad;
+        // Registers a row for keyboard navigation and tests; returns (index, rect, selected).
+        let mut row = |ui: &mut egui::Ui, r: RowRef, h: f32| -> (usize, Rect, bool) {
             let idx = rows.len();
-            rows.push(RowRef::Item(it.buffer));
-            let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_ITEM * k), Sense::hover());
-            rects.borrow_mut().push(r);
+            rows.push(r);
+            let (rr, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
+            rects.borrow_mut().push(rr);
             let is_sel = sb_focused && idx == selected;
             if is_sel && reveal {
-                ui.scroll_to_rect(r, None);
+                ui.scroll_to_rect(rr, None);
             }
-            let hovered = ui.rect_contains_pointer(r);
-            let kill_r = Rect::from_center_size(egui::pos2(r.right() - 16.0 * k, r.top() + 13.0 * k), Vec2::splat(20.0 * k));
-            let main_r = if hovered { Rect::from_min_max(r.min, egui::pos2(kill_r.left() - 2.0, r.bottom())) } else { r };
+            (idx, rr, is_sel)
+        };
+        let section = |ui: &mut egui::Ui, label: &str, indent: f32| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(w, 24.0 * k), Sense::hover());
+            chrome::text(ui.painter(), egui::pos2(x0 + indent, r.center().y + 3.0 * k), &label.to_uppercase(), tiny.clone(), t.fg_faint, x1 - x0);
+        };
+
+        let item_row = |ui: &mut egui::Ui, row: &mut dyn FnMut(&mut egui::Ui, RowRef, f32) -> (usize, Rect, bool), it: &Item, indent: f32, acts: &mut Vec<Act>, any_working: &mut bool, subtitle: Option<String>| {
+            let (idx, r, is_sel) = row(ui, RowRef::Item(it.buffer), 44.0 * k);
+            let card = Rect::from_min_max(egui::pos2(x0 + indent, r.top() + 1.0), egui::pos2(x1, r.bottom() - 1.0));
+            let hovered = ui.rect_contains_pointer(card);
             let id = ui.scope_id().with(("sb-item", buffer_id_to_u64(it.buffer)));
-            if hovered && row_button(ui, kill_r, id.with("kill"), &theme, "Kill buffer", cross) {
+            let kill_r = Rect::from_center_size(egui::pos2(card.right() - 14.0 * k, card.center().y), Vec2::splat(22.0 * k));
+            if hovered && chrome::ghost_button(ui, kill_r, id.with("kill"), t, "Kill buffer", chrome::cross).clicked() {
                 acts.push(Act::Run("sidebar-kill".into(), vec![json!(buffer_id_to_u64(it.buffer))]));
             }
+            let main_r = if hovered { Rect::from_min_max(card.min, egui::pos2(kill_r.left() - 2.0, card.bottom())) } else { card };
             let resp = ui.interact(main_r, id, Sense::click());
             let p = ui.painter();
-            let card = r.shrink2(egui::vec2(4.0, 2.0));
-            let bg = if it.current { theme.selection.gamma_multiply(0.55) } else if is_sel || resp.hovered() { theme.border } else { Color32::TRANSPARENT };
-            p.rect_filled(card, 6, bg);
+            let bg = if it.current { chrome::selected_bg(t) } else if resp.hovered() || is_sel { chrome::hover_bg(t) } else { Color32::TRANSPARENT };
+            p.rect_filled(card, 8.0 * k, bg);
             if is_sel {
-                p.rect_stroke(card, 6, Stroke::new(1.0, theme.border_focused), StrokeKind::Inside);
+                p.rect_stroke(card, 8.0 * k, Stroke::new(1.0, chrome::tint(t.accent, 0.5)), StrokeKind::Inside);
             }
             let st = it.activity.state;
-            let col = state_color(&theme, st);
-            // Working rows pulse a bar on their left edge.
-            if st == ActivityState::Working {
-                *any_working = true;
-                let a = 0.55 + 0.45 * ((time * 3.0).sin() as f32);
-                p.rect_filled(Rect::from_min_size(egui::pos2(card.left(), card.top() + 6.0), egui::vec2(2.5, card.height() - 12.0)), 1.5, col.gamma_multiply(a));
-            } else if it.current {
-                p.rect_filled(Rect::from_min_size(egui::pos2(card.left(), card.top() + 6.0), egui::vec2(2.5, card.height() - 12.0)), 1.5, theme.accent);
-            }
-            let x = card.left() + 10.0 + indent;
-            let y1 = card.top() + 12.0 * k;
-            let y2 = card.bottom() - 11.0 * k;
-            // Kind icon, tinted by state.
-            let icon_r = Rect::from_center_size(egui::pos2(x + 5.0, y1), Vec2::splat(10.0));
-            let icol = if st == ActivityState::Idle { if it.current { theme.accent } else { theme.fg_dim } } else { col };
-            if it.kind == "terminal" {
-                prompt_icon(p, icon_r.shrink(0.5), icol);
-            } else if it.kind == "chat" {
-                let c = icon_r.center();
-                p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -5.0), c + egui::vec2(5.0, 0.0), c + egui::vec2(0.0, 5.0), c + egui::vec2(-5.0, 0.0)], icol, Stroke::NONE));
-            } else {
-                for k in 0..3 {
-                    let yy = icon_r.top() + 2.0 + k as f32 * 3.0;
-                    p.line_segment([egui::pos2(icon_r.left(), yy), egui::pos2(icon_r.right(), yy)], Stroke::new(1.2, icol));
-                }
-            }
-            // Right side: age, attention dot, in-view marker.
-            let mut rx = card.right() - 8.0 - if hovered { 22.0 } else { 0.0 };
-            if it.attention {
-                p.circle_filled(egui::pos2(rx - 4.0, y1), 4.0, if st == ActivityState::Error { theme.red } else { theme.accent });
-                rx -= 14.0;
-            }
-            if !hovered {
-                let age = fmt_age(it.since.elapsed());
-                let g = p.layout_no_wrap(age, small.clone(), theme.fg_faint);
-                rx -= g.size().x;
-                p.galley(egui::pos2(rx, y1 - g.size().y / 2.0), g, theme.fg_faint);
-                rx -= 6.0;
-            }
-            if it.visible && !it.current {
-                let vr = Rect::from_center_size(egui::pos2(rx - 5.0, y1), egui::vec2(10.0, 8.0));
-                p.rect_stroke(vr, 2, Stroke::new(1.1, theme.fg_faint), StrokeKind::Inside);
-                p.line_segment([egui::pos2(vr.center().x, vr.top()), egui::pos2(vr.center().x, vr.bottom())], Stroke::new(1.1, theme.fg_faint));
-                rx -= 14.0;
-            }
-            let name_font = if it.attention { FontId::proportional(theme.font_size - 0.5) } else { font.clone() };
-            let name_col = if it.current || it.attention { theme.fg } else { theme.fg_dim };
-            text(p, egui::pos2(x + 16.0, y1), it.label(), name_font, name_col, rx - x - 22.0);
-            // Second line: state, or the search subtitle.
-            let mut sx = x + 16.0;
+            let col = state_color(t, st);
+            let y1 = card.top() + 14.0 * k;
+            let y2 = card.bottom() - 13.0 * k;
+            // Leading status: a spinner while working, a dot while waiting, else the kind.
+            let ic = egui::pos2(card.left() + 15.0 * k, y1);
             match st {
                 ActivityState::Working => {
-                    paint_spinner(p, egui::pos2(sx + 4.0, y2), 4.0, time, col);
-                    sx += 13.0;
+                    *any_working = true;
+                    chrome::spinner(p, ic, 5.0 * k, time, col);
                 }
                 ActivityState::Waiting => {
-                    let a = 0.6 + 0.4 * ((time * 2.0).sin() as f32);
-                    p.circle_filled(egui::pos2(sx + 4.0, y2), 3.5, col.gamma_multiply(a));
-                    sx += 13.0;
+                    let a = 0.65 + 0.35 * ((time * 2.5).sin() as f32);
+                    p.circle_filled(ic, 4.5 * k, chrome::tint(col, 0.25 * a));
+                    p.circle_filled(ic, 3.0 * k, col.gamma_multiply(a));
                 }
-                ActivityState::Error => {
-                    cross(p, Rect::from_center_size(egui::pos2(sx + 4.0, y2), Vec2::splat(8.0)), col);
-                    sx += 13.0;
-                }
-                _ => {}
+                ActivityState::Error => chrome::cross(p, Rect::from_center_size(ic, Vec2::splat(9.0 * k)), col),
+                _ => chrome::kind_icon(p, ic, 11.0 * k, &it.kind, if it.current { t.accent } else { t.fg_faint }),
             }
-            let status = match (st, it.agent) {
-                (ActivityState::Working, _) => it.activity.detail.clone(),
-                (ActivityState::Waiting, true) => format!("{} · waiting for you", it.activity.detail),
-                (ActivityState::Waiting, false) => format!("{} · waiting", it.activity.detail),
-                (ActivityState::Error, _) => it.activity.detail.clone(),
-                (ActivityState::Exited, _) => "exited".into(),
-                (ActivityState::Idle, _) if !it.activity.detail.is_empty() => it.activity.detail.clone(),
-                (ActivityState::Idle, _) => if it.title.is_empty() || it.title == it.name { it.kind.clone() } else { it.name.clone() },
-            };
+            let tx = card.left() + 30.0 * k;
+            let mut rx = card.right() - 10.0 * k;
+            if !hovered {
+                let age = fmt_age(it.since.elapsed());
+                let aw = chrome::text_width(p, &age, tiny.clone());
+                chrome::text(p, egui::pos2(rx - aw, y1), &age, tiny.clone(), t.fg_faint, aw + 1.0);
+                rx -= aw + 8.0 * k;
+            } else {
+                rx = kill_r.left() - 4.0 * k;
+            }
+            if it.attention {
+                p.circle_filled(egui::pos2(rx - 3.0 * k, y1), 3.5 * k, if st == ActivityState::Error { t.red } else { t.accent });
+                rx -= 12.0 * k;
+            }
+            let title_col = if it.current || it.attention { t.fg } else { chrome::tint(t.fg, 0.82) };
+            chrome::text(p, egui::pos2(tx, y1), &it.label(), title_font.clone(), title_col, rx - tx);
             let line2 = match (&it.snippet, subtitle) {
                 (Some(s), _) => format!("“{s}”"),
-                (None, Some(s)) => format!("{s} · {status}"),
-                (None, None) => status,
+                (None, Some(s)) => format!("{s} · {}", status_line(it)),
+                (None, None) => status_line(it),
             };
-            let lcol = if matches!(st, ActivityState::Idle | ActivityState::Exited) { theme.fg_faint } else { col };
-            text(p, egui::pos2(sx, y2), &line2, small.clone(), lcol, card.right() - sx - 10.0);
+            let lcol = if matches!(st, ActivityState::Idle | ActivityState::Exited) { t.fg_faint } else { col };
+            chrome::text(p, egui::pos2(tx, y2), &line2, small.clone(), lcol, card.right() - 10.0 * k - tx);
             if resp.clicked() {
                 acts.push(Act::Select(idx));
                 acts.push(Act::Open(it.buffer));
@@ -1455,7 +1368,6 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             resp.context_menu(|ui| crate::mouse::menu_ui(ui, ed_ref, &bmenu, &mut chosen));
             if let Some((cmd, mut args)) = chosen {
                 args.push(json!(buffer_id_to_u64(it.buffer)));
-                // Commands that take a directory get the buffer's worktree instead.
                 if cmd.starts_with("project-") || cmd.starts_with("worktree-") {
                     args = vec![json!(it.worktree.as_ref().or(it.dir.as_ref()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())];
                 }
@@ -1463,41 +1375,28 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             }
         };
 
-        // A closed session: one line, resumes on click.
-        let session_row = |ui: &mut egui::Ui, i: &crate::session::Info, indent: f32, sub: bool, rows: &mut Vec<RowRef>, acts: &mut Vec<Act>| {
-            let idx = rows.len();
-            rows.push(RowRef::Session(i.path.clone()));
-            let h = if sub { ROW_ITEM } else { 26.0 } * k;
-            let (r, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
-            rects.borrow_mut().push(r);
-            let is_sel = sb_focused && idx == selected;
-            if is_sel && reveal {
-                ui.scroll_to_rect(r, None);
-            }
-            let resp = ui.interact(r, ui.scope_id().with(("sb-session", i.path.to_string_lossy().into_owned())), Sense::click());
+        let session_row = |ui: &mut egui::Ui, row: &mut dyn FnMut(&mut egui::Ui, RowRef, f32) -> (usize, Rect, bool), i: &crate::session::Info, indent: f32, sub: bool, acts: &mut Vec<Act>| {
+            let (idx, r, is_sel) = row(ui, RowRef::Session(i.path.clone()), if sub { 44.0 } else { 30.0 } * k);
+            let card = Rect::from_min_max(egui::pos2(x0 + indent, r.top() + 1.0), egui::pos2(x1, r.bottom() - 1.0));
+            let resp = ui.interact(card, ui.scope_id().with(("sb-session", i.path.to_string_lossy().into_owned())), Sense::click());
             let p = ui.painter();
-            let card = r.shrink2(egui::vec2(4.0, 1.0));
-            if is_sel || resp.hovered() {
-                p.rect_filled(card, 6, theme.border);
+            if resp.hovered() || is_sel {
+                p.rect_filled(card, 8.0 * k, chrome::hover_bg(t));
             }
             if is_sel {
-                p.rect_stroke(card, 6, Stroke::new(1.0, theme.border_focused), StrokeKind::Inside);
+                p.rect_stroke(card, 8.0 * k, Stroke::new(1.0, chrome::tint(t.accent, 0.5)), StrokeKind::Inside);
             }
-            let x = card.left() + 10.0 + indent;
-            let y1 = if sub { card.top() + 12.0 * k } else { card.center().y };
-            // A clock face.
-            let c = egui::pos2(x + 5.0, y1);
-            p.circle_stroke(c, 4.5, Stroke::new(1.1, theme.fg_faint));
-            p.line_segment([c, c + egui::vec2(0.0, -2.8)], Stroke::new(1.1, theme.fg_faint));
-            p.line_segment([c, c + egui::vec2(2.2, 0.0)], Stroke::new(1.1, theme.fg_faint));
-            let age = i.modified.and_then(|t| t.elapsed().ok()).map(fmt_age).unwrap_or_default();
-            let g = p.layout_no_wrap(age, small.clone(), theme.fg_faint);
-            let rx = card.right() - 8.0 - g.size().x;
-            p.galley(egui::pos2(rx, y1 - g.size().y / 2.0), g, theme.fg_faint);
-            text(p, egui::pos2(x + 16.0, y1), &i.title(), small.clone(), theme.fg_dim, rx - x - 22.0);
+            let y1 = if sub { card.top() + 14.0 * k } else { card.center().y };
+            chrome::clock(p, egui::pos2(card.left() + 15.0 * k, y1), 4.5 * k, t.fg_faint);
+            let age = i.modified.and_then(|tm| tm.elapsed().ok()).map(fmt_age).unwrap_or_default();
+            let aw = chrome::text_width(p, &age, tiny.clone());
+            chrome::text(p, egui::pos2(card.right() - 10.0 * k - aw, y1), &age, tiny.clone(), t.fg_faint, aw + 1.0);
+            let tx = card.left() + 30.0 * k;
+            let font = if sub { title_font.clone() } else { small.clone() };
+            chrome::text(p, egui::pos2(tx, y1), &i.title(), font, if resp.hovered() { t.fg } else { t.fg_dim }, card.right() - 20.0 * k - aw - tx);
             if sub {
                 let project = i.project.as_deref().map(dir_name).unwrap_or_else(|| dir_name(&i.cwd));
-                text(p, egui::pos2(x + 16.0, card.bottom() - 11.0 * k), &format!("{project} · {} msgs · saved session", i.messages), small.clone(), theme.fg_faint, card.right() - x - 26.0);
+                chrome::text(p, egui::pos2(tx, card.bottom() - 13.0 * k), &format!("{project} · {} messages · saved", i.messages), small.clone(), t.fg_faint, card.right() - 10.0 * k - tx);
             }
             let resp = resp.on_hover_text(format!("Resume · {}", i.path.display()));
             if resp.clicked() {
@@ -1518,22 +1417,21 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         };
 
         if !query.is_empty() {
-            let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 22.0 * k), Sense::hover());
             let n = found.len();
-            text(ui.painter(), egui::pos2(hr.left() + 10.0, hr.center().y), &format!("{n} match{}", if n == 1 { "" } else { "es" }), small.clone(), theme.fg_faint, w);
+            section(ui, &format!("{n} buffer{}", if n == 1 { "" } else { "s" }), 4.0 * k);
             for it in &found {
                 let project = it.project.as_deref().map(dir_name).unwrap_or_else(|| "no project".into());
                 let sub = match &it.branch {
                     Some(b) if !b.is_empty() => format!("{project} · {b}"),
                     _ => project,
                 };
-                item_row(ui, it, 0.0, &mut rows, &mut acts, &mut any_working, Some(sub));
+                item_row(ui, &mut row, it, 0.0, &mut acts, &mut any_working, Some(sub));
             }
             if !found_sessions.is_empty() {
-                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 26.0 * k), Sense::hover());
-                text(ui.painter(), egui::pos2(hr.left() + 10.0, hr.center().y + 2.0), &format!("Saved sessions ({})", found_sessions.len()), small.clone(), theme.fg_faint, w);
+                ui.add_space(6.0 * k);
+                section(ui, &format!("Saved sessions · {}", found_sessions.len()), 4.0 * k);
                 for i in &found_sessions {
-                    session_row(ui, i, 0.0, true, &mut rows, &mut acts);
+                    session_row(ui, &mut row, i, 0.0, true, &mut acts);
                 }
             }
             return;
@@ -1542,168 +1440,144 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         for pr in &projects {
             let key = pr.root.clone().unwrap_or_default();
             let collapsed = ed_ref.sidebar.collapsed.contains(&key);
-            let idx = rows.len();
-            rows.push(RowRef::Project(key.clone()));
-            let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_PROJECT * k), Sense::hover());
-            rects.borrow_mut().push(r);
-            let is_sel = sb_focused && idx == selected;
-            if is_sel && reveal {
-                ui.scroll_to_rect(r, None);
-            }
+            let (idx, r, is_sel) = row(ui, RowRef::Project(key.clone()), 32.0 * k);
             let hovered = ui.rect_contains_pointer(r);
             let id = ui.scope_id().with(("sb-project", key.to_string_lossy().into_owned()));
-            let bsz = (22.0 * k).round();
-            let mut bx = r.right() - 6.0 - bsz;
-            let mut buttons_left = r.right();
+            let bsz = (24.0 * k).round();
+            let mut buttons_left = x1;
             if hovered && pr.root.is_some() {
                 let dir = json!(key.to_string_lossy());
+                let mut bx = x1 - bsz;
                 for (tip, cmd, kind) in [("New chat", "project-new-chat", 0), ("New terminal", "project-new-terminal", 1), ("New chat in a new worktree", "worktree-new-chat", 2)] {
                     if kind == 2 && !pr.git {
                         continue;
                     }
                     let br = Rect::from_min_size(egui::pos2(bx, r.center().y - bsz / 2.0), Vec2::splat(bsz));
-                    let clicked = row_button(ui, br, id.with(cmd), &theme, tip, |p, rr, c| match kind {
-                        0 => plus(p, rr, c),
-                        1 => prompt_icon(p, rr, c),
-                        _ => paint_branch(p, rr.expand(1.0), c),
+                    let resp = chrome::ghost_button(ui, br, id.with(cmd), t, tip, match kind {
+                        0 => chrome::plus,
+                        1 => chrome::prompt,
+                        _ => |p: &egui::Painter, r: Rect, c: Color32| chrome::branch(p, r.expand(1.0), c),
                     });
-                    if clicked {
+                    if resp.clicked() {
                         acts.push(Act::Run(cmd.into(), vec![dir.clone()]));
                     }
                     buttons_left = br.left();
-                    bx -= bsz + 2.0;
+                    bx -= bsz;
                 }
             }
-            let main_r = Rect::from_min_max(r.min, egui::pos2(buttons_left - 2.0, r.bottom()));
-            let resp = ui.interact(main_r, id, Sense::click());
+            let card = Rect::from_min_max(egui::pos2(x0, r.top() + 1.0), egui::pos2(x1, r.bottom() - 1.0));
+            let resp = ui.interact(Rect::from_min_max(card.min, egui::pos2(buttons_left - 2.0, card.bottom())), id, Sense::click());
             let p = ui.painter();
-            if is_sel || resp.hovered() {
-                p.rect_filled(r.shrink2(egui::vec2(4.0, 2.0)), 6, theme.border);
+            if is_sel {
+                p.rect_filled(card, 8.0 * k, chrome::hover_bg(t));
+                p.rect_stroke(card, 8.0 * k, Stroke::new(1.0, chrome::tint(t.accent, 0.5)), StrokeKind::Inside);
             }
-            let x = r.left() + 10.0;
-            paint_chevron(p, egui::pos2(x + 3.0, r.center().y), !collapsed, theme.fg_faint);
-            let pc = project_color(&theme, &pr.name);
-            let badge = Rect::from_center_size(egui::pos2(x + 20.0, r.center().y), Vec2::splat(18.0));
+            let cy = r.center().y;
+            let pc = project_color(t, &pr.name);
             if pr.root.is_some() {
-                p.rect_filled(badge, 5, pc.gamma_multiply(0.25));
-                let initial = pr.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-                p.text(badge.center(), Align2::CENTER_CENTER, initial, FontId::proportional(theme.font_size - 3.0), pc);
+                chrome::avatar(p, egui::pos2(x0 + 15.0 * k, cy), 20.0 * k, &pr.name, pc);
             } else {
-                p.rect_stroke(badge, 5, Stroke::new(1.0, theme.fg_faint), StrokeKind::Inside);
+                chrome::lines(p, Rect::from_center_size(egui::pos2(x0 + 15.0 * k, cy), Vec2::splat(11.0 * k)), t.fg_faint);
             }
-            // Counts: working agents and buffers that want you.
+            // Counts: working agents and buffers that want you, as pills.
             let working = pr.items().filter(|i| i.activity.state == ActivityState::Working).count();
             let waiting = pr.items().filter(|i| i.activity.state == ActivityState::Waiting || i.attention).count();
-            let mut rx = buttons_left - 6.0;
+            let mut rx = buttons_left - 4.0 * k;
             if !hovered {
-                for (n, c, spin) in [(waiting, theme.yellow, false), (working, theme.accent, true)] {
-                    if n == 0 {
-                        continue;
+                chrome::chevron(p, egui::pos2(rx - 6.0 * k, cy), !collapsed, t.fg_faint);
+                rx -= 18.0 * k;
+                for (n, c) in [(waiting, t.yellow), (working, t.accent)] {
+                    if n > 0 {
+                        let pr = chrome::pill(p, rx, cy, &n.to_string(), tiny.clone(), c, chrome::tint(c, 0.16), true);
+                        rx = pr.left() - 4.0 * k;
                     }
-                    let g = p.layout_no_wrap(n.to_string(), small.clone(), c);
-                    rx -= g.size().x;
-                    p.galley(egui::pos2(rx, r.center().y - g.size().y / 2.0), g, c);
-                    rx -= 11.0;
-                    if spin {
-                        paint_spinner(p, egui::pos2(rx + 4.5, r.center().y), 4.0, time, c);
-                    } else {
-                        p.circle_filled(egui::pos2(rx + 4.5, r.center().y), 3.5, c);
-                    }
-                    rx -= 8.0;
                 }
             }
-            let name_font = FontId::proportional(theme.font_size);
-            text(p, egui::pos2(badge.right() + 8.0, r.center().y), &pr.name, name_font, theme.fg, rx - badge.right() - 12.0);
+            let name_font = FontId::proportional(t.font_size - 0.5);
+            chrome::text(p, egui::pos2(x0 + 32.0 * k, cy), &pr.name, name_font, t.fg, rx - x0 - 36.0 * k);
             if resp.clicked() {
                 acts.push(Act::Select(idx));
                 acts.push(Act::Toggle(key.clone()));
             }
             if let Some(root) = &pr.root {
                 let mut chosen = None;
+                let resp = resp.on_hover_text(root.to_string_lossy());
                 resp.context_menu(|ui| crate::mouse::menu_ui(ui, ed_ref, &pmenu, &mut chosen));
                 if let Some((cmd, mut args)) = chosen {
                     args.push(json!(root.to_string_lossy()));
                     acts.push(Act::Run(cmd, args));
                 }
-                if let Some(path) = &pr.root {
-                    resp.on_hover_text(path.to_string_lossy());
-                }
             }
             if collapsed {
+                ui.add_space(4.0 * k);
                 continue;
             }
-            // Worktree headers appear for git projects; plain projects list buffers directly.
             let show_wt = pr.git;
-            if pr.items().next().is_none() && !show_wt {
-                let (er, _) = ui.allocate_exact_size(egui::vec2(w, 22.0 * k), Sense::hover());
-                text(ui.painter(), egui::pos2(er.left() + 40.0, er.center().y), "No chats yet", small.clone(), theme.fg_faint, w);
+            if pr.items().next().is_none() && pr.sessions.is_empty() {
+                let (er, _) = ui.allocate_exact_size(egui::vec2(w, 26.0 * k), Sense::hover());
+                chrome::text(ui.painter(), egui::pos2(x0 + 32.0 * k, er.center().y), "No chats yet", small.clone(), t.fg_faint, w);
             }
             for wt in &pr.worktrees {
                 let wcollapsed = ed_ref.sidebar.collapsed.contains(&wt.path);
                 if show_wt {
-                    let idx = rows.len();
-                    rows.push(RowRef::Worktree(wt.path.clone()));
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_WORKTREE * k), Sense::hover());
-                    rects.borrow_mut().push(r);
-                    let is_sel = sb_focused && idx == selected;
-                    if is_sel && reveal {
-                        ui.scroll_to_rect(r, None);
-                    }
+                    let (idx, r, is_sel) = row(ui, RowRef::Worktree(wt.path.clone()), 26.0 * k);
                     let hovered = ui.rect_contains_pointer(r);
                     let id = ui.scope_id().with(("sb-wt", wt.path.to_string_lossy().into_owned()));
-                    let mut buttons_left = r.right();
+                    let mut buttons_left = x1;
                     if hovered {
                         let dir = json!(wt.path.to_string_lossy());
-                        let mut bx = r.right() - 6.0 - 20.0 * k;
-                        let mut btns = vec![("New chat here", "project-new-chat", 0)];
+                        let bsz = (22.0 * k).round();
+                        let mut bx = x1 - bsz;
+                        let mut btns: Vec<(&str, &str, fn(&egui::Painter, Rect, Color32))> = vec![("New chat here", "project-new-chat", chrome::plus)];
                         if !wt.main {
-                            btns.insert(0, ("Remove worktree", "worktree-remove", 1));
+                            btns.insert(0, ("Remove worktree", "worktree-remove", chrome::cross));
                         }
-                        for (tip, cmd, kind) in btns {
-                            let br = Rect::from_min_size(egui::pos2(bx, r.center().y - 10.0 * k), Vec2::splat(20.0 * k));
-                            if row_button(ui, br, id.with(cmd), &theme, tip, |p, rr, c| if kind == 0 { plus(p, rr, c) } else { cross(p, rr, c) }) {
+                        for (tip, cmd, paint) in btns {
+                            let br = Rect::from_min_size(egui::pos2(bx, r.center().y - bsz / 2.0), Vec2::splat(bsz));
+                            if chrome::ghost_button(ui, br, id.with(cmd), t, tip, paint).clicked() {
                                 acts.push(Act::Run(cmd.into(), vec![dir.clone()]));
                             }
                             buttons_left = br.left();
-                            bx -= 22.0 * k;
+                            bx -= bsz;
                         }
                     }
-                    let resp = ui.interact(Rect::from_min_max(r.min, egui::pos2(buttons_left - 2.0, r.bottom())), id, Sense::click());
+                    let card = Rect::from_min_max(egui::pos2(x0 + 18.0 * k, r.top()), egui::pos2(x1, r.bottom()));
+                    let resp = ui.interact(Rect::from_min_max(card.min, egui::pos2(buttons_left - 2.0, card.bottom())), id, Sense::click());
                     let p = ui.painter();
                     if is_sel || resp.hovered() {
-                        p.rect_filled(r.shrink2(egui::vec2(4.0, 1.0)), 5, theme.border);
+                        p.rect_filled(card, 6.0 * k, chrome::hover_bg(t));
                     }
-                    let x = r.left() + 30.0;
-                    let bcol = if wt.main { theme.fg_faint } else { theme.purple };
-                    paint_branch(p, Rect::from_center_size(egui::pos2(x + 5.0, r.center().y), egui::vec2(10.0, 12.0)), bcol);
-                    let mut rx = buttons_left - 8.0;
+                    let cy = r.center().y;
+                    let bcol = if wt.main { t.fg_faint } else { t.purple };
+                    chrome::branch(p, Rect::from_center_size(egui::pos2(card.left() + 12.0 * k, cy), egui::vec2(10.0 * k, 12.0 * k)), bcol);
+                    let mut rx = buttons_left - 8.0 * k;
                     if let Some(s) = &wt.status {
                         let mut parts: Vec<(String, Color32)> = Vec::new();
                         if s.added > 0 {
-                            parts.push((format!("+{}", s.added), theme.green));
+                            parts.push((format!("+{}", s.added), t.green));
                         }
                         if s.removed > 0 {
-                            parts.push((format!("−{}", s.removed), theme.red));
+                            parts.push((format!("−{}", s.removed), t.red));
                         }
                         if s.untracked > 0 {
-                            parts.push((format!("?{}", s.untracked), theme.fg_faint));
+                            parts.push((format!("{} new", s.untracked), t.fg_faint));
                         }
                         if s.ahead > 0 {
-                            parts.push((format!("↑{}", s.ahead), theme.cyan));
+                            parts.push((format!("↑{}", s.ahead), t.cyan));
                         }
                         if s.behind > 0 {
-                            parts.push((format!("↓{}", s.behind), theme.yellow));
+                            parts.push((format!("↓{}", s.behind), t.yellow));
                         }
-                        for (t, c) in parts.into_iter().rev() {
-                            let g = p.layout_no_wrap(t, small.clone(), c);
-                            rx -= g.size().x;
-                            p.galley(egui::pos2(rx, r.center().y - g.size().y / 2.0), g, c);
-                            rx -= 5.0;
+                        for (txt, c) in parts.into_iter().rev() {
+                            let tw = chrome::text_width(p, &txt, tiny.clone());
+                            rx -= tw;
+                            chrome::text(p, egui::pos2(rx, cy), &txt, tiny.clone(), c, tw + 1.0);
+                            rx -= 6.0 * k;
                         }
                     }
                     let label = if wt.branch.is_empty() { dir_name(&wt.path) } else { wt.branch.clone() };
-                    let lcol = if wt.items.is_empty() { theme.fg_faint } else { theme.fg_dim };
-                    text(p, egui::pos2(x + 15.0, r.center().y), &label, small.clone(), lcol, rx - x - 20.0);
+                    let lcol = if wt.items.is_empty() { t.fg_faint } else { t.fg_dim };
+                    chrome::text(p, egui::pos2(card.left() + 24.0 * k, cy), &label, small.clone(), lcol, rx - card.left() - 28.0 * k);
                     if resp.clicked() {
                         acts.push(Act::Select(idx));
                         acts.push(Act::Toggle(wt.path.clone()));
@@ -1721,21 +1595,20 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                     }
                 }
                 for it in &wt.items {
-                    item_row(ui, it, if show_wt { 22.0 } else { 12.0 }, &mut rows, &mut acts, &mut any_working, None);
+                    item_row(ui, &mut row, it, if show_wt { 18.0 * k } else { 0.0 }, &mut acts, &mut any_working, None);
                 }
             }
             if !pr.sessions.is_empty() {
-                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 20.0 * k), Sense::hover());
-                text(ui.painter(), egui::pos2(hr.left() + 32.0, hr.center().y + 2.0), "Recent sessions", small.clone(), theme.fg_faint, w);
+                section(ui, "Recent", 22.0 * k);
                 for i in &pr.sessions {
-                    session_row(ui, i, 22.0, false, &mut rows, &mut acts);
+                    session_row(ui, &mut row, i, 18.0 * k, false, &mut acts);
                 }
             }
-            ui.add_space(6.0);
+            ui.add_space(10.0 * k);
         }
         if projects.is_empty() {
             let (er, _) = ui.allocate_exact_size(egui::vec2(w, 40.0 * k), Sense::hover());
-            text(ui.painter(), egui::pos2(er.left() + 12.0, er.center().y), "No projects yet: start a chat or run project-add", small.clone(), theme.fg_faint, w - 20.0);
+            chrome::text(ui.painter(), egui::pos2(x0 + 4.0, er.center().y), "No projects yet: start a chat or run project-add", small.clone(), t.fg_faint, w - 20.0);
         }
     });
     if any_working {
