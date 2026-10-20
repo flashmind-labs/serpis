@@ -324,6 +324,11 @@ impl TerminalBuffer {
         true
     }
 
+    /// Whether a full-screen program (vim, less, htop, Claude Code) has the alternate screen.
+    pub fn alt_screen(&self) -> bool {
+        self.term.active_screen().is_ok_and(|s| s == Screen::Alternate)
+    }
+
     pub fn exit_copy_mode(&mut self) {
         if self.copy_mode {
             // Leaving normal state on the input line: insert where the copy cursor is.

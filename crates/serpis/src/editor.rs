@@ -957,6 +957,12 @@ impl Editor {
             Lookup::None => {}
         }
         if !self.pending_keys.is_empty() {
+            // In terminals a prefix like C-c means something to the program too: an unbound
+            // continuation sends both keys there instead of being dropped.
+            if self.prefix_passthrough() {
+                self.flush_pending_to_buffer(Some(chord));
+                return;
+            }
             let s = format_seq(&seq);
             self.pending_keys.clear();
             self.pending_since = None;
@@ -981,6 +987,24 @@ impl Editor {
             }
         }
         crate::packages::vim::flush_replay(self);
+    }
+
+    /// Whether the focused buffer's major mode is in `prefix-passthrough-modes`.
+    pub fn prefix_passthrough(&self) -> bool {
+        let Some(m) = self.meta(self.current_buffer()) else { return false };
+        self.minibuffer.is_none()
+            && self.var("prefix-passthrough-modes").and_then(Value::as_array).is_some_and(|a| a.iter().any(|v| v.as_str() == Some(m.major.as_str())))
+    }
+
+    /// Hand the pending prefix keys (and `then`) to the focused buffer as ordinary input.
+    pub fn flush_pending_to_buffer(&mut self, then: Option<KeyChord>) {
+        let mut keys = std::mem::take(&mut self.pending_keys);
+        keys.extend(then);
+        self.pending_since = None;
+        let id = self.current_buffer();
+        for k in keys {
+            self.with_buffer(id, |b, ed| b.handle_key(&k, ed));
+        }
     }
 
     /// Typed text that reached the buffer.
@@ -1036,6 +1060,18 @@ impl Editor {
         let ids: Vec<BufferId> = self.buffers.keys().collect();
         for id in ids {
             self.with_buffer(id, |b, ed| b.poll(ed));
+        }
+        // A lone prefix in a passthrough buffer (C-c in a terminal) reaches the program after
+        // `prefix-passthrough-timeout` seconds.
+        if let Some(since) = self.pending_since.filter(|_| !self.pending_keys.is_empty() && self.prefix_passthrough()) {
+            let t = self.var("prefix-passthrough-timeout").and_then(Value::as_f64).unwrap_or(0.5);
+            if t > 0.0 {
+                let wait = Duration::from_secs_f64(t);
+                match wait.checked_sub(since.elapsed()) {
+                    Some(left) => self.ctx.request_repaint_after(left),
+                    None => self.flush_pending_to_buffer(None),
+                }
+            }
         }
         crate::lua::poll_reload(self);
         crate::minibuffer::notify_selection(self);

@@ -39,7 +39,16 @@ Fonts are set in `init.lua` with an installed family name or a font file, e.g.
 terminals, where normal state navigates the scrollback and edits the command line after the prompt
 (`dw`, `ciw`, `A`, `p`, ...): edits are replayed to the program as keys, so they work in zsh, bash or
 Claude Code's prompt. zsh gets OSC 133 prompt marks automatically; other shells fall back to
-`terminal-prompt-regexp`. `SPC` is the leader and `C-w` the window prefix.
+`terminal-prompt-regexp`. `<leader>` (`leader-key`, default `SPC`) starts vim normal-state
+bindings and `C-w` is the window prefix.
+
+In terminals `C-c` is a prefix, as in Emacs: `C-c C-c` sends a real Ctrl-C, and a `C-c` followed by
+an unbound key goes to the program as both keys (`prefix-passthrough-modes`,
+`prefix-passthrough-timeout`). In vim insert state `ESC` follows `terminal-escape`: `"auto"` sends
+it to full-screen programs (neovim, less, Claude Code) and leaves insert state at a shell prompt,
+`"terminal"` always sends it, `"serpis"` always leaves insert state. `C-c C-z` cycles it for the
+current terminal, `C-c ESC` does whichever ESC doesn't, and the header shows `ESC → program`
+while ESC goes to the program.
 Windows can also be split, closed and resized with the mouse (header buttons, draggable dividers).
 
 ## Windows and workspaces

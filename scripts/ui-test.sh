@@ -6,7 +6,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build -q --manifest-path "$root/Cargo.toml" -p serpis-bin
 tmp="$(mktemp -d)"
 fail=0
-for t in "${@:-vim emacs terminal workspaces fonts layout mouse}"; do
+for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse}"; do
   for name in $t; do
     out="$tmp/$name.out"
     SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \

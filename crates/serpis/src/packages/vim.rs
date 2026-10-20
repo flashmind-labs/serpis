@@ -145,6 +145,12 @@ pub fn enable(ed: &mut Editor) {
         None
     });
     ed.add_interceptor(OWNER, intercept);
+    // Terminals say when ESC goes to the program instead of leaving insert state.
+    ed.add_segment(true, "terminal-escape", OWNER, |ed, buf| {
+        let id = buf?;
+        let insert = state_of(ed, id) == Some(State::Insert);
+        (ed.meta(id)?.major == "terminal" && insert && escape_to_program(ed, id)).then(|| "ESC → program".to_string())
+    });
     install_commands(ed);
     install_keymaps(ed);
 }
@@ -173,6 +179,11 @@ fn install_keymaps(ed: &mut Editor) {
         ed.bind("vim-insert", k, c, o);
     }
     // In terminals, Escape leaves insert state; C-c ESC sends a real escape.
+    // ESC follows `terminal-escape`; C-c ESC does the other thing; C-c C-z cycles the mode.
+    for (k, c) in [("ESC", "terminal-escape"), ("C-[", "terminal-escape"), ("C-c ESC", "terminal-escape-other"), ("C-c C-z", "terminal-cycle-escape")] {
+        ed.bind("vim-insert:terminal", k, c, o);
+    }
+    ed.bind("vim-normal:terminal", "C-c C-z", "terminal-cycle-escape", o);
     ed.bind("vim-insert:terminal", "C-w", "vim-terminal-passthrough", o);
     ed.bind("vim-insert:terminal", "C-u", "vim-terminal-passthrough", o);
     ed.bind("vim-insert:terminal", "C-r", "vim-terminal-passthrough", o);
@@ -283,6 +294,41 @@ fn install_commands(ed: &mut Editor) {
         }
         Ok(())
     });
+    ed.define_command("terminal-escape", "ESC in a terminal: to the program or to vim normal state, per terminal-escape.", o, |ed, _| {
+        let id = ed.current_buffer();
+        if escape_to_program(ed, id) {
+            send_escape(ed, id);
+        } else {
+            ed.call("vim-normal-state");
+        }
+        Ok(())
+    });
+    ed.define_command("terminal-escape-other", "Do what ESC currently doesn't: enter normal state, or send ESC to the program.", o, |ed, _| {
+        let id = ed.current_buffer();
+        if escape_to_program(ed, id) {
+            ed.call("vim-normal-state");
+        } else {
+            send_escape(ed, id);
+        }
+        Ok(())
+    });
+    ed.define_command("terminal-cycle-escape", "Cycle where ESC goes in this terminal: auto, terminal, serpis.", o, |ed, _| {
+        let id = ed.current_buffer();
+        let next = match escape_mode(ed, id).as_str() {
+            "auto" => "terminal",
+            "terminal" => "serpis",
+            _ => "auto",
+        };
+        if let Some(m) = ed.meta_mut(id) {
+            m.vars.insert("terminal-escape".into(), json!(next));
+        }
+        ed.message(match next {
+            "auto" => "ESC: auto (to the program when it is full-screen, else normal state)",
+            "terminal" => "ESC: always to the program (C-c ESC for normal state)",
+            _ => "ESC: always to serpis normal state (C-c ESC sends it to the program)",
+        });
+        Ok(())
+    });
     ed.define_command("vim-terminal-passthrough", "Send the key to the terminal unchanged.", o, |ed, a: &Args| {
         if let Some(k) = a.keys.last().cloned() {
             let id = ed.current_buffer();
@@ -297,6 +343,30 @@ fn install_commands(ed: &mut Editor) {
         });
         Ok(())
     });
+}
+
+/// `terminal-escape` for terminal `id`: its own value (set by C-c C-z), else the global one.
+fn escape_mode(ed: &Editor, id: BufferId) -> String {
+    ed.meta(id)
+        .and_then(|m| m.vars.get("terminal-escape"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| ed.var_str("terminal-escape"))
+        .unwrap_or_else(|| "auto".into())
+}
+
+/// Whether ESC in terminal `id` goes to the program right now.
+fn escape_to_program(ed: &mut Editor, id: BufferId) -> bool {
+    match escape_mode(ed, id).as_str() {
+        "terminal" => true,
+        "serpis" => false,
+        _ => ed.with_buffer_as::<crate::buffers::terminal::TerminalBuffer, bool>(id, |t, _| t.alt_screen()).unwrap_or(false),
+    }
+}
+
+fn send_escape(ed: &mut Editor, id: BufferId) {
+    let k = KeyChord::named("escape");
+    ed.with_buffer(id, |b, ed| b.handle_key(&k, ed));
 }
 
 fn ex_candidates(ed: &Editor) -> Vec<crate::minibuffer::Candidate> {
