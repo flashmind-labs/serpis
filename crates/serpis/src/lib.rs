@@ -14,6 +14,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod editor;
 pub mod fonts;
+pub mod git;
 pub mod keymap;
 pub mod layout;
 pub mod workspace;
@@ -26,13 +27,14 @@ pub mod mouse;
 pub mod packages;
 pub mod plugins;
 pub mod project;
+pub mod sidebar;
 pub mod text;
 pub mod theme;
 pub mod themes;
 pub mod ui;
 
 pub use anyhow;
-pub use buffer::{Buffer, BufferId, Modeline, ProcessStatus, WindowId};
+pub use buffer::{Activity, ActivityState, Buffer, BufferId, Modeline, ProcessStatus, WindowId};
 pub use eframe;
 pub use editor::{Args, Editor, KeyResult, MainSender};
 pub use egui;
@@ -98,8 +100,9 @@ pub fn bootstrap(ed: &mut Editor) {
     wm::install(ed);
     workspace::install(ed);
     mouse::install(ed);
-    ed.define_buffer_kind("chat", o, |ed, _| Ok(Box::new(buffers::chat::ChatBuffer::new(ed))));
-    ed.define_buffer_kind("terminal", o, |ed, _| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed)?)));
+    sidebar::install(ed);
+    ed.define_buffer_kind("chat", o, |ed, p| Ok(Box::new(buffers::chat::ChatBuffer::new(ed, p))));
+    ed.define_buffer_kind("terminal", o, |ed, p| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed, p)?)));
     ed.define_buffer_kind("text", o, |_, p| {
         Ok(Box::new(buffers::text::TextBuffer::new(p.get("text").and_then(Value::as_str).unwrap_or(""))))
     });

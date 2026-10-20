@@ -222,6 +222,8 @@ pub struct Editor {
     pub custom_themes: Vec<(String, crate::themes::ThemeSpec)>,
     /// Bumped on every theme change so buffers can refresh derived colors.
     pub theme_generation: u64,
+    /// The project/agent sidebar's state.
+    pub sidebar: crate::sidebar::Sidebar,
 }
 
 impl Editor {
@@ -290,6 +292,7 @@ impl Editor {
             flashes: Vec::new(),
             custom_themes: Vec::new(),
             theme_generation: 0,
+            sidebar: Default::default(),
         }
     }
 
@@ -613,6 +616,7 @@ impl Editor {
     /// Focus `w` (in the current workspace) and drop any container selection.
     pub fn focus_window(&mut self, w: WindowId) {
         if self.layout.contains(w) {
+            self.sidebar.focused = false;
             self.focused = w;
             self.selected = None;
             self.layout.note_focus(w);
@@ -862,6 +866,11 @@ impl Editor {
             maps.push("global".to_string());
             return maps;
         }
+        if self.sidebar.focused {
+            maps.push("sidebar".to_string());
+            maps.push("global".to_string());
+            return maps;
+        }
         if let Some(meta) = self.meta(self.current_buffer()) {
             for m in &meta.minor_modes {
                 maps.push(format!("{m}:{}", meta.major));
@@ -973,6 +982,10 @@ impl Editor {
             crate::minibuffer::self_insert(self, &chord);
             return;
         }
+        if self.sidebar.focused {
+            crate::sidebar::self_insert(self, &chord);
+            return;
+        }
         for i in self.interceptors.clone() {
             if (i.f)(self, &chord) == KeyResult::Handled {
                 crate::packages::vim::flush_replay(self);
@@ -993,6 +1006,7 @@ impl Editor {
     pub fn prefix_passthrough(&self) -> bool {
         let Some(m) = self.meta(self.current_buffer()) else { return false };
         self.minibuffer.is_none()
+            && !self.sidebar.focused
             && self.var("prefix-passthrough-modes").and_then(Value::as_array).is_some_and(|a| a.iter().any(|v| v.as_str() == Some(m.major.as_str())))
     }
 
@@ -1013,6 +1027,10 @@ impl Editor {
             crate::minibuffer::insert_text(self, text);
             return;
         }
+        if self.sidebar.focused {
+            crate::sidebar::insert_text(self, text);
+            return;
+        }
         let id = self.current_buffer();
         self.with_buffer(id, |b, ed| b.handle_text(text, ed));
     }
@@ -1028,6 +1046,10 @@ impl Editor {
     pub fn handle_paste(&mut self, text: &str) {
         if self.minibuffer.is_some() {
             crate::minibuffer::insert_text(self, text);
+            return;
+        }
+        if self.sidebar.focused {
+            crate::sidebar::insert_text(self, text);
             return;
         }
         let id = self.current_buffer();
@@ -1073,6 +1095,7 @@ impl Editor {
                 }
             }
         }
+        crate::sidebar::track(self);
         crate::lua::poll_reload(self);
         crate::minibuffer::notify_selection(self);
         // Report layout changes once per frame with the previous layout (winner-style undo).

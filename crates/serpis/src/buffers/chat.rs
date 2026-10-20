@@ -14,7 +14,7 @@ use serde_json::Value;
 use serpis_agent::{AgentConfig, AgentEvent, AgentHandle, ToolGate, ToolHooks, ToolResult};
 use serpis_ai::*;
 
-use crate::buffer::{Buffer, Modeline};
+use crate::buffer::{Activity, ActivityState, Buffer, Modeline};
 use crate::editor::{Editor, MainSender};
 use crate::impl_any;
 use crate::text::{Block, CursorShape, DocView, LineSource, Pos, StyledLine, TextArea, TextSurface, ViewOptions, char_len};
@@ -76,12 +76,17 @@ pub struct ChatBuffer {
     started: Option<Instant>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
+    /// Short title: the first prompt unless set (`chat-set-title`).
+    pub title: String,
+    /// Error of the last run, if it failed.
+    last_error: Option<String>,
 }
 
 const PREVIEW_LINES: usize = 10;
 
 impl ChatBuffer {
-    pub fn new(ed: &mut Editor) -> Self {
+    /// A chat in `params.cwd`, else in the editor's directory.
+    pub fn new(ed: &mut Editor, params: &Value) -> Self {
         let (tx, rx) = mpsc::channel();
         let mut view = DocView::default();
         view.follow_tail = true;
@@ -109,11 +114,13 @@ impl ChatBuffer {
             model,
             thinking,
             session_id: uuid::Uuid::new_v4().to_string(),
-            cwd: ed.cwd.clone(),
+            cwd: params.get("cwd").and_then(Value::as_str).map(crate::expand_home).unwrap_or_else(|| ed.cwd.clone()),
             totals: Usage::default(),
             started: None,
             prompt_history: Vec::new(),
             history_index: None,
+            title: String::new(),
+            last_error: None,
         };
         if chat.model.is_none() {
             chat.entries.push(Entry::Info {
@@ -140,6 +147,8 @@ impl ChatBuffer {
         self.history.clear();
         self.totals = Usage::default();
         self.session_id = uuid::Uuid::new_v4().to_string();
+        self.title.clear();
+        self.last_error = None;
         self.dirty = true;
     }
 
@@ -169,6 +178,9 @@ impl ChatBuffer {
 
     /// Submit text as a user message (also used by Lua `serpis.agent.prompt`).
     pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) {
+        if self.title.is_empty() {
+            self.title = title_from(&text);
+        }
         let msg = Message::user_text(text.clone());
         if let Some(agent) = &self.agent {
             if follow_up {
@@ -229,6 +241,7 @@ impl ChatBuffer {
             repaint.repaint();
         });
         let _guard = ed.rt.enter();
+        self.last_error = None;
         self.agent = Some(serpis_agent::run(self.history.clone(), vec![msg], cfg, emit));
         self.started = Some(Instant::now());
         self.view.follow_tail = true;
@@ -353,7 +366,11 @@ impl ChatBuffer {
                             if !*continuation {
                                 *usage = Some(a.usage.clone());
                                 if failed {
-                                    *error = Some(a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason)));
+                                    let msg = a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason));
+                                    if a.stop_reason == StopReason::Error {
+                                        self.last_error = Some(msg.clone());
+                                    }
+                                    *error = Some(msg);
                                 }
                                 break;
                             }
@@ -398,6 +415,7 @@ impl ChatBuffer {
             AgentEvent::AgentEnd { error } => {
                 self.agent = None;
                 if let Some(e) = error {
+                    self.last_error = Some(e.clone());
                     self.entries.push(Entry::Info { text: e, face: Face::Error });
                 }
                 for e in &mut self.entries {
@@ -553,6 +571,41 @@ impl ChatBuffer {
     fn t_len(&self) -> usize {
         self.lines.len()
     }
+
+    /// What the running agent is doing right now.
+    fn current_step(&self) -> String {
+        for e in self.entries.iter().rev() {
+            match e {
+                Entry::Tool { name, args, result: None, .. } => {
+                    let s = tool_summary(name, args);
+                    return if s.is_empty() { name.clone() } else { format!("{name} {s}") };
+                }
+                Entry::Assistant { blocks, streaming: true, .. } => {
+                    return match blocks.last() {
+                        Some(AssistantContent::Thinking { .. }) | None => "thinking".into(),
+                        _ => "writing".into(),
+                    };
+                }
+                Entry::Tool { .. } | Entry::Assistant { .. } => break,
+                _ => {}
+            }
+        }
+        "working".into()
+    }
+}
+
+/// A chat title from its first prompt: the first line, cut at a word near 48 characters.
+fn title_from(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.chars().count() <= 48 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(48).collect();
+    let cut = match cut.rfind(' ') {
+        Some(i) if i > 24 => &cut[..i],
+        _ => &cut,
+    };
+    format!("{}…", cut.trim_end())
 }
 
 fn add_usage(total: &mut Usage, u: &Usage) {
@@ -1056,9 +1109,20 @@ impl Buffer for ChatBuffer {
         }
         status.push(self.cwd.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
         Modeline {
-            title: String::new(),
+            title: self.title.clone(),
             status,
             busy: self.running(),
+        }
+    }
+
+    fn activity(&self) -> Activity {
+        if self.running() {
+            return Activity { since: self.started, ..Activity::new(ActivityState::Working, self.current_step()) };
+        }
+        match &self.last_error {
+            Some(e) => Activity::new(ActivityState::Error, e.lines().next().unwrap_or("")),
+            // Idle chats say which model they talk to.
+            None => Activity::new(ActivityState::Idle, self.model.as_ref().map(|m| short_model(&m.id)).unwrap_or("no model")),
         }
     }
 

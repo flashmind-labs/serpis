@@ -20,7 +20,9 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 |---|---|
 | `s-P` / `M-x` | run any command |
 | `s-p` | switch buffer |
-| `s-n` / `s-t` | new chat / new terminal |
+| `s-n` / `s-t` | new chat / new terminal (in the current buffer's project) |
+| `s-N` / `s-T` | new chat in a new git worktree / new terminal |
+| `s-b` / `s-e` | toggle the sidebar / search it |
 | `s-\` / `s-\|` | split right / below |
 | `s-]` `s-[` `s-1..9` | move between windows |
 | `s-w` / `s-W` | close window (the buffer stays) / kill buffer |
@@ -50,6 +52,48 @@ it to full-screen programs (neovim, less, Claude Code) and leaves insert state a
 current terminal, `C-c ESC` does whichever ESC doesn't, and the header shows `ESC → program`
 while ESC goes to the program.
 Windows can also be split, closed and resized with the mouse (header buttons, draggable dividers).
+
+## Sidebar: projects, worktrees and agents
+
+The sidebar (`s-b`) lists every chat and terminal grouped by project (a repository's main
+checkout) and by git worktree, each worktree with its branch and changes (`+added −removed`,
+untracked, ahead/behind). Each buffer shows what it is doing: a spinner and the current step
+while it works (`bash cargo test`, `thinking`), a yellow dot when an agent waits for you, a red
+cross on errors. A buffer that finishes or starts waiting while you aren't looking gets a dot
+until you open it. Project headers count working and waiting agents.
+
+Chats work, and so do agents in terminals: programs in `agent-programs` (`claude`, `codex`, `pi`,
+...) count as working while output flows or their title spins (`terminal-busy-title-regexp`),
+and as waiting for you after `terminal-quiet-seconds` of quiet. Other commands work until they
+exit.
+
+`s-e` focuses the search: type to filter all buffers by name, title, project, branch, state
+and (from three characters) content; arrows / `C-n` `C-p` pick, `RET` opens (focusing the window
+that already shows it, on any workspace), `s-RET` opens in a split, `TAB` folds, `ESC` clears and
+leaves. Hover buttons and right-click menus (`sidebar-buffer-menu`, `sidebar-project-menu`,
+`sidebar-worktree-menu`) start chats and terminals in a project or worktree, create and remove
+worktrees and kill buffers.
+
+Every project can have any number of chats. `worktree-new-chat` (`s-N`) asks for a branch,
+runs `git worktree add` under `worktree-directory` (default `~/.serpis/worktrees/<project>/<branch>`)
+and opens a chat there; `worktree-remove` kills the worktree's buffers and removes it after
+confirming (`worktree-delete-branch` decides about the branch). `project-add` pins a project so
+it is listed with no buffers open. Chats are titled by their first prompt (`buffer-set-title`
+renames).
+
+From Lua: `serpis.sidebar.toggle/focus/query/items/selected/open`,
+`serpis.project.list/add/remove/repo/worktrees/new_worktree`,
+`serpis.buffer.activity/set_activity/title/set_title`, and the hooks `buffer-activity-changed`
+({buffer, name, kind, state, previous, detail, agent, attention}), `worktree-created` and
+`worktree-removed`. For example, a desktop notification when an agent needs you:
+
+```lua
+serpis.hook.add("buffer-activity-changed", function(e)
+  if e.attention then
+    os.execute(string.format([[osascript -e 'display notification "%s" with title "serpis"']], e.name .. ": " .. e.state))
+  end
+end)
+```
 
 ## Windows and workspaces
 
@@ -111,5 +155,5 @@ docs/PLAN.md          design and roadmap
 
 ```sh
 cargo test                 # unit tests
-scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces
+scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces, sidebar
 ```

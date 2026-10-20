@@ -11,7 +11,7 @@
 
 use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ use libghostty_vt::screen::{CellSemanticContent, CellWide, Screen};
 use libghostty_vt::style::{RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport, Terminal};
 
-use crate::buffer::{Buffer, Modeline, ProcessStatus};
+use crate::buffer::{Activity, ActivityState, Buffer, Modeline, ProcessStatus};
 use crate::editor::Editor;
 use crate::impl_any;
 use crate::keys::{Key, KeyChord};
@@ -77,6 +77,16 @@ pub struct TerminalBuffer {
     /// The PTY closed while an edit was waiting for echo; `poll` reports it.
     exit_seen: bool,
     prompt_re: Option<regex::Regex>,
+    /// Last output that wasn't the echo of our own input (activity detection).
+    last_output: Option<Instant>,
+    last_input: Cell<Option<Instant>>,
+    /// Foreground program (sampled in `poll`) and whether it is a coding agent.
+    fg: Option<String>,
+    fg_agent: bool,
+    fg_checked: Option<Instant>,
+    busy_title_re: Option<regex::Regex>,
+    /// Seconds of quiet after which an agent counts as waiting for input.
+    quiet_after: f64,
 }
 
 /// The editable input on the terminal cursor's logical line (soft-wrapped rows included).
@@ -154,10 +164,12 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
 }
 
 impl TerminalBuffer {
-    pub fn new(ed: &mut Editor) -> anyhow::Result<Self> {
+    /// A shell in `params.cwd`, else in the editor's directory.
+    pub fn new(ed: &mut Editor, params: &serde_json::Value) -> anyhow::Result<Self> {
         let (cols, rows) = (100u16, 30u16);
         let integration = ed.var("terminal-shell-integration").and_then(serde_json::Value::as_bool).unwrap_or(true);
-        let (master, child) = spawn_shell(&ed.cwd, cols, rows, integration)?;
+        let cwd = params.get("cwd").and_then(serde_json::Value::as_str).map(crate::expand_home).filter(|d| d.is_dir()).unwrap_or_else(|| ed.cwd.clone());
+        let (master, child) = spawn_shell(&cwd, cols, rows, integration)?;
         let master = Arc::new(master);
         let reader = nix::unistd::dup(master.as_raw_fd())?;
         let (tx, rx) = mpsc::channel();
@@ -230,15 +242,23 @@ impl TerminalBuffer {
             origin: Pos2::ZERO,
             out: Vec::new(),
             title: String::new(),
-            cwd: ed.cwd.clone(),
+            cwd,
             theme_gen: None,
             exit_seen: false,
             prompt_re: regex::Regex::new(&ed.var_str("terminal-prompt-regexp").unwrap_or_else(|| DEFAULT_PROMPT_REGEXP.into())).ok(),
+            last_output: None,
+            last_input: Cell::new(None),
+            fg: None,
+            fg_agent: false,
+            fg_checked: None,
+            busy_title_re: None,
+            quiet_after: 1.5,
         })
     }
 
     pub fn write(&self, data: &[u8]) {
         if !self.exited {
+            self.last_input.set(Some(Instant::now()));
             let _ = nix::unistd::write(self.master.as_ref(), data);
         }
     }
@@ -324,6 +344,22 @@ impl TerminalBuffer {
         true
     }
 
+    /// Note the foreground program and re-read the activity settings.
+    fn sample_foreground(&mut self, ed: &Editor) {
+        self.fg_checked = Some(Instant::now());
+        let fg = match self.process_status() {
+            ProcessStatus::Running(p) => Some(p),
+            _ => None,
+        };
+        self.fg = fg;
+        self.fg_agent = self.fg.as_ref().is_some_and(|p| crate::sidebar::is_agent_program(ed, p));
+        let re = ed.var_str("terminal-busy-title-regexp").unwrap_or_default();
+        if self.busy_title_re.as_ref().map(regex::Regex::as_str) != Some(re.as_str()) {
+            self.busy_title_re = (!re.is_empty()).then(|| regex::Regex::new(&re).ok()).flatten();
+        }
+        self.quiet_after = ed.var("terminal-quiet-seconds").and_then(serde_json::Value::as_f64).unwrap_or(1.5);
+    }
+
     /// Whether a full-screen program (vim, less, htop, Claude Code) has the alternate screen.
     pub fn alt_screen(&self) -> bool {
         self.term.active_screen().is_ok_and(|s| s == Screen::Alternate)
@@ -355,6 +391,11 @@ impl TerminalBuffer {
     }
 
     fn feed(&mut self, data: &[u8]) {
+        // Output right after a key is mostly its echo, not the program working.
+        let echo = self.last_input.get().is_some_and(|t| t.elapsed() < Duration::from_millis(300));
+        if !echo {
+            self.last_output = Some(Instant::now());
+        }
         self.term.vt_write(data);
         self.output_gen += 1;
         self.invalidate_rows(false);
@@ -726,6 +767,9 @@ impl Buffer for TerminalBuffer {
                 self.title = t.to_string();
             }
         }
+        if self.fg_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(400)) {
+            self.sample_foreground(ed);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
@@ -976,6 +1020,29 @@ impl Buffer for TerminalBuffer {
             status,
             busy: false,
         }
+    }
+
+    /// Agents work while their output flows (or their title shows a spinner) and wait for
+    /// the user when quiet; other programs work until they exit, unless they are full-screen.
+    fn activity(&self) -> Activity {
+        if self.exited {
+            return Activity::new(ActivityState::Exited, "exited");
+        }
+        let Some(p) = self.fg.clone() else { return Activity::default() };
+        let busy_title = self.busy_title_re.as_ref().is_some_and(|r| r.is_match(&self.title));
+        let quiet = self.last_output.is_none_or(|t| t.elapsed().as_secs_f64() > self.quiet_after);
+        let state = if self.fg_agent {
+            if busy_title || !quiet { ActivityState::Working } else { ActivityState::Waiting }
+        } else if self.alt_screen() {
+            ActivityState::Idle
+        } else {
+            ActivityState::Working
+        };
+        Activity { state, detail: p.clone(), since: None, program: Some(p) }
+    }
+
+    fn title(&self) -> String {
+        self.title.clone()
     }
 
     fn directory(&self) -> Option<std::path::PathBuf> {

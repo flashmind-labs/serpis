@@ -378,6 +378,47 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })?;
         lua.to_value(&v)
     })?)?;
+    // serpis.buffer.activity(id?): {state, detail, program, attention, seconds}.
+    buf.set("activity", lua.create_function(|lua, id: Option<u64>| {
+        let v = ed(|e| {
+            let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+            let a = e.buffer_activity(id);
+            let t = e.sidebar.tracked.get(&id);
+            json!({
+                "state": a.state.as_str(), "detail": a.detail, "program": a.program,
+                "attention": t.is_some_and(|t| t.attention),
+                "seconds": t.map(|t| t.since.elapsed().as_secs()).unwrap_or(0),
+            })
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    // serpis.buffer.set_activity(id?, {state = "waiting", detail = "needs approval"} | nil): override what a buffer reports.
+    buf.set("set_activity", lua.create_function(|lua, (id, spec): (Option<u64>, LuaValue)| {
+        let v: Value = if spec.is_nil() { Value::Null } else { lua.from_value(spec)? };
+        ed(|e| {
+            let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+            if let Some(m) = e.meta_mut(id) {
+                if v.is_null() {
+                    m.vars.remove("activity");
+                } else {
+                    m.vars.insert("activity".into(), v);
+                }
+            }
+        })
+    })?)?;
+    buf.set("title", lua.create_function(|_, id: Option<u64>| ed(|e| {
+        let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+        e.buffer_title(id)
+    }))?)?;
+    buf.set("set_title", lua.create_function(|_, (id, title): (Option<u64>, Option<String>)| ed(|e| {
+        let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+        if let Some(m) = e.meta_mut(id) {
+            match title.filter(|t| !t.is_empty()) {
+                Some(t) => m.vars.insert("title".into(), json!(t)),
+                None => m.vars.remove("title"),
+            };
+        }
+    }))?)?;
     buf.set("by_name", lua.create_function(|_, name: String| ed(|e| e.buffer_by_name(&name).map(buffer_id_to_u64)))?)?;
     buf.set("scratch", lua.create_function(|_, ()| ed(|e| buffer_id_to_u64(e.scratch_buffer())))?)?;
     buf.set("exists", lua.create_function(|_, id: u64| ed(|e| e.buffers.contains_key(buffer_id_from_u64(id))))?)?;
@@ -589,7 +630,97 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
         e.buffer_directory(id).and_then(|d| crate::project::name(&d))
     }))?)?;
+    // serpis.project.repo(dir): {worktree, main, branch, linked} for the repository around dir.
+    project.set("repo", lua.create_function(|lua, dir: String| {
+        match crate::git::repo(std::path::Path::new(&crate::expand_home(&dir))) {
+            Some(r) => lua.to_value(&json!({"worktree": r.worktree.to_string_lossy(), "main": r.main.to_string_lossy(), "branch": r.head_label(), "linked": r.is_linked()})),
+            None => Ok(LuaValue::Nil),
+        }
+    })?)?;
+    // serpis.project.worktrees(dir): {path, branch, head, main, locked} (runs git).
+    project.set("worktrees", lua.create_function(|lua, dir: String| {
+        let list = crate::git::worktrees(&crate::expand_home(&dir)).map_err(|e| mlua::Error::runtime(format!("{e:#}")))?;
+        let v: Vec<Value> = list.iter().map(|w| json!({"path": w.path.to_string_lossy(), "branch": w.branch, "head": w.head, "main": w.main, "locked": w.locked})).collect();
+        lua.to_value(&v)
+    })?)?;
+    // serpis.project.new_worktree(dir, branch, {kind = "chat"|"terminal"|false, on_done = fn(path)}).
+    project.set("new_worktree", lua.create_function(|lua, (dir, branch, opts): (String, String, Option<Table>)| {
+        let kind: Option<String> = match opts.as_ref().map(|o| o.get::<LuaValue>("kind")).transpose()? {
+            Some(LuaValue::Boolean(false)) => None,
+            Some(LuaValue::String(k)) => Some(k.to_string_lossy().to_string()),
+            _ => Some("chat".into()),
+        };
+        let on_done: Option<Function> = opts.as_ref().and_then(|o| o.get("on_done").ok());
+        let l = lua.clone();
+        let done = on_done.map(|f| SendPtr(Box::new((l, f))));
+        ed(|e| crate::sidebar::create_worktree(e, crate::expand_home(&dir), branch, move |e, path| {
+            if let Some(k) = kind {
+                if let Err(err) = e.new_buffer_in(&k, &path) {
+                    e.error(format!("{err:#}"));
+                }
+            }
+            if let Some(SendPtr(b)) = done {
+                let (lua, f) = *b;
+                call(e, &lua, &f, &json!(path.to_string_lossy()));
+            }
+        }))
+    })?)?;
+    project.set("add", lua.create_function(|_, dir: String| ed(|e| crate::sidebar::add_project(e, &crate::expand_home(&dir))))?)?;
+    project.set("remove", lua.create_function(|_, dir: String| ed(|e| crate::sidebar::remove_project(e, &crate::expand_home(&dir))))?)?;
+    // serpis.project.list(): the sidebar's groups: {root, name, git, worktrees = {{path, branch, main, status, buffers}}}.
+    project.set("list", lua.create_function(|lua, ()| {
+        let v = ed(|e| crate::sidebar::projects(e).iter().map(crate::sidebar::Project::to_json).collect::<Vec<_>>())?;
+        lua.to_value(&v)
+    })?)?;
     s.set("project", project)?;
+
+    // The sidebar.
+    let sb = lua.create_table()?;
+    sb.set("toggle", lua.create_function(|_, on: Option<bool>| ed(|e| {
+        let on = on.unwrap_or(!e.var_bool("sidebar-visible"));
+        crate::sidebar::set_visible(e, on);
+        on
+    }))?)?;
+    sb.set("visible", lua.create_function(|_, ()| ed(|e| e.var_bool("sidebar-visible")))?)?;
+    sb.set("focus", lua.create_function(|_, on: Option<bool>| ed(|e| {
+        if on.unwrap_or(true) {
+            crate::sidebar::focus(e);
+        } else {
+            e.sidebar.focused = false;
+        }
+    }))?)?;
+    sb.set("focused", lua.create_function(|_, ()| ed(|e| e.sidebar.focused))?)?;
+    sb.set("query", lua.create_function(|_, q: Option<String>| ed(|e| {
+        if let Some(q) = q {
+            e.sidebar.query = q;
+            e.sidebar.selected = 0;
+        }
+        e.sidebar.query.clone()
+    }))?)?;
+    // serpis.sidebar.items(query?): every buffer as {buffer, name, title, kind, project, worktree,
+    // branch, state, detail, program, seconds, agent, attention, visible, current}; with a query, the matches.
+    sb.set("items", lua.create_function(|lua, q: Option<String>| {
+        let v = ed(|e| {
+            let list = match q.filter(|q| !q.is_empty()) {
+                Some(q) => crate::sidebar::search(e, &q),
+                None => crate::sidebar::items(e),
+            };
+            list.iter().map(crate::sidebar::Item::to_json).collect::<Vec<_>>()
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    // serpis.sidebar.selected(): the selected row as {kind = "buffer"|"project"|"worktree", id|path}.
+    sb.set("selected", lua.create_function(|lua, ()| {
+        let v = ed(|e| match e.sidebar.rows.get(e.sidebar.selected) {
+            Some(crate::sidebar::RowRef::Item(id)) => json!({"kind": "buffer", "id": buffer_id_to_u64(*id)}),
+            Some(crate::sidebar::RowRef::Project(p)) => json!({"kind": "project", "path": p.to_string_lossy()}),
+            Some(crate::sidebar::RowRef::Worktree(p)) => json!({"kind": "worktree", "path": p.to_string_lossy()}),
+            None => Value::Null,
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    sb.set("open", lua.create_function(|_, id: u64| ed(|e| e.open_buffer(buffer_id_from_u64(id))))?)?;
+    s.set("sidebar", sb)?;
 
     // `serpis.highlight.on_yank(event, opts)`: flash the yanked region, like Neovim's
     // `vim.highlight.on_yank()` (call it from a `text-yanked` hook).
@@ -947,6 +1078,29 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                     crate::mouse::DropTarget::Window(w, r) => json!({"kind": "window", "id": crate::editor::window_id_to_u64(*w), "rect": rect(r)}),
                     crate::mouse::DropTarget::Tabs { rect: r, tabs, .. } => json!({"kind": "tabs", "rect": rect(r), "tabs": tabs.iter().map(rect).collect::<Vec<_>>()}),
                     crate::mouse::DropTarget::Workspace(n, r) => json!({"kind": "workspace", "name": n, "rect": rect(r)}),
+                })
+                .collect::<Vec<_>>()
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    // Sidebar rows drawn last frame: {kind, id|path, x, y, w, h}.
+    debug.set("sidebar_rows", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            e.sidebar
+                .rows
+                .iter()
+                .zip(&e.sidebar.row_rects)
+                .map(|(row, r)| {
+                    let mut o = match row {
+                        crate::sidebar::RowRef::Item(id) => json!({"kind": "buffer", "id": buffer_id_to_u64(*id)}),
+                        crate::sidebar::RowRef::Project(p) => json!({"kind": "project", "path": p.to_string_lossy()}),
+                        crate::sidebar::RowRef::Worktree(p) => json!({"kind": "worktree", "path": p.to_string_lossy()}),
+                    };
+                    o["x"] = json!(r.min.x);
+                    o["y"] = json!(r.min.y);
+                    o["w"] = json!(r.width());
+                    o["h"] = json!(r.height());
+                    o
                 })
                 .collect::<Vec<_>>()
         })?;

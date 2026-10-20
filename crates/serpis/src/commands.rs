@@ -322,14 +322,14 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
-    ed.define_command("new-chat", "Open a new agent chat.", o, |ed, _| {
-        let id = ed.create_buffer("chat", Some("*chat*"), &Value::Null)?;
-        ed.show_buffer(id);
+    ed.define_command("new-chat", "Open a new agent chat (param: directory; default per new-buffer-directory).", o, |ed, a| {
+        let dir = a.str(0).map(crate::expand_home).unwrap_or_else(|| ed.new_buffer_directory());
+        ed.new_buffer_in("chat", &dir)?;
         Ok(())
     });
-    ed.define_command("new-terminal", "Open a new terminal.", o, |ed, _| {
-        let id = ed.create_buffer("terminal", Some("*terminal*"), &Value::Null)?;
-        ed.show_buffer(id);
+    ed.define_command("new-terminal", "Open a new terminal (param: directory; default per new-buffer-directory).", o, |ed, a| {
+        let dir = a.str(0).map(crate::expand_home).unwrap_or_else(|| ed.new_buffer_directory());
+        ed.new_buffer_in("terminal", &dir)?;
         Ok(())
     });
     ed.define_command("new-scratch", "Open a new scratch buffer.", o, |ed, _| {
@@ -847,7 +847,7 @@ pub fn open_file(ed: &mut Editor, path: std::path::PathBuf) -> anyhow::Result<()
     Ok(())
 }
 
-fn file_candidates(input: &str) -> Vec<Candidate> {
+pub(crate) fn file_candidates(input: &str) -> Vec<Candidate> {
     let expanded = crate::expand_home(input);
     let s = expanded.to_string_lossy().into_owned();
     let (dir, _) = match s.rfind('/') {

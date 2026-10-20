@@ -23,8 +23,18 @@ const TAB_H: f32 = 24.0;
 pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, ed.theme.bg);
-    let body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - ECHO_H - GAP));
+    let mut body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - ECHO_H - GAP));
     ed.drop_targets.clear();
+    if ed.var_bool("sidebar-visible") {
+        let w = ed.var("sidebar-width").and_then(Value::as_f64).unwrap_or(270.0) as f32;
+        let w = w.clamp(180.0, (body.width() - 200.0).max(180.0));
+        let side = Rect::from_min_size(body.min, egui::vec2(w, body.height()));
+        body.min.x = side.right() + GAP;
+        crate::sidebar::draw(ui, ed, side);
+        crate::sidebar::draw_handle(ui, ed, Rect::from_min_max(egui::pos2(side.right(), side.top()), egui::pos2(body.left(), side.bottom())));
+    } else {
+        ed.sidebar.focused = false;
+    }
     draw_layout(ui, ed, body);
     let echo = Rect::from_min_max(egui::pos2(full.left() + GAP, full.bottom() - ECHO_H), egui::pos2(full.right() - GAP, full.bottom()));
     draw_echo(ui, ed, echo);
@@ -326,7 +336,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     }
     ed.windows[w].rect = rect;
     ed.drop_targets.push(crate::mouse::DropTarget::Window(w, rect));
-    let focused = ed.focused == w && ed.minibuffer.is_none();
+    let focused = ed.focused == w && ed.minibuffer.is_none() && !ed.sidebar.focused;
     let is_focus_win = ed.focused == w;
     let id = ed.windows[w].buffer;
     let theme = ed.theme.clone();
@@ -495,7 +505,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
 
     // Body.
     let body = Rect::from_min_max(egui::pos2(rect.left() + 1.0, header.bottom() + 1.0), rect.max - Vec2::splat(1.0));
-    if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(body) && (ed.focused != w || ed.selected.is_some()) {
+    if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(body) && (ed.focused != w || ed.selected.is_some() || ed.sidebar.focused) {
         ed.focus_window(w);
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));

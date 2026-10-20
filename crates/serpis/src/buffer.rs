@@ -104,6 +104,21 @@ pub trait Buffer: Any {
         ProcessStatus::None
     }
 
+    /// What the buffer is doing, for the sidebar and `buffer-activity-changed`. The default
+    /// derives it from [`Buffer::process_status`]; a buffer-local `activity` variable
+    /// (`serpis.buffer.set_activity`) overrides it.
+    fn activity(&self) -> Activity {
+        match self.process_status() {
+            ProcessStatus::Running(p) => Activity::new(ActivityState::Working, p),
+            _ => Activity::default(),
+        }
+    }
+
+    /// A short human title (a chat's first prompt, a terminal's title), shown by the sidebar.
+    fn title(&self) -> String {
+        self.modeline().title
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -130,6 +145,62 @@ pub enum ProcessStatus {
     Idle,
     /// A program in the foreground, by name.
     Running(String),
+}
+
+/// Coarse state of a buffer's work, from the user's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum ActivityState {
+    /// Nothing happening.
+    #[default]
+    Idle,
+    /// Producing output: an agent turn, a running command.
+    Working,
+    /// An agent (or program) is waiting for the user.
+    Waiting,
+    /// The last run failed.
+    Error,
+    /// The process is gone.
+    Exited,
+}
+
+impl ActivityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActivityState::Idle => "idle",
+            ActivityState::Working => "working",
+            ActivityState::Waiting => "waiting",
+            ActivityState::Error => "error",
+            ActivityState::Exited => "exited",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "idle" => ActivityState::Idle,
+            "working" => ActivityState::Working,
+            "waiting" => ActivityState::Waiting,
+            "error" => ActivityState::Error,
+            "exited" => ActivityState::Exited,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Activity {
+    pub state: ActivityState,
+    /// What exactly: `bash cargo test`, `thinking`, `claude`, ...
+    pub detail: String,
+    /// When the current state began (elapsed timers).
+    pub since: Option<std::time::Instant>,
+    /// The program in the foreground, for process buffers.
+    pub program: Option<String>,
+}
+
+impl Activity {
+    pub fn new(state: ActivityState, detail: impl Into<String>) -> Self {
+        Activity { state, detail: detail.into(), ..Default::default() }
+    }
 }
 
 pub struct BufferSlot {
