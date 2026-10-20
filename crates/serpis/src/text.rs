@@ -132,6 +132,12 @@ pub trait TextSurface {
         let s = self.line(p.line);
         s.chars().nth(p.col).or(if p.line + 1 < self.line_count() && p.col == char_len(&s) { Some('\n') } else { None })
     }
+    /// Move to an editable part, if this surface has one elsewhere (a chat's prompt when its
+    /// transcript has focus). Returns whether it did.
+    fn focus_editable(&mut self) -> bool {
+        false
+    }
+
     fn all_text(&self) -> String {
         (0..self.line_count()).map(|i| self.line(i)).collect::<Vec<_>>().join("\n")
     }
@@ -633,6 +639,19 @@ pub struct ViewOptions {
     pub focused: bool,
     pub cursor: CursorShape,
     pub show_cursor: bool,
+    pub selection: SelectionKind,
+}
+
+/// How the anchor-to-cursor selection is painted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionKind {
+    /// Up to the cursor (mouse and Emacs regions).
+    #[default]
+    Exclusive,
+    /// Including the character under the cursor (vim visual).
+    Inclusive,
+    /// Whole lines (vim visual-line).
+    Lines,
 }
 
 #[derive(Default)]
@@ -898,8 +917,13 @@ impl DocView {
             if let Some((a, b)) = selection {
                 if i >= a.line && i <= b.line {
                     let len = char_len(&line.text);
-                    let s = if i == a.line { a.col } else { 0 };
-                    let e = if i == b.line { b.col } else { len + 1 };
+                    let (s, e) = match opts.selection {
+                        SelectionKind::Lines => (0, len + 1),
+                        kind => {
+                            let end = if kind == SelectionKind::Inclusive { b.col + 1 } else { b.col };
+                            (if i == a.line { a.col } else { 0 }, if i == b.line { end } else { len + 1 })
+                        }
+                    };
                     paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection);
                 }
             }

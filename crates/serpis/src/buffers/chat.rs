@@ -1487,10 +1487,12 @@ impl Buffer for ChatBuffer {
 
         // Transcript.
         let t_focus = focused && self.focus == Focus::Transcript;
+        let selection = if focused { crate::packages::vim::selection_kind(ed, id) } else { Default::default() };
         let resp = self.view.show(ui, transcript_rect, &Lines(&self.lines), &theme, &ViewOptions {
             focused: t_focus,
             cursor: shape,
             show_cursor: t_focus,
+            selection,
         });
         if resp.clicked {
             self.focus = Focus::Transcript;
@@ -1522,6 +1524,7 @@ impl Buffer for ChatBuffer {
             focused: p_focus,
             cursor: shape,
             show_cursor: p_focus,
+            selection,
         });
         if presp.clicked {
             self.focus = Focus::Prompt;
@@ -1670,73 +1673,82 @@ impl Buffer for ChatBuffer {
         Some(self.cwd.clone())
     }
 
+    fn full_text(&mut self) -> Option<String> {
+        let mut t: Vec<String> = self.lines.iter().map(|l| l.text.clone()).collect();
+        t.extend(self.prompt.doc.lines.iter().cloned());
+        Some(t.join("\n"))
+    }
+
     impl_any!();
 }
 
-/// Composite surface: transcript lines `[0, T)`, then prompt lines `[T, T+P)`.
+/// The surface is the part that has focus: the prompt while typing, the transcript while
+/// reading. Motions stay inside it (`gg`, `k` on the first line, visual selections); switching
+/// is explicit (`chat-focus-transcript`, `chat-focus-prompt`, a click, or entering insert state
+/// from the transcript).
 impl TextSurface for ChatBuffer {
     fn line_count(&self) -> usize {
-        self.t_len() + self.prompt.doc.lines.len()
+        match self.focus {
+            Focus::Transcript => self.t_len(),
+            Focus::Prompt => self.prompt.line_count(),
+        }
     }
     fn line(&self, i: usize) -> String {
-        let t = self.t_len();
-        if i < t { self.lines[i].text.clone() } else { self.prompt.line(i - t) }
+        match self.focus {
+            Focus::Transcript => self.lines.get(i).map(|l| l.text.clone()).unwrap_or_default(),
+            Focus::Prompt => self.prompt.line(i),
+        }
     }
     fn cursor(&self) -> Pos {
         match self.focus {
             Focus::Transcript => self.view.cursor,
-            Focus::Prompt => {
-                let c = self.prompt.cursor();
-                Pos::new(c.line + self.t_len(), c.col)
-            }
+            Focus::Prompt => self.prompt.cursor(),
         }
     }
     fn set_cursor(&mut self, p: Pos) {
-        let t = self.t_len();
-        if p.line >= t {
-            self.focus = Focus::Prompt;
-            self.prompt.set_cursor(Pos::new(p.line - t, p.col));
-        } else {
-            self.focus = Focus::Transcript;
-            let col = p.col.min(char_len(&self.lines[p.line].text));
-            self.view.cursor = Pos::new(p.line, col);
-            self.view.reveal_cursor();
-            // Moving up into history stops auto-follow; reaching the end resumes it.
-            self.view.follow_tail = p.line + 1 >= t;
+        match self.focus {
+            Focus::Prompt => self.prompt.set_cursor(p),
+            Focus::Transcript => {
+                let t = self.t_len();
+                let line = p.line.min(t.saturating_sub(1));
+                let col = p.col.min(self.lines.get(line).map(|l| char_len(&l.text)).unwrap_or(0));
+                self.view.cursor = Pos::new(line, col);
+                self.view.reveal_cursor();
+                // Moving up into history stops auto-follow; reaching the end resumes it.
+                self.view.follow_tail = line + 1 >= t;
+            }
         }
     }
     fn anchor(&self) -> Option<Pos> {
         match self.focus {
             Focus::Transcript => self.view.anchor,
-            Focus::Prompt => self.prompt.anchor().map(|a| Pos::new(a.line + self.t_len(), a.col)),
+            Focus::Prompt => self.prompt.anchor(),
         }
     }
     fn set_anchor(&mut self, a: Option<Pos>) {
-        let t = self.t_len();
-        match (self.focus, a) {
-            (Focus::Prompt, Some(a)) if a.line >= t => self.prompt.set_anchor(Some(Pos::new(a.line - t, a.col))),
-            (Focus::Prompt, None) => self.prompt.set_anchor(None),
-            (Focus::Transcript, a) => self.view.anchor = a.filter(|a| a.line < t),
-            _ => {}
+        match self.focus {
+            Focus::Transcript => self.view.anchor = a,
+            Focus::Prompt => self.prompt.set_anchor(a),
         }
     }
-    fn editable_at(&self, p: Pos) -> bool {
-        p.line >= self.t_len()
+    fn editable_at(&self, _p: Pos) -> bool {
+        self.focus == Focus::Prompt
+    }
+    fn focus_editable(&mut self) -> bool {
+        self.focus = Focus::Prompt;
+        true
     }
     fn insert(&mut self, at: Pos, text: &str) -> Pos {
-        let t = self.t_len();
-        if at.line < t {
-            return at;
+        match self.focus {
+            Focus::Prompt => self.prompt.insert(at, text),
+            Focus::Transcript => at,
         }
-        let e = self.prompt.insert(Pos::new(at.line - t, at.col), text);
-        Pos::new(e.line + t, e.col)
     }
     fn delete(&mut self, from: Pos, to: Pos) -> String {
-        let t = self.t_len();
-        if from.line < t || to.line < t {
-            return String::new();
+        match self.focus {
+            Focus::Prompt => self.prompt.delete(from, to),
+            Focus::Transcript => String::new(),
         }
-        self.prompt.delete(Pos::new(from.line - t, from.col), Pos::new(to.line - t, to.col))
     }
     fn undo(&mut self) -> bool {
         self.prompt.undo()
@@ -1748,16 +1760,16 @@ impl TextSurface for ChatBuffer {
         self.prompt.undo_boundary();
     }
     fn visible_lines(&self) -> Range<usize> {
-        let r = self.view.visible_lines();
-        if self.focus == Focus::Prompt {
-            let t = self.t_len();
-            return t..t + self.prompt.doc.lines.len();
+        match self.focus {
+            Focus::Transcript => self.view.visible_lines(),
+            Focus::Prompt => self.prompt.visible_lines(),
         }
-        r
     }
     fn screen_rect(&self, p: Pos) -> Option<Rect> {
-        let t = self.t_len();
-        if p.line >= t { self.prompt.screen_rect(Pos::new(p.line - t, p.col)) } else { self.view.screen_rect(p) }
+        match self.focus {
+            Focus::Transcript => self.view.screen_rect(p),
+            Focus::Prompt => self.prompt.screen_rect(p),
+        }
     }
     fn reveal_cursor(&mut self) {
         match self.focus {

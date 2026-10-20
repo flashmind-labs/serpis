@@ -844,7 +844,10 @@ impl Buffer for TerminalBuffer {
         let bg = default_bg;
         painter.rect_filled(rect, 0.0, bg);
         // The copy-mode (vim visual) selection is a cell background, so its text stays readable.
+        let lines = focused && crate::packages::vim::selection_kind(ed, ed.current_buffer()) == crate::text::SelectionKind::Lines;
         let sel = if self.copy_mode { self.anchor.map(|a| ordered(a, self.cursor)) } else { None };
+        // Visual-line selects whole rows.
+        let sel = sel.map(|(a, b)| if lines { (Pos::new(a.line, 0), Pos::new(b.line, usize::MAX)) } else { (a, b) });
         let Ok(mut row_iter) = self.rows_it.update(&snapshot) else { return };
         let mut y = origin.y;
         let mut text = String::new();

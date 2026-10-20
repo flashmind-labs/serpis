@@ -515,10 +515,10 @@ fn content_matches(ed: &mut Editor, query: &str) -> HashMap<BufferId, String> {
     let mut hits = HashMap::new();
     for id in ed.buffers.keys().collect::<Vec<_>>() {
         let line = ed.with_buffer(id, |b, _| {
-            let s = b.surface()?;
-            let n = s.line_count();
+            let text = b.full_text()?;
+            let lines: Vec<&str> = text.lines().collect();
             // Bounded: the most recent 4000 lines.
-            (n.saturating_sub(4000)..n).rev().map(|i| s.line(i)).find(|l| l.to_lowercase().contains(&needle))
+            lines.iter().rev().take(4000).find(|l| l.to_lowercase().contains(&needle)).map(|l| l.to_string())
         });
         if let Some(Some(l)) = line {
             hits.insert(id, l.trim().chars().take(120).collect());

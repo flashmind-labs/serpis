@@ -432,7 +432,10 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             e.flash_region(id, pos(&start), pos(&end), Duration::from_millis(duration), color);
         })
     })?)?;
-    buf.set("text", lua.create_function(|_, ()| ed(|e| e.with_surface(|s, _| s.all_text())))?)?;
+    buf.set("text", lua.create_function(|_, ()| ed(|e| {
+        let id = e.current_buffer();
+        e.with_buffer(id, |b, _| b.full_text()).flatten()
+    }))?)?;
     // serpis.buffer.visible(): the first and last line on screen (1-based) of the focused buffer.
     buf.set("visible", lua.create_function(|_, ()| ed(|e| {
         let r = e.with_surface(|s, _| s.visible_lines()).unwrap_or(0..0);
@@ -1174,6 +1177,25 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     // Where a named control was drawn last frame: {x, y, w, h} or nil ("sidebar-toggle").
     debug.set("rect", lua.create_function(|lua, name: String| {
         let v = ed(|e| e.debug_rects.get(name.as_str()).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})))?;
+        lua.to_value(&v.unwrap_or(Value::Null))
+    })?)?;
+    // The current chat's composer: {text, line, col, anchor = {line, col}?, focus = "prompt"|"transcript"}
+    // (positions 1-based, within the composer).
+    debug.set("composer_state", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let id = e.current_buffer();
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| {
+                use crate::text::TextSurface;
+                let p = c.prompt.cursor();
+                json!({
+                    "text": c.prompt.text(),
+                    "line": p.line + 1,
+                    "col": p.col + 1,
+                    "anchor": c.prompt.anchor().map(|a| json!({"line": a.line + 1, "col": a.col + 1})),
+                    "focus": if c.focus == crate::buffers::chat::Focus::Prompt { "prompt" } else { "transcript" },
+                })
+            })
+        })?;
         lua.to_value(&v.unwrap_or(Value::Null))
     })?)?;
     // The open prompt's text, or nil.

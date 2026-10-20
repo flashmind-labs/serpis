@@ -585,7 +585,7 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect, palette: bool) {
         mb.input.view.padding = egui::vec2(4.0, (rect.height() - 18.0) / 2.0);
         mb.input.view.wrap = false;
         let src = PlainLines { lines: &mb.input.doc.lines, face: Face::Default };
-        mb.input.view.show(ui, input_rect, &src, &theme, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true });
+        mb.input.view.show(ui, input_rect, &src, &theme, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true, selection: Default::default() });
         let count = format!("{}/{}", mb.filtered.len(), mb.candidates.len());
         if !mb.candidates.is_empty() || mb.dynamic.is_some() {
             ui.painter().text(rect.right_center() - egui::vec2(12.0, 0.0), Align2::RIGHT_CENTER, count, FontId::proportional(theme.font_size - 2.0), theme.fg_faint);
@@ -675,7 +675,7 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
     mb.input.view.padding = egui::vec2(2.0, (input_h - t.font_size * 1.4) / 2.0);
     mb.input.view.wrap = false;
     let src = PlainLines { lines: &mb.input.doc.lines, face: Face::Default };
-    mb.input.view.show(&mut pui, input_rect, &src, t, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true });
+    mb.input.view.show(&mut pui, input_rect, &src, t, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true, selection: Default::default() });
     if !count.is_empty() {
         chrome::text(&painter, egui::pos2(input.right() - 16.0 * k - count_w, cy), &count, small.clone(), t.fg_faint, count_w + 1.0);
     }

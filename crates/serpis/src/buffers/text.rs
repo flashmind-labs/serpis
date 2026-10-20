@@ -74,10 +74,12 @@ impl Buffer for TextBuffer {
         let shape = if focused { ed.cursor_shape(id) } else { None }.unwrap_or(CursorShape::Bar);
         let face = if self.area.read_only { Face::Default } else { Face::Code };
         let src = PlainLines { lines: &self.area.doc.lines, face };
+        let selection = if focused { crate::packages::vim::selection_kind(ed, id) } else { Default::default() };
         self.area.view.show(ui, rect, &src, &ed.theme, &ViewOptions {
             focused,
             cursor: shape,
             show_cursor: true,
+            selection,
         });
     }
 

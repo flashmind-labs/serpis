@@ -699,9 +699,20 @@ pub fn install(ed: &mut Editor) {
             c.toggle_fold_at_cursor();
         })
     });
-    ed.define_command("chat-focus-prompt", "Move to the prompt.", o, |ed, _| {
+    ed.define_command("chat-focus-prompt", "Move to the prompt (motions and edits act on it).", o, |ed, _| {
         with_chat(ed, |c, _| {
             c.focus = Focus::Prompt;
+        })
+    });
+    ed.define_command("chat-focus-transcript", "Move to the transcript (to read, search and copy; i/a/o return to the prompt).", o, |ed, _| {
+        with_chat(ed, |c, _| {
+            c.focus = Focus::Transcript;
+            c.view.reveal_cursor();
+        })
+    });
+    ed.define_command("chat-toggle-focus", "Switch between the prompt and the transcript.", o, |ed, _| {
+        with_chat(ed, |c, _| {
+            c.focus = if c.focus == Focus::Prompt { Focus::Transcript } else { Focus::Prompt };
         })
     });
     ed.define_command("chat-history-previous", "Recall the previous prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_prev()));

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use crate::buffer::BufferId;
-use crate::commands::{goal_col, remember_goal, repeat_search, set_last_search};
+use crate::commands::{repeat_search, set_last_search};
 use crate::editor::{Args, Editor, KeyResult, buffer_id_from_u64};
 use crate::keys::{Key, KeyChord};
 use crate::motion::{self, text_object};
@@ -70,6 +70,10 @@ struct Vim {
     last_change: Vec<KeyChord>,
     replaying: bool,
     yank_linewise: bool,
+    /// The column `j`/`k` aim for (vim's curswant): set by vertical motions and `$` (the line
+    /// end), forgotten by anything else.
+    goal: Option<usize>,
+    kept_goal: bool,
 }
 
 thread_local! {
@@ -83,6 +87,15 @@ fn vim() -> Option<Rc<RefCell<Vim>>> {
 pub fn state_of(ed: &Editor, id: BufferId) -> Option<State> {
     let meta = ed.meta(id)?;
     [State::Normal, State::Insert, State::Visual, State::VisualLine].into_iter().find(|s| meta.has_mode(s.mode()))
+}
+
+/// How the focused buffer's selection is painted in its vim state.
+pub fn selection_kind(ed: &Editor, id: BufferId) -> crate::text::SelectionKind {
+    match state_of(ed, id) {
+        Some(State::Visual) => crate::text::SelectionKind::Inclusive,
+        Some(State::VisualLine) => crate::text::SelectionKind::Lines,
+        _ => crate::text::SelectionKind::Exclusive,
+    }
 }
 
 pub fn set_state(ed: &mut Editor, id: BufferId, st: State) {
@@ -128,6 +141,8 @@ pub fn enable(ed: &mut Editor) {
             last_change: Vec::new(),
             replaying: false,
             yank_linewise: false,
+            goal: None,
+            kept_goal: false,
         })))
     });
     let ids: Vec<BufferId> = ed.buffers.keys().collect();
@@ -259,7 +274,7 @@ fn install_keymaps(ed: &mut Editor) {
         ed.bind("vim-visual", k, c, o);
         ed.bind("vim-visual-line", k, c, o);
     }
-    for (k, c) in [("RET", "chat-send"), ("TAB", "chat-toggle-fold"), ("C-c C-c", "chat-abort")] {
+    for (k, c) in [("RET", "chat-send"), ("TAB", "chat-toggle-fold"), ("C-c C-c", "chat-abort"), ("C-k", "chat-focus-transcript"), ("C-j", "chat-focus-prompt")] {
         ed.bind("vim-normal:chat", k, c, o);
     }
 }
@@ -443,12 +458,15 @@ fn enter_insert(ed: &mut Editor, at: Option<Pos>) {
         if let Some(p) = at {
             s.set_cursor(p);
         }
-        // Read-only positions (chat transcript): jump to the editable end.
+        // Read-only positions: jump to the editable end, or to the editable part (a chat's
+        // transcript hands over to its prompt).
         let c = s.cursor();
         if !s.editable_at(c) {
             let end = motion::doc_end(s);
             if s.editable_at(end) {
                 s.set_cursor(end);
+            } else {
+                s.focus_editable();
             }
         }
     });
@@ -475,6 +493,7 @@ fn intercept(ed: &mut Editor, chord: &KeyChord) -> KeyResult {
     let done = {
         let mut vm = v.borrow_mut();
         vm.pending.keys.push(chord.clone());
+        vm.kept_goal = false;
         handle(ed, &mut vm, st, chord)
     };
     let mut vm = v.borrow_mut();
@@ -486,6 +505,18 @@ fn intercept(ed: &mut Editor, chord: &KeyChord) -> KeyResult {
                 vm.last_change = keys;
             }
             vm.pending = Pending::default();
+            if !vm.kept_goal {
+                vm.goal = None;
+            }
+            // Normal state never rests past the last character (after undo, a visual delete, ...).
+            if state_of(ed, id) == Some(State::Normal) {
+                ed.with_surface(|s, _| {
+                    let c = s.cursor();
+                    if s.editable_at(c) && c.col > 0 && c.col >= s.line_len(c.line) {
+                        s.set_cursor(Pos::new(c.line, s.line_len(c.line).saturating_sub(1)));
+                    }
+                });
+            }
         }
         Step::Invalid => vm.pending = Pending::default(),
     }
@@ -507,16 +538,15 @@ enum Kind {
 
 /// Resolve a motion key to a target position.
 fn motion_target(ed: &mut Editor, vm: &mut Vim, c: char, count: usize, has_count: bool) -> Option<(Pos, Kind)> {
-    let last = ed.last_command.clone();
-    ed.with_surface(|s, _| {
+    let goal = vm.goal;
+    let r = ed.with_surface(|s, _| {
         let p = s.cursor();
         let rep = |f: &dyn Fn(Pos) -> Pos| (0..count).fold(p, |q, _| f(q));
         Some(match c {
             'h' => (Pos::new(p.line, p.col.saturating_sub(count)), Kind::Exclusive),
             'l' => (Pos::new(p.line, (p.col + count).min(s.line_len(p.line))), Kind::Exclusive),
             'j' | 'k' => {
-                let goal = goal_col(p, last.as_deref());
-                remember_goal(goal);
+                let goal = goal.unwrap_or(p.col);
                 let d = if c == 'j' { count as isize } else { -(count as isize) };
                 (motion::vertical(s, p, d, goal), Kind::Line)
             }
@@ -555,7 +585,20 @@ fn motion_target(ed: &mut Editor, vm: &mut Vim, c: char, count: usize, has_count
             _ => return None,
         })
     })
-    .flatten()
+    .flatten();
+    // `j`/`k` keep aiming at the same column; `$` aims at every line's end.
+    match c {
+        'j' | 'k' => {
+            vm.goal = Some(goal.unwrap_or_else(|| ed.with_surface(|s, _| s.cursor().col).unwrap_or(0)));
+            vm.kept_goal = true;
+        }
+        '$' => {
+            vm.goal = Some(usize::MAX);
+            vm.kept_goal = true;
+        }
+        _ => {}
+    }
+    r
 }
 
 fn is_motion_key(c: char) -> bool {
@@ -1192,16 +1235,10 @@ pub fn flush_replay(ed: &mut Editor) {
     }
 }
 
-fn keep_visual_anchor(ed: &mut Editor, st: State) {
+fn keep_visual_anchor(ed: &mut Editor, _st: State) {
     ed.with_surface(|s, _| {
         let c = s.cursor();
-        if st == State::VisualLine {
-            s.set_anchor(Some(Pos::new(c.line, 0)));
-            let e = motion::line_end(s, c.line);
-            s.set_cursor(Pos::new(c.line, e.col.max(c.col)));
-        } else {
-            s.set_anchor(Some(c));
-        }
+        s.set_anchor(Some(c));
     });
 }
 
@@ -1229,16 +1266,9 @@ fn do_motion(ed: &mut Editor, vm: &mut Vim, st: State, c: char, count: usize, ha
 
 fn finish_motion(ed: &mut Editor, _vm: &mut Vim, st: State, t: Pos, _kind: Kind) -> Step {
     ed.with_surface(|s, _| {
-        if st == State::VisualLine {
-            // Keep whole lines selected: anchor at line start (or end), cursor at the far edge.
-            let a = s.anchor().unwrap_or(t);
-            let down = t.line >= a.line;
-            let anchor = if down { Pos::new(a.line, 0) } else { motion::line_end(s, a.line) };
-            s.set_anchor(Some(anchor));
-            let e = if down { motion::line_end(s, t.line) } else { Pos::new(t.line, 0) };
-            s.set_cursor(e);
-        } else {
-            let t = if st == State::Normal && s.editable_at(t) {
+        // Visual-line keeps the cursor where it moves; the view and operators take whole lines.
+        {
+            let t = if matches!(st, State::Normal | State::VisualLine) && s.editable_at(t) {
                 // Normal state cannot rest past the last character.
                 Pos::new(t.line, t.col.min(s.line_len(t.line).saturating_sub(1)))
             } else {

@@ -78,6 +78,12 @@ pub trait Buffer: Any {
         None
     }
 
+    /// All of the buffer's text, for search and scripts (a chat's transcript and prompt, even
+    /// though its surface is only the focused part).
+    fn full_text(&mut self) -> Option<String> {
+        self.surface().map(|s| s.all_text())
+    }
+
     fn modeline(&self) -> Modeline {
         Modeline::default()
     }
