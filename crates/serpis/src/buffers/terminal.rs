@@ -780,12 +780,16 @@ impl Buffer for TerminalBuffer {
         let default_fg = colors.as_ref().map(|c| rgb(c.foreground)).unwrap_or(theme.fg);
         let bg = default_bg;
         painter.rect_filled(rect, 0.0, bg);
+        // The copy-mode (vim visual) selection is a cell background, so its text stays readable.
+        let sel = if self.copy_mode { self.anchor.map(|a| ordered(a, self.cursor)) } else { None };
         let Ok(mut row_iter) = self.rows_it.update(&snapshot) else { return };
         let mut y = origin.y;
         let mut text = String::new();
+        let mut line = top;
         while let Some(row) = row_iter.next() {
             let Ok(mut cell_iter) = self.cells_it.update(row) else { break };
             let mut x = origin.x;
+            let mut col = 0;
             let mut job = LayoutJob::default();
             let mut run_start_x = x;
             let flush = |job: &mut LayoutJob, run_x: f32| {
@@ -816,7 +820,8 @@ impl Buffer for TerminalBuffer {
                         underline = !matches!(s.underline, libghostty_vt::style::Underline::None);
                     }
                 }
-                if cell.is_selected().unwrap_or(false) {
+                let p = Pos::new(line, col);
+                if cell.is_selected().unwrap_or(false) || sel.is_some_and(|(a, b)| a <= p && p <= b) {
                     cbg = Some(theme.selection);
                 }
                 if let Some(b) = cbg {
@@ -850,9 +855,11 @@ impl Buffer for TerminalBuffer {
                     flush(&mut job, run_start_x);
                 }
                 x += self.cell.x;
+                col += 1;
             }
             flush(&mut job, run_start_x);
             y += self.cell.y;
+            line += 1;
         }
 
         // Terminal cursor (hidden in copy mode), painted after the snapshot is released.
@@ -885,19 +892,8 @@ impl Buffer for TerminalBuffer {
             paint_cursor(&painter, r, shape, color, cursor_char(p), &font, default_bg);
         }
 
-        // Copy-mode cursor and selection.
+        // Copy-mode cursor.
         if self.copy_mode {
-            if let Some((a, b)) = self.anchor.map(|a| ordered(a, self.cursor)) {
-                for l in a.line.max(top)..=b.line.min(top + self.rows as usize) {
-                    let s = if l == a.line { a.col } else { 0 };
-                    let e = if l == b.line { b.col + 1 } else { self.cols as usize };
-                    let r = Rect::from_min_size(
-                        origin + egui::vec2(s as f32 * self.cell.x, (l - top) as f32 * self.cell.y),
-                        egui::vec2((e.saturating_sub(s)) as f32 * self.cell.x, self.cell.y),
-                    );
-                    painter.rect_filled(r, 0.0, theme.selection);
-                }
-            }
             if self.cursor.line >= top && self.cursor.line < top + self.rows as usize {
                 let r = Rect::from_min_size(
                     origin + egui::vec2(self.cursor.col as f32 * self.cell.x, (self.cursor.line - top) as f32 * self.cell.y),
