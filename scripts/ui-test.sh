@@ -11,7 +11,7 @@ mkdir -p "$tmp/home"
 touch "$tmp/home/.zshrc"
 for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; done
 fail=0
-for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore}"; do
+for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer}"; do
   for name in $t; do
     out="$tmp/$name.out"
     SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \

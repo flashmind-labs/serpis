@@ -1,0 +1,83 @@
+-- The chat composer's controls, clicked with the mouse. Runs a fake provider that refuses
+-- connections, so nothing reaches a real model.
+local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
+local d = serpis.debug
+local agent_dir = os.getenv("SERPIS_AGENT_DIR")
+os.execute("mkdir -p '" .. agent_dir .. "'")
+local f = io.open(agent_dir .. "/models.json", "w")
+f:write('{"providers":{"fake":{"baseUrl":"http://127.0.0.1:9/v1","api":"openai-completions","apiKey":"x","models":[{"id":"m","reasoning":true}]}}}')
+f:close()
+serpis.agent.reload_models()
+serpis.agent.model("fake/m")
+serpis.var.set("session-directories", {})
+serpis.var.set("session-save", false)
+
+local function steps(list)
+  local i = 0
+  local function go()
+    i = i + 1
+    if not list[i] then return T.finish() end
+    local wait = list[i](go)
+    if wait ~= false then serpis.defer(wait or 400, go) end
+  end
+  go()
+end
+local function click(name)
+  local r = d.composer()[name]
+  if not r then return false end
+  local x, y = r.x + r.w / 2, r.y + r.h / 2
+  d.mouse_move(x, y)
+  d.mouse_button(x, y, "left", true)
+  d.mouse_button(x, y, "left", false)
+  return true
+end
+local function state() return serpis.buffer.activity().state end
+
+local chat
+steps({
+  function()
+    serpis.command.run("new-chat")
+    chat = serpis.buffer.current()
+    return 600
+  end,
+  function()
+    local hits = d.composer()
+    T.check("controls drawn", hits.model ~= nil and hits.thinking ~= nil and hits.send ~= nil, true)
+    T.check("model pill click", click("model"), true)
+  end,
+  function()
+    T.check("model pill opens the model picker", (d.minibuffer() or ""):find("[Mm]odel") ~= nil, true)
+    T.press("ESC")
+  end,
+  function()
+    T.check("picker closed", d.minibuffer(), nil)
+    click("thinking")
+  end,
+  function()
+    T.check("thinking pill opens the thinking picker", (d.minibuffer() or ""):find("Thinking") ~= nil, true)
+    T.press("ESC")
+  end,
+  function()
+    -- An empty prompt doesn't send.
+    click("send")
+  end,
+  function()
+    T.check("empty send does nothing", state(), "idle")
+    T.check("still in the chat", serpis.buffer.current(), chat)
+    d.text("hello")
+  end,
+  function()
+    click("send")
+    return 300
+  end,
+  function()
+    T.check("send starts the agent", state(), "working")
+    T.check("prompt sent", (serpis.buffer.text() or ""):find("hello") ~= nil, true)
+    -- The same button stops it.
+    click("send")
+    return 800
+  end,
+  function()
+    T.check("stop aborts the agent", state() ~= "working", true)
+  end,
+})

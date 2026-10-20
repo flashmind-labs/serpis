@@ -84,6 +84,8 @@ pub struct ChatBuffer {
     text_w: f32,
     /// Theme and font state the transcript was rendered with (cards carry its colors).
     style_key: u64,
+    /// Where the composer's controls were drawn last frame (tests click them).
+    pub composer_hits: Vec<(&'static str, Rect)>,
     /// Where the conversation is recorded (created with the first prompt).
     pub session: Option<crate::session::SessionWriter>,
     session_failed: bool,
@@ -130,6 +132,7 @@ impl ChatBuffer {
             last_error: None,
             text_w: 0.0,
             style_key: 0,
+            composer_hits: Vec::new(),
             session: None,
             session_failed: false,
         };
@@ -1610,6 +1613,7 @@ impl Buffer for ChatBuffer {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
+        self.composer_hits = vec![("model", mr), ("thinking", tr), ("send", send)];
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;
             ed.main_sender().send(move |ed| ed.call(cmd));

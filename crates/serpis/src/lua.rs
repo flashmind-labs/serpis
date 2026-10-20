@@ -1143,6 +1143,22 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })?;
         lua.to_value(&v)
     })?)?;
+    // Where the chat's composer controls are: {model = {x, y, w, h}, thinking = ..., send = ...}.
+    debug.set("composer", lua.create_function(|lua, id: Option<u64>| {
+        let v = ed(|e| {
+            let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| {
+                let mut o = serde_json::Map::new();
+                for (name, r) in &c.composer_hits {
+                    o.insert(name.to_string(), json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}));
+                }
+                Value::Object(o)
+            })
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    // The open prompt's text, or nil.
+    debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
     debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;
     debug.set("quit", lua.create_function(|_, ()| ed(|e| e.quit_requested = true))?)?;
     debug.set("messages", lua.create_function(|_, ()| ed(|e| e.messages.clone()))?)?;
