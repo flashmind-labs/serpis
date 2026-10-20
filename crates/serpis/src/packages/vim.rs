@@ -229,10 +229,12 @@ fn install_keymaps(ed: &mut Editor) {
         ("SPC q r", "reload-config"),
         ("SPC q q", "quit"),
         ("C-r", "redo"),
+        // Ahead of the global C-u (universal-argument).
+        ("C-u", "vim-interpret"),
     ] {
         ed.bind("vim-normal", k, c, o);
     }
-    for (k, c) in [("ESC", "vim-normal-state"), ("C-[", "vim-normal-state"), (":", "vim-ex")] {
+    for (k, c) in [("ESC", "vim-normal-state"), ("C-[", "vim-normal-state"), (":", "vim-ex"), ("C-u", "vim-interpret")] {
         ed.bind("vim-visual", k, c, o);
         ed.bind("vim-visual-line", k, c, o);
     }
@@ -268,6 +270,12 @@ fn install_commands(ed: &mut Editor) {
     ed.define_command("vim-delete-to-line-start", "Delete from line start to point.", o, |ed, _| {
         if let Some((a, b)) = ed.with_surface(|s, _| (Pos::new(s.cursor().line, 0), s.cursor())) {
             let _ = crate::commands::kill(ed, a, b, false);
+        }
+        Ok(())
+    });
+    ed.define_command("vim-interpret", "Run the key through vim's normal-state grammar (for keys a global binding would take).", o, |ed, a: &Args| {
+        if let Some(k) = a.keys.last().cloned() {
+            intercept(ed, &k);
         }
         Ok(())
     });

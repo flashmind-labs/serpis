@@ -36,4 +36,24 @@ end
 yank_case("yank hook yiw", "alpha beta", "w y i w", "1:7-1:11")
 yank_case("yank hook yy", "one\ntwo", "y y", "1:1-2:1 line")
 yank_case("yank hook visual", "abcdef", "v l l y", "1:1-1:4")
-T.finish()
+
+-- C-d / C-u scroll half a page; C-u must beat the global universal-argument binding.
+local lines = {}
+for i = 1, 200 do lines[i] = "line " .. i end
+local id = serpis.buffer.create("text", "*uitest*", { text = table.concat(lines, "\n") })
+serpis.buffer.show(id)
+-- Paging needs one drawn frame to know the page size.
+serpis.defer(300, function()
+  serpis.keys.feed("G")
+  local bottom = serpis.buffer.cursor()
+  serpis.keys.feed("C-u")
+  local up = serpis.buffer.cursor()
+  T.check("C-u scrolls up", up < bottom, true)
+  serpis.keys.feed("C-d")
+  T.check("C-d scrolls back down", serpis.buffer.cursor(), bottom)
+  serpis.keys.feed("v C-u")
+  T.check("C-u in visual", serpis.buffer.cursor(), up)
+  serpis.keys.feed("ESC")
+  serpis.buffer.kill(id)
+  T.finish()
+end)

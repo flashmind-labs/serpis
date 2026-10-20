@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
 use libghostty_vt::key::{self, Key as GKey};
-use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use libghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
 use libghostty_vt::screen::{CellSemanticContent, CellWide, Screen};
 use libghostty_vt::style::{RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport, Terminal};
@@ -28,7 +28,7 @@ use crate::buffer::{Buffer, Modeline};
 use crate::editor::Editor;
 use crate::impl_any;
 use crate::keys::{Key, KeyChord};
-use crate::text::{Pos, TextSurface, char_len, ordered};
+use crate::text::{CursorShape, Pos, TextSurface, char_len, ordered};
 
 const TERM: &str = "xterm-256color";
 const PAD: f32 = 6.0;
@@ -564,6 +564,27 @@ impl TerminalBuffer {
     }
 }
 
+/// Draw a cursor in cell `r`; a block repaints the character under it in the background color.
+fn paint_cursor(painter: &egui::Painter, r: Rect, shape: CursorShape, color: Color32, ch: Option<char>, font: &FontId, bg: Color32) {
+    match shape {
+        CursorShape::Block => {
+            painter.rect_filled(r, 1.0, color);
+            if let Some(c) = ch {
+                painter.text(r.left_top(), egui::Align2::LEFT_TOP, c, font.clone(), bg);
+            }
+        }
+        CursorShape::Bar => {
+            painter.rect_filled(Rect::from_min_size(r.min, egui::vec2(2.0, r.height())), 0.0, color);
+        }
+        CursorShape::Underline => {
+            painter.rect_filled(Rect::from_min_max(egui::pos2(r.min.x, r.max.y - 2.0), r.max), 0.0, color);
+        }
+        CursorShape::Hollow => {
+            painter.rect_stroke(r, 1.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+        }
+    }
+}
+
 /// Map a chord to a libghostty key and its unshifted codepoint.
 fn map_key(chord: &KeyChord) -> (GKey, char) {
     match &chord.key {
@@ -749,6 +770,10 @@ impl Buffer for TerminalBuffer {
         let painter = ui.painter_at(rect);
         let origin = rect.min + Vec2::splat(PAD);
         self.origin = origin;
+        // Vim's state picks the shape (bar in insert); full-screen apps keep the one they ask for.
+        let vim_shape = if focused { ed.cursor_shape(ed.current_buffer()) } else { None };
+        let alt = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
+        let top = self.viewport_top();
         let Ok(snapshot) = self.render.update(&self.term) else { return };
         let colors = snapshot.colors().ok();
         let default_bg = colors.as_ref().map(|c| rgb(c.background)).unwrap_or(theme.bg);
@@ -830,27 +855,38 @@ impl Buffer for TerminalBuffer {
             y += self.cell.y;
         }
 
-        // Terminal cursor (hidden in copy mode).
+        // Terminal cursor (hidden in copy mode), painted after the snapshot is released.
+        let mut live = None;
         if !self.copy_mode {
             if let Ok(c) = snapshot.cursor() {
                 if c.visible {
                     if let Some(vp) = c.viewport {
                         let r = Rect::from_min_size(origin + egui::vec2(vp.x as f32 * self.cell.x, vp.y as f32 * self.cell.y), self.cell);
                         let color = colors.as_ref().and_then(|c| c.cursor).map(rgb).unwrap_or(theme.cursor);
-                        if focused {
-                            painter.rect_filled(r, 1.0, color.gamma_multiply(0.75));
-                        } else {
-                            painter.rect_stroke(r, 1.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
-                        }
+                        let program = match c.visual_style {
+                            CursorVisualStyle::Bar => CursorShape::Bar,
+                            CursorVisualStyle::Underline => CursorShape::Underline,
+                            CursorVisualStyle::BlockHollow => CursorShape::Hollow,
+                            _ => CursorShape::Block,
+                        };
+                        let shape = match vim_shape {
+                            _ if !focused => CursorShape::Hollow,
+                            Some(s) if !alt => s,
+                            _ => program,
+                        };
+                        live = Some((r, shape, color, Pos::new(top + vp.y as usize, vp.x as usize)));
                     }
                 }
             }
         }
         let _ = snapshot.clean();
+        let cursor_char = |p: Pos| self.char_at(p).filter(|c| !c.is_whitespace() && *c != '\n');
+        if let Some((r, shape, color, p)) = live {
+            paint_cursor(&painter, r, shape, color, cursor_char(p), &font, default_bg);
+        }
 
         // Copy-mode cursor and selection.
         if self.copy_mode {
-            let top = self.viewport_top();
             if let Some((a, b)) = self.anchor.map(|a| ordered(a, self.cursor)) {
                 for l in a.line.max(top)..=b.line.min(top + self.rows as usize) {
                     let s = if l == a.line { a.col } else { 0 };
@@ -867,7 +903,8 @@ impl Buffer for TerminalBuffer {
                     origin + egui::vec2(self.cursor.col as f32 * self.cell.x, (self.cursor.line - top) as f32 * self.cell.y),
                     self.cell,
                 );
-                painter.rect_stroke(r, 1.0, Stroke::new(1.5, theme.cursor), egui::StrokeKind::Inside);
+                let shape = if focused { vim_shape.unwrap_or(CursorShape::Block) } else { CursorShape::Hollow };
+                paint_cursor(&painter, r, shape, theme.cursor, cursor_char(self.cursor), &font, default_bg);
             }
             painter.text(rect.right_top() + egui::vec2(-10.0, 6.0), egui::Align2::RIGHT_TOP, "COPY", FontId::monospace(10.0), theme.yellow);
         }
