@@ -44,10 +44,11 @@ spaces UI text (`font-tracking`). Markdown tables in chats render as aligned gri
 `minibuffer-style` = `"bottom"` puts them in the echo area, Emacs style. `chat-max-width` sets the
 width of a chat's reading column.
 
-In a chat, the prompt and the transcript are separate: motions, selections and edits act on the
-one that has focus, so `gg`, `G` or `k` on the first line never leave the prompt. Click either one,
-or use `C-k` / `C-j` (vim normal state) or `C-c C-o` (`chat-toggle-focus`) to switch; `i`, `a`, `o`
-in the transcript go back to the prompt.
+In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
+the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the
+prompt's first line moves up into the transcript and `j` on its last line comes back down. Clicks,
+jumps (`gw`), `C-k` / `C-j` and `C-c C-o` (`chat-toggle-focus`) switch too; `i`, `a`, `o` in the
+transcript go back to the prompt.
 
 `set-keybinding-scheme` switches to `emacs` or `vim` (or call `serpis.keys.scheme("vim")` in
 `init.lua`). Vim works everywhere: in the chat transcript and prompt, in text buffers, and in

@@ -1267,7 +1267,40 @@ fn join_lines(ed: &mut Editor, line: usize, count: usize) {
     });
 }
 
+/// `k` on a part's first line or `j` on its last moves into the neighbouring part of a
+/// multi-part buffer (a chat: up from the prompt into the transcript, down back into the
+/// prompt), keeping the column. Only plain normal-state motions cross; operators and visual
+/// selections stay inside the part.
+fn cross_part(ed: &mut Editor, vm: &mut Vim, st: State, c: char, count: usize) -> bool {
+    if st != State::Normal || vm.pending.op.is_some() || !matches!(c, 'j' | 'k') {
+        return false;
+    }
+    let id = ed.current_buffer();
+    let Some((part, parts)) = ed.with_buffer(id, |b, _| (b.part(), b.parts())) else { return false };
+    let Some((line, n, col)) = ed.with_surface(|s, _| (s.cursor().line, s.line_count(), s.cursor().col)) else { return false };
+    let target = match c {
+        'k' if line < count && part > 0 => part - 1,
+        'j' if line + count >= n && part + 1 < parts => part + 1,
+        _ => return false,
+    };
+    let goal = vm.goal.unwrap_or(col);
+    ed.with_buffer(id, |b, _| {
+        b.set_part(target);
+        if let Some(s) = b.surface() {
+            let l = if c == 'k' { s.line_count().saturating_sub(1) } else { 0 };
+            s.set_cursor(Pos::new(l, goal.min(s.line_len(l).saturating_sub(1))));
+            s.reveal_cursor();
+        }
+    });
+    vm.goal = Some(goal);
+    vm.kept_goal = true;
+    true
+}
+
 fn do_motion(ed: &mut Editor, vm: &mut Vim, st: State, c: char, count: usize, has_count: bool) -> Step {
+    if cross_part(ed, vm, st, c, count) {
+        return Step::Done { change: false };
+    }
     let Some((t, kind)) = motion_target(ed, vm, c, count, has_count) else { return Step::Invalid };
     finish_motion(ed, vm, st, t, kind)
 }

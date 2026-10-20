@@ -13,7 +13,9 @@ local function mode() return serpis.buffer.modes()[1] end
 local steps = {
   { function() d.text("alpha beta"); T.press("S-RET"); d.text("gamma delta"); T.press("S-RET"); d.text("epsilon zeta") end, nil },
   { "ESC", function() T.check("ESC: normal, back one column", mode() == "vim-normal" and at(3, 12), true) end },
-  { "k k k", function() T.check("k stops at the composer's first line", st().focus == "prompt" and at(1, 10), true) end },
+  { "k k", function() T.check("k moves up the composer", st().focus == "prompt" and at(1, 10), true) end },
+  { "k", function() T.check("k on its first line moves up into the transcript", st().focus, "transcript") end },
+  { "j", function() T.check("j on the transcript's last line comes back down", st().focus == "prompt" and st().line == 1, true) end },
   { "j", function() T.check("j keeps the column", at(2, 11), true) end },
   { "g g", function() T.check("gg: composer's first line", st().focus == "prompt" and at(1, 1), true) end },
   { "G", function() T.check("G: composer's last line", at(3, 1), true) end },
@@ -33,6 +35,16 @@ local steps = {
   { "j c i w", function() T.check("ciw enters insert", mode(), "vim-insert") end },
   { function() d.text("omega"); T.press("ESC") end, function() T.check("ciw replaced the word", text(), "gamma delt\nepsilon omega\nalpha beta\ngamma delta") end },
   { "C-k", function() T.check("C-k focuses the transcript", st().focus, "transcript") end },
+  { "i", function() T.check("i from the transcript edits the composer", st().focus == "prompt" and mode() == "vim-insert", true) end },
+  { "ESC", nil },
+  -- A label jump from the composer into the transcript ("No model configured…" is in it).
+  { "g w", function()
+      local l
+      for _, x in ipairs(serpis.jump.labels()) do if x.part == 0 then l = x; break end end
+      T.check("gw labels transcript words", l ~= nil, true)
+      if l then T.press((l.label:gsub(".", "%0 "))) end
+    end },
+  { function() end, function() T.check("gw from the composer lands in the transcript", st().focus, "transcript") end },
   { "g g G", function() T.check("motions there leave the composer alone", text(), "gamma delt\nepsilon omega\nalpha beta\ngamma delta") end },
   { "i", function() T.check("i returns to the composer", st().focus == "prompt" and mode() == "vim-insert", true) end },
 }
