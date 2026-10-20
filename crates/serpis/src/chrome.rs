@@ -207,6 +207,25 @@ pub fn folder(p: &egui::Painter, r: Rect, c: Color32) {
     ));
 }
 
+/// A window with a sidebar panel on its left (filled when the sidebar shows).
+pub fn sidebar_icon(p: &egui::Painter, r: Rect, c: Color32, shown: bool) {
+    let s = Stroke::new(1.2, c);
+    p.rect_stroke(r, 2.5, s, StrokeKind::Inside);
+    let split = r.left() + r.width() * 0.36;
+    p.line_segment([egui::pos2(split, r.top()), egui::pos2(split, r.bottom())], s);
+    if shown {
+        p.rect_filled(Rect::from_min_max(r.min, egui::pos2(split, r.bottom())).shrink(1.5), 1.0, tint(c, 0.6));
+    }
+}
+
+/// "label (⌘K)" when `cmd` has a key binding, else just "label".
+pub fn with_key(label: &str, keys: &std::collections::HashMap<String, String>, cmd: &str) -> String {
+    match keys.get(cmd) {
+        Some(k) => format!("{label}  ({})", pretty_keys(k)),
+        None => label.to_string(),
+    }
+}
+
 pub fn magnifier(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
     p.circle_stroke(c, r, Stroke::new(1.3, color));
     p.line_segment([c + egui::vec2(r * 0.72, r * 0.72), c + egui::vec2(r * 1.5, r * 1.5)], Stroke::new(1.4, color));

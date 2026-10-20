@@ -592,6 +592,18 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect, palette: bool) {
         }
         return;
     }
+    // The sidebar toggle, always reachable at the bottom left.
+    let k = theme.ui_scale();
+    let bsz = (rect.height() - 4.0).min(26.0 * k);
+    let toggle = Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - bsz / 2.0), Vec2::splat(bsz));
+    let shown = ed.var_bool("sidebar-visible");
+    ed.debug_rects.insert("sidebar-toggle", toggle);
+    let keys = crate::commands::all_bindings(ed);
+    let tip = crate::chrome::with_key(if shown { "Hide the sidebar" } else { "Show the sidebar" }, &keys, "sidebar-toggle");
+    if crate::chrome::ghost_button(ui, toggle, ui.scope_id().with("sidebar-toggle"), &theme, &tip, |p, r, c| crate::chrome::sidebar_icon(p, r.expand(2.0), c, shown)).clicked() {
+        crate::sidebar::set_visible(ed, !shown);
+    }
+    let rect = Rect::from_min_max(egui::pos2(toggle.right() + 2.0, rect.top()), rect.max);
     let p = ui.painter();
     let mut right = String::new();
     if !ed.pending_keys.is_empty() {

@@ -228,6 +228,8 @@ pub struct Editor {
     pub sessions: crate::session_ui::Sessions,
     /// How long recent frames took (input, logic and drawing), in milliseconds, newest last.
     pub frame_times: std::collections::VecDeque<f32>,
+    /// Where named controls were drawn last frame (`serpis.debug.rect`, for tests).
+    pub debug_rects: HashMap<&'static str, Rect>,
 }
 
 impl Editor {
@@ -299,6 +301,7 @@ impl Editor {
             sidebar: Default::default(),
             sessions: Default::default(),
             frame_times: Default::default(),
+            debug_rects: HashMap::new(),
         }
     }
 

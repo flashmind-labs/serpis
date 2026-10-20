@@ -433,6 +433,11 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })
     })?)?;
     buf.set("text", lua.create_function(|_, ()| ed(|e| e.with_surface(|s, _| s.all_text())))?)?;
+    // serpis.buffer.visible(): the first and last line on screen (1-based) of the focused buffer.
+    buf.set("visible", lua.create_function(|_, ()| ed(|e| {
+        let r = e.with_surface(|s, _| s.visible_lines()).unwrap_or(0..0);
+        (r.start + 1, r.end)
+    }))?)?;
     buf.set("line", lua.create_function(|_, n: usize| ed(|e| e.with_surface(|s, _| s.line(n.saturating_sub(1)))))?)?;
     buf.set("insert", lua.create_function(|_, text: String| ed(|e| e.self_insert(&text)))?)?;
     buf.set("cursor", lua.create_function(|_, ()| ed(|e| {
@@ -1166,6 +1171,11 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // Where a named control was drawn last frame: {x, y, w, h} or nil ("sidebar-toggle").
+    debug.set("rect", lua.create_function(|lua, name: String| {
+        let v = ed(|e| e.debug_rects.get(name.as_str()).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})))?;
+        lua.to_value(&v.unwrap_or(Value::Null))
+    })?)?;
     // The open prompt's text, or nil.
     debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
     debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;

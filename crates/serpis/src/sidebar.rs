@@ -1196,6 +1196,8 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     let title_font = FontId::proportional(t.font_size - 1.0);
     let small = FontId::proportional(t.font_size - 2.5);
     let tiny = FontId::proportional(t.font_size - 3.5);
+    // Shortcuts as currently bound (a rebound or unbound command shows its real key, or none).
+    let keys = crate::commands::all_bindings(ed);
 
     // Search.
     let search_r = Rect::from_min_size(egui::pos2(inner.left(), rect.top() + 10.0 * k), egui::vec2(inner.width(), (32.0 * k).round()));
@@ -1215,8 +1217,8 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     let query_font = FontId::proportional(t.font_size - 1.0);
     if ed.sidebar.query.is_empty() {
         chrome::text(p, egui::pos2(tx, cy), if focused { "Search everything…" } else { "Search" }, query_font.clone(), t.fg_faint, search_r.width() - 70.0 * k);
-        if !focused {
-            chrome::keycap(p, search_r.right() - 8.0 * k, cy, "s-e", t);
+        if let Some(key) = keys.get("sidebar-focus").filter(|_| !focused) {
+            chrome::keycap(p, search_r.right() - 8.0 * k, cy, key, t);
         }
     } else {
         let w = chrome::text(p, egui::pos2(tx, cy), &ed.sidebar.query, query_font, t.fg, search_r.width() - 40.0 * k);
@@ -1237,20 +1239,22 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     p.rect_filled(new_r, 8.0 * k, if nresp.hovered() { chrome::tint(t.accent, 0.22) } else { chrome::tint(t.accent, 0.13) });
     chrome::plus(p, Rect::from_center_size(egui::pos2(new_r.left() + 15.0 * k, new_r.center().y), Vec2::splat(9.0 * k)), t.accent);
     chrome::text(p, egui::pos2(new_r.left() + 28.0 * k, new_r.center().y), "New chat", FontId::proportional(t.font_size - 1.0), t.accent, new_r.width() - 70.0 * k);
-    chrome::keycap(p, new_r.right() - 8.0 * k, new_r.center().y, "s-n", t);
+    if let Some(key) = keys.get("new-chat") {
+        chrome::keycap(p, new_r.right() - 8.0 * k, new_r.center().y, key, t);
+    }
     if nresp.clicked() {
         acts.push(Act::Run("project-new-chat".into(), Vec::new()));
     }
     let term_r = Rect::from_min_size(egui::pos2(new_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
-    if chrome::ghost_button(ui, term_r, ui.scope_id().with("sidebar-term"), t, "New terminal (⌘⇧T)", chrome::prompt).clicked() {
+    if chrome::ghost_button(ui, term_r, ui.scope_id().with("sidebar-term"), t, &chrome::with_key("New terminal", &keys, "project-new-terminal"), chrome::prompt).clicked() {
         acts.push(Act::Run("project-new-terminal".into(), Vec::new()));
     }
     let wt_r = Rect::from_min_size(egui::pos2(term_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
-    if chrome::ghost_button(ui, wt_r, ui.scope_id().with("sidebar-wt"), t, "New chat in a new worktree (⌘⇧N)", |p, r, c| chrome::branch(p, r.expand(1.0), c)).clicked() {
+    if chrome::ghost_button(ui, wt_r, ui.scope_id().with("sidebar-wt"), t, &chrome::with_key("New chat in a new worktree", &keys, "worktree-new-chat"), |p, r, c| chrome::branch(p, r.expand(1.0), c)).clicked() {
         acts.push(Act::Run("worktree-new-chat".into(), Vec::new()));
     }
     let open_r = Rect::from_min_size(egui::pos2(wt_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
-    if chrome::ghost_button(ui, open_r, ui.scope_id().with("sidebar-open"), t, "Open a folder as a project (⌘⇧O)", |p, r, c| chrome::folder(p, r.expand(1.5), c)).clicked() {
+    if chrome::ghost_button(ui, open_r, ui.scope_id().with("sidebar-open"), t, &chrome::with_key("Open a folder as a project", &keys, "project-open"), |p, r, c| chrome::folder(p, r.expand(1.5), c)).clicked() {
         acts.push(Act::Run("project-open".into(), Vec::new()));
     }
 
@@ -1607,7 +1611,11 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         }
         if projects.is_empty() {
             let (er, _) = ui.allocate_exact_size(egui::vec2(w, 40.0 * k), Sense::hover());
-            chrome::text(ui.painter(), egui::pos2(x0 + 4.0, er.center().y), "No projects yet. Open a folder with ⌘⇧O.", small.clone(), t.fg_faint, w - 20.0);
+            let hint = match keys.get("project-open") {
+                Some(k) => format!("No projects yet. Open a folder with {}.", chrome::pretty_keys(k)),
+                None => "No projects yet. Open a folder with project-open.".to_string(),
+            };
+            chrome::text(ui.painter(), egui::pos2(x0 + 4.0, er.center().y), &hint, small.clone(), t.fg_faint, w - 20.0);
         }
     });
     if any_working {

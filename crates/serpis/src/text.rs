@@ -601,6 +601,8 @@ pub struct DocView {
     viewport: Rect,
     /// Preferred column for vertical motion.
     pub goal_col: Option<usize>,
+    /// Where the scrollbar thumb was grabbed (offset from its top) during a drag.
+    bar_grab: Option<f32>,
     drag_anchor: Option<Pos>,
 }
 
@@ -621,6 +623,7 @@ impl Default for DocView {
             placed: Vec::new(),
             viewport: Rect::NOTHING,
             goal_col: None,
+            bar_grab: None,
             drag_anchor: None,
         }
     }
@@ -676,47 +679,106 @@ impl DocView {
     }
 
     /// Paint `src` into `rect`. Handles wheel scrolling and mouse cursor placement/selection.
-    pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, src: &dyn LineSource, theme: &Theme, opts: &ViewOptions) -> ViewResponse {
-        let mut resp = ViewResponse::default();
-        let painter = ui.painter_at(rect);
-        let n = src.len();
-        // The content column: centered when the view is wider than `max_width`.
-        let side = self.padding.x.max((rect.width() - self.max_width) / 2.0);
-        let col_left = rect.left() + side;
-        let col_w = (rect.width() - 2.0 * side).max(20.0);
-        let col_right = col_left + col_w;
-        let wrap_of = |line: &StyledLine| -> f32 {
-            if !self.wrap {
-                return f32::INFINITY;
-            }
-            let w = match &line.block {
-                Some(b) => col_w * b.shrink.unwrap_or(1.0) - 2.0 * line.indent,
-                None => col_w - line.indent,
-            };
-            w.max(20.0)
-        };
+    /// The content column for a view `width` wide: (left inset, column width).
+    fn column(&self, width: f32) -> (f32, f32) {
+        let side = self.padding.x.max((width - self.max_width) / 2.0);
+        (side, (width - 2.0 * side).max(20.0))
+    }
 
-        // Heights (cached by line layout hash, column width and theme).
+    fn wrap_width(&self, line: &StyledLine, col_w: f32) -> f32 {
+        wrap_width(self.wrap, line, col_w)
+    }
+}
+
+/// The wrap width of `line` in a column `col_w` wide (cards and indents take their share).
+fn wrap_width(wrap: bool, line: &StyledLine, col_w: f32) -> f32 {
+    {
+        if !wrap {
+            return f32::INFINITY;
+        }
+        let w = match &line.block {
+            Some(b) => col_w * b.shrink.unwrap_or(1.0) - 2.0 * line.indent,
+            None => col_w - line.indent,
+        };
+        w.max(20.0)
+    }
+}
+
+impl DocView {
+    /// Lay out lines whose content or width changed (cached by layout hash, column width and
+    /// theme); returns the content height including padding.
+    fn update_heights(&mut self, painter: &egui::Painter, col_w: f32, src: &dyn LineSource, theme: &Theme) -> f32 {
         if (self.width_key - col_w).abs() > 0.5 || self.style_key != theme.layout_key() {
             self.heights.clear();
             self.width_key = col_w;
             self.style_key = theme.layout_key();
         }
+        let n = src.len();
         self.heights.resize(n, (u64::MAX, 0.0, 0.0, None));
         for i in 0..n {
             let h = src.hash(i);
             if self.heights[i].0 != h {
                 let line = src.styled(i);
-                let g = layout_line(&painter, &line, theme, wrap_of(&line));
+                let g = layout_line(painter, &line, theme, self.wrap_width(&line, col_w));
                 self.heights[i] = (h, g.size().y.max(1.0) + line.gap_above + line.pad_top + line.pad_bottom, g.size().x + 2.0 * line.indent, line.block);
             }
         }
-        let total: f32 = self.heights.iter().map(|h| h.1).sum::<f32>() + 2.0 * self.padding.y;
+        self.heights.iter().map(|h| h.1).sum::<f32>() + 2.0 * self.padding.y
+    }
+
+    /// The height `src` needs at `width`, wrapped lines included (to size a view to its text).
+    pub fn measure(&mut self, ui: &egui::Ui, width: f32, src: &dyn LineSource, theme: &Theme) -> f32 {
+        let (_, col_w) = self.column(width);
+        self.update_heights(ui.painter(), col_w, src, theme)
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, src: &dyn LineSource, theme: &Theme, opts: &ViewOptions) -> ViewResponse {
+        let mut resp = ViewResponse::default();
+        let painter = ui.painter_at(rect);
+        let n = src.len();
+        // The content column: centered when the view is wider than `max_width`.
+        let (side, col_w) = self.column(rect.width());
+        let col_left = rect.left() + side;
+        let col_right = col_left + col_w;
+        let wrap = self.wrap;
+        let wrap_of = move |line: &StyledLine| -> f32 { wrap_width(wrap, line, col_w) };
+        let total = self.update_heights(&painter, col_w, src, theme);
         let view_h = rect.height();
         let max_scroll = (total - view_h).max(0.0);
 
-        // Input: wheel and mouse.
-        let response = ui.interact(rect, ui.scope_id().with(("docview", rect.min.x as i32, rect.min.y as i32)), Sense::click_and_drag());
+        // The scrollbar: drag the thumb, or click the track to jump there.
+        let scrollable = max_scroll > 1.0;
+        let track = Rect::from_min_max(egui::pos2(rect.right() - 12.0, rect.top()), rect.max);
+        let bar_h = (view_h * view_h / total.max(1.0)).max(28.0).min(view_h);
+        let thumb_top = |scroll: f32| rect.top() + if max_scroll > 0.0 { scroll / max_scroll } else { 0.0 } * (view_h - bar_h);
+        let mut bar_active = false;
+        if scrollable {
+            let bresp = ui.interact(track, ui.scope_id().with(("docview-bar", rect.min.x as i32, rect.min.y as i32)), Sense::click_and_drag());
+            bar_active = bresp.hovered() || bresp.dragged();
+            if let Some(p) = bresp.interact_pointer_pos() {
+                let top = thumb_top(self.scroll_y);
+                if bresp.drag_started() || (bresp.clicked() && self.bar_grab.is_none()) {
+                    // Grabbing the thumb keeps its offset; the track centers the thumb on the pointer.
+                    self.bar_grab = Some(if (top..top + bar_h).contains(&p.y) { p.y - top } else { bar_h / 2.0 });
+                }
+                if let Some(grab) = self.bar_grab.filter(|_| bresp.dragged() || bresp.clicked() || bresp.drag_started()) {
+                    let t = ((p.y - grab - rect.top()) / (view_h - bar_h).max(1.0)).clamp(0.0, 1.0);
+                    self.scroll_y = t * max_scroll;
+                    self.follow_tail = t >= 0.999;
+                    resp.scrolled = true;
+                }
+            }
+            if bresp.drag_stopped() || bresp.clicked() {
+                self.bar_grab = None;
+            }
+            if bar_active {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+            }
+        }
+
+        // Input: wheel and mouse (the scrollbar strip belongs to the scrollbar).
+        let text_rect = if scrollable { Rect::from_min_max(rect.min, egui::pos2(track.left(), rect.bottom())) } else { rect };
+        let response = ui.interact(text_rect, ui.scope_id().with(("docview", rect.min.x as i32, rect.min.y as i32)), Sense::click_and_drag());
         if response.hovered() {
             let dy = ui.input(|i| i.smooth_scroll_delta.y);
             if dy != 0.0 {
@@ -913,16 +975,12 @@ impl DocView {
             resp.clicked_line = response.interact_pointer_pos().and_then(|pt| self.pos_at(pt)).map(|p| p.line);
         }
 
-        // Scrollbar.
-        if total > view_h + 1.0 {
-            let frac = view_h / total;
-            let bar_h = (view_h * frac).max(24.0);
-            let t = if max_scroll > 0.0 { self.scroll_y / max_scroll } else { 0.0 };
-            let bar = Rect::from_min_size(
-                egui::pos2(rect.right() - 5.0, rect.top() + t * (view_h - bar_h)),
-                egui::vec2(3.0, bar_h),
-            );
-            painter.rect_filled(bar, 2.0, theme.fg_faint.gamma_multiply(if response.hovered() { 0.8 } else { 0.35 }));
+        // Scrollbar: a thin thumb that widens under the pointer.
+        if scrollable {
+            let w = if bar_active { 7.0 } else { 4.0 };
+            let bar = Rect::from_min_size(egui::pos2(rect.right() - w - 3.0, thumb_top(self.scroll_y)), egui::vec2(w, bar_h));
+            let alpha = if bar_active { 0.9 } else if response.hovered() { 0.6 } else { 0.35 };
+            painter.rect_filled(bar, w / 2.0, theme.fg_faint.gamma_multiply(alpha));
         }
         resp
     }

@@ -63,7 +63,7 @@ Windows can also be split, closed and resized with the mouse (header buttons, dr
 
 ## Sidebar: projects, worktrees and agents
 
-The sidebar (`s-b`) lists every chat and terminal grouped by project (a repository's main
+The sidebar (`s-b`, or the button at the bottom left) lists every chat and terminal grouped by project (a repository's main
 checkout) and by git worktree, each worktree with its branch and changes (`+added −removed`,
 untracked, ahead/behind). Each buffer shows what it is doing: a spinner and the current step
 while it works (`bash cargo test`, `thinking`), a yellow dot when an agent waits for you, a red

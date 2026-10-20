@@ -1473,12 +1473,14 @@ impl Buffer for ChatBuffer {
         // The composer: a floating card on the reading column, growing with its text up to 40%
         // of the window, with a toolbar (model, thinking, usage, send).
         let k = theme.ui_scale();
-        let row_h = ui.fonts_mut(|f| f.row_height(&theme.prop()));
         let toolbar_h = (38.0 * k).round();
         self.prompt.view.padding = egui::vec2(16.0 * k, 12.0 * k);
-        let prompt_lines = self.prompt.doc.lines.len().max(1) as f32;
-        let text_h = (prompt_lines * row_h + 2.0 * self.prompt.view.padding.y).min(rect.height() * 0.4 - toolbar_h).max(row_h + 2.0 * self.prompt.view.padding.y);
         let col_w = (rect.width() - 2.0 * self.view.padding.x).min(self.view.max_width).max(80.0);
+        // As tall as the text needs once wrapped, up to 40% of the window; beyond that it scrolls.
+        let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::UserText };
+        let one_line = ui.fonts_mut(|f| f.row_height(&theme.prop())).max((theme.font_size * 1.55).round()) + 2.0 * self.prompt.view.padding.y;
+        let content_h = self.prompt.view.measure(ui, col_w, &src, &theme);
+        let text_h = content_h.min((rect.height() * 0.4 - toolbar_h).max(one_line)).max(one_line);
         let left = rect.center().x - col_w / 2.0;
         let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
         let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k));
@@ -1515,7 +1517,7 @@ impl Buffer for ChatBuffer {
         painter.rect_stroke(card, radius, Stroke::new(1.0, outline), egui::StrokeKind::Inside);
 
         let text_rect = Rect::from_min_max(card.min, egui::pos2(card.right(), card.bottom() - toolbar_h));
-        let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::Default };
+        let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::UserText };
         let presp = self.prompt.view.show(ui, text_rect, &src, &theme, &ViewOptions {
             focused: p_focus,
             cursor: shape,
@@ -1613,7 +1615,7 @@ impl Buffer for ChatBuffer {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
-        self.composer_hits = vec![("model", mr), ("thinking", tr), ("send", send)];
+        self.composer_hits = vec![("model", mr), ("thinking", tr), ("send", send), ("card", card)];
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;
             ed.main_sender().send(move |ed| ed.call(cmd));
