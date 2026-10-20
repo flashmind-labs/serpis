@@ -86,6 +86,8 @@ pub struct ChatBuffer {
     style_key: u64,
     /// Where the composer's controls were drawn last frame (tests click them).
     pub composer_hits: Vec<(&'static str, Rect)>,
+    /// Custom session entries (pi's `custom` entries): (type, data), oldest first.
+    pub custom_entries: Vec<(String, Value)>,
     /// Where the conversation is recorded (created with the first prompt).
     pub session: Option<crate::session::SessionWriter>,
     session_failed: bool,
@@ -133,6 +135,7 @@ impl ChatBuffer {
             text_w: 0.0,
             style_key: 0,
             composer_hits: Vec::new(),
+            custom_entries: Vec::new(),
             session: None,
             session_failed: false,
         };
@@ -164,6 +167,7 @@ impl ChatBuffer {
         self.title.clear();
         self.last_error = None;
         self.session = None;
+        self.custom_entries.clear();
         self.dirty = true;
     }
 
@@ -193,11 +197,27 @@ impl ChatBuffer {
         self.prompt.clear();
         self.prompt_history.push(text.clone());
         self.history_index = None;
-        self.submit(ed, text, follow_up);
+        if !self.submit(ed, text.clone(), follow_up) {
+            // Refused (a before-prompt hook): keep the text to edit or send later.
+            self.prompt.set_text(&text);
+            self.prompt.move_to_end();
+        }
     }
 
-    /// Submit text as a user message (also used by Lua `serpis.agent.prompt`).
-    pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) {
+    /// Submit text as a user message (also used by Lua `serpis.agent.prompt`). Returns false
+    /// when a `before-prompt` hook refused it (`{block = "reason"}`).
+    pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) -> bool {
+        let model_spec = self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
+        let payload = serde_json::json!({
+            "buffer": ed.this_buffer().map(crate::editor::buffer_id_to_u64),
+            "text": text,
+            "model": model_spec,
+            "running": self.running(),
+        });
+        if let Some(reason) = ed.run_hook("before-prompt", &payload).iter().find_map(|r| r.get("block").map(|b| b.as_str().unwrap_or("blocked").to_string())) {
+            ed.warn(reason);
+            return false;
+        }
         if self.title.is_empty() {
             self.title = title_from(&text);
         }
@@ -210,19 +230,17 @@ impl ChatBuffer {
             }
             self.entries.push(Entry::User { text, queued: true });
             self.dirty = true;
-            return;
+            return true;
         }
         let Some(model) = self.model.clone() else {
             ed.error("No model selected (chat-select-model)");
-            return;
+            return false;
         };
         if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
             self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd));
         }
         let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
         self.record(ed, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
-        let payload = serde_json::json!({"text": text, "model": format!("{}/{}", model.provider, model.id)});
-        ed.run_hook("before-prompt", &payload);
         let mut tools = serpis_agent::builtin_tools();
         for (_, t) in &ed.agent_tools {
             tools.retain(|x| x.name() != t.name());
@@ -256,7 +274,7 @@ impl ChatBuffer {
             cwd: self.cwd.clone(),
             native_web_search: native,
             max_tokens: None,
-            hooks: Some(Arc::new(EditorToolHooks { main: ed.main_sender() })),
+            hooks: Some(Arc::new(EditorToolHooks { main: ed.main_sender(), buffer: ed.this_buffer().map(crate::editor::buffer_id_to_u64) })),
             sequential_tools: false,
         };
         let tx = self.tx.clone();
@@ -270,6 +288,40 @@ impl ChatBuffer {
         self.agent = Some(serpis_agent::run(self.history.clone(), vec![msg], cfg, emit));
         self.started = Some(Instant::now());
         self.view.follow_tail = true;
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
+        }
+        true
+    }
+
+    /// This chat as seen from outside (`Editor::chats`, `serpis.chat`).
+    pub fn info(&self) -> crate::chat_api::ChatInfo {
+        crate::chat_api::ChatInfo {
+            model: self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
+            thinking: self.thinking.as_str().to_string(),
+            running: self.running(),
+            usage: self.totals.clone(),
+            title: self.title.clone(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
+            session: self.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),
+            session_id: self.session_id.clone(),
+            entries: self.custom_entries.clone(),
+            agent: self.agent.clone(),
+        }
+    }
+
+    pub fn publish(&self, ed: &mut Editor, id: crate::BufferId) {
+        ed.chats.insert(id, self.info());
+    }
+
+    /// Record a custom entry in the session (created if needed) and keep it for resume.
+    pub fn append_entry(&mut self, ed: &mut Editor, kind: &str, data: Value) {
+        if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
+            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd));
+        }
+        let fields = serde_json::json!({"customType": kind, "data": data});
+        self.record(ed, |w| w.append("custom", fields).map(|_| ()));
+        self.custom_entries.push((kind.to_string(), data));
     }
 
     fn tool_entry(&mut self, id: &str) -> Option<&mut Entry> {
@@ -401,7 +453,18 @@ impl ChatBuffer {
                             }
                         }
                     }
-                    let payload = serde_json::json!({"text": a.text(), "stopReason": format!("{:?}", a.stop_reason)});
+                    let id = ed.this_buffer();
+                    if let Some(id) = id {
+                        self.publish(ed, id);
+                    }
+                    let payload = serde_json::json!({
+                        "buffer": id.map(crate::editor::buffer_id_to_u64),
+                        "text": a.text(),
+                        "stopReason": format!("{:?}", a.stop_reason),
+                        "model": format!("{}/{}", a.provider, a.model),
+                        "usage": crate::chat_api::usage_json(&a.usage),
+                        "total": crate::chat_api::usage_json(&self.totals),
+                    });
                     ed.run_hook("assistant-message", &payload);
                 }
                 self.record(ed, |w| w.message(&m).map(|_| ()));
@@ -431,7 +494,7 @@ impl ChatBuffer {
                 }
             }
             AgentEvent::ToolEnd { id, result, .. } => {
-                let payload = serde_json::json!({"name": result.tool_name, "isError": result.is_error});
+                let payload = serde_json::json!({"buffer": ed.this_buffer().map(crate::editor::buffer_id_to_u64), "name": result.tool_name, "isError": result.is_error});
                 if let Some(Entry::Tool { result: r, started, elapsed, .. }) = self.tool_entry(&id) {
                     *elapsed = started.map(|s| s.elapsed());
                     *r = Some(result);
@@ -449,7 +512,11 @@ impl ChatBuffer {
                         *queued = false;
                     }
                 }
-                ed.run_hook("agent-finished", &Value::Null);
+                let id = ed.this_buffer();
+                if let Some(id) = id {
+                    self.publish(ed, id);
+                }
+                ed.run_hook("agent-finished", &serde_json::json!({"buffer": id.map(crate::editor::buffer_id_to_u64), "total": crate::chat_api::usage_json(&self.totals)}));
             }
             AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
         }
@@ -728,6 +795,7 @@ impl ChatBuffer {
         });
         let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| crate::sidebar::fmt_age(d) + " ago").unwrap_or_default();
         self.entries.push(Entry::Info { text: format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), face: Face::Dim });
+        self.custom_entries = l.entries.clone();
         self.session = Some(crate::session::SessionWriter::resume(l));
         self.session_failed = false;
         self.last_error = None;
@@ -1380,6 +1448,8 @@ pub fn pi_setting(key: &str) -> Option<String> {
 /// Runs `before-tool-call` / `after-tool-call` editor hooks on the UI thread.
 struct EditorToolHooks {
     main: MainSender,
+    /// The chat whose agent calls the tools (hook payloads' `buffer`).
+    buffer: Option<u64>,
 }
 
 impl ToolHooks for EditorToolHooks {
@@ -1387,8 +1457,14 @@ impl ToolHooks for EditorToolHooks {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let name = name.to_string();
         let a = args.clone();
+        let buffer = self.buffer;
         self.main.send(move |ed| {
-            let results = ed.run_hook("before-tool-call", &serde_json::json!({"name": name, "args": a}));
+            // Apply the chat's pending events first (the response asking for this tool), so
+            // hooks see what it cost and what assistant-message hooks did about it.
+            if let Some(b) = buffer {
+                ed.with_buffer(crate::editor::buffer_id_from_u64(b), |c, ed| c.poll(ed));
+            }
+            let results = ed.run_hook("before-tool-call", &serde_json::json!({"buffer": buffer, "name": name, "args": a}));
             let gate = results.into_iter().find_map(|r| {
                 if let Some(reason) = r.get("block").and_then(Value::as_str) {
                     Some(ToolGate::Block(reason.to_string()))
@@ -1406,8 +1482,9 @@ impl ToolHooks for EditorToolHooks {
         let name = name.to_string();
         let text = result.text_content();
         let is_error = result.is_error;
+        let buffer = self.buffer;
         self.main.send(move |ed| {
-            let results = ed.run_hook("after-tool-call", &serde_json::json!({"name": name, "text": text, "isError": is_error}));
+            let results = ed.run_hook("after-tool-call", &serde_json::json!({"buffer": buffer, "name": name, "text": text, "isError": is_error}));
             let _ = tx.send(results.into_iter().find_map(|r| r.get("text").and_then(Value::as_str).map(str::to_string)));
         });
         Box::pin(async move {
@@ -1440,6 +1517,9 @@ impl Buffer for ChatBuffer {
     fn poll(&mut self, ed: &mut Editor) {
         while let Ok(ev) = self.rx.try_recv() {
             self.apply(ev, ed);
+        }
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
         }
         if self.running() {
             // Keep elapsed timers ticking.

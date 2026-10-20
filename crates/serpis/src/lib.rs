@@ -10,6 +10,8 @@
 pub mod app;
 pub mod buffer;
 pub mod buffers;
+pub mod chat_api;
+pub mod extend;
 pub mod chrome;
 pub mod clipboard;
 pub mod commands;
@@ -99,6 +101,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
+    ed.defvar("extensions-disabled", json!([]), "Lua extensions in <config>/extensions not to load, by name (\"max-money\" for max-money.lua).");
     ed.defvar("terminal-shell-integration", json!(true), "Load serpis's zsh integration in new terminals (OSC 133 prompt marks).");
     ed.defvar("terminal-prompt-regexp", json!(buffers::terminal::DEFAULT_PROMPT_REGEXP), "Prompt prefix regexp used when the shell doesn't mark prompts (OSC 133).");
 
@@ -111,6 +114,7 @@ pub fn bootstrap(ed: &mut Editor) {
     session_ui::install(ed);
     pickers::install(ed);
     jump::install(ed);
+    extend::install(ed);
     ed.define_buffer_kind("chat", o, |ed, p| Ok(Box::new(buffers::chat::ChatBuffer::new(ed, p))));
     ed.define_buffer_kind("terminal", o, |ed, p| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed, p)?)));
     ed.define_buffer_kind("text", o, |_, p| {

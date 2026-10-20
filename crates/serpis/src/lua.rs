@@ -1,9 +1,10 @@
 //! Lua configuration and extensions.
 //!
-//! `~/.config/serpis/init.lua` (plus modules under `lua/`) runs in a Lua 5.4 state with a
-//! `serpis` table that exposes the editor API: commands, keymaps, hooks, variables, buffers,
-//! windows, agent tools. Everything Lua registers is owned by `lua`, so a reload removes it
-//! exactly before the files run again in a fresh state. Edits are picked up automatically.
+//! `~/.config/serpis/init.lua` (plus modules under `lua/`), then every extension in
+//! `extensions/` (`name.lua` or `name/init.lua`), run in a LuaJIT state with a `serpis` table
+//! that exposes the editor API: commands, keymaps, hooks, variables, buffers, windows, chats,
+//! agent tools. Everything Lua registers is owned by `lua`, so a reload removes it exactly
+//! before the files run again in a fresh state. Edits are picked up automatically.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -119,15 +120,39 @@ fn config_stamp(dir: &std::path::Path) -> u64 {
     h.finish()
 }
 
+/// JSON → Lua, with null as nil: `if info.session then` must not see a truthy null value.
+pub fn lua_of<T: serde::Serialize + ?Sized>(lua: &Lua, v: &T) -> mlua::Result<LuaValue> {
+    lua.to_value_with(v, mlua::SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false))
+}
+
+/// Lua → JSON. LuaJIT numbers are all floats; whole ones become JSON integers again, so
+/// settings that are read as integers (`sidebar-recent-sessions = 0`) work from Lua.
+pub fn json_of(lua: &Lua, v: LuaValue) -> mlua::Result<Value> {
+    fn integral(v: Value) -> Value {
+        match v {
+            Value::Number(n) => match n.as_f64() {
+                Some(f) if f.fract() == 0.0 && f.abs() < 9.0e15 && !n.is_i64() && !n.is_u64() => {
+                    if f >= 0.0 { json!(f as u64) } else { json!(f as i64) }
+                }
+                _ => Value::Number(n),
+            },
+            Value::Array(a) => Value::Array(a.into_iter().map(integral).collect()),
+            Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, integral(v))).collect()),
+            other => other,
+        }
+    }
+    Ok(integral(lua.from_value::<Value>(v)?))
+}
+
 /// Call a Lua function with the editor published, converting JSON args and result.
 /// `lua` must be the state that owns `f`.
 pub fn call(ed: &mut Editor, lua: &Lua, f: &Function, arg: &Value) -> Option<Value> {
     let result = with_editor_ptr(ed, || -> mlua::Result<Value> {
-        let a = lua.to_value(arg)?;
+        let a = lua_of(lua, arg)?;
         let r: LuaValue = f.call(a)?;
         Ok(match r {
             LuaValue::Nil => Value::Null,
-            other => lua.from_value(other).unwrap_or(Value::Null),
+            other => json_of(lua, other).unwrap_or(Value::Null),
         })
     });
     match result {
@@ -212,7 +237,7 @@ impl serpis_agent::AgentTool for LuaTool {
     }
 }
 
-fn api(lua: &Lua) -> mlua::Result<Table> {
+pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     let s = lua.create_table()?;
     s.set("version", env!("CARGO_PKG_VERSION"))?;
     s.set("config_dir", crate::config_dir().to_string_lossy().into_owned())?;
@@ -243,7 +268,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     cmd.set(
         "run",
         lua.create_function(|lua, (name, params): (String, mlua::Variadic<LuaValue>)| {
-            let params: Vec<Value> = params.into_iter().map(|v| lua.from_value(v).unwrap_or(Value::Null)).collect();
+            let params: Vec<Value> = params.into_iter().map(|v| json_of(lua, v).unwrap_or(Value::Null)).collect();
             ed(|e| {
                 let args = Args { params, ..Default::default() };
                 e.run_command(&name, &args).map_err(|err| mlua::Error::runtime(format!("{err:#}")))
@@ -300,7 +325,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
     hk.set("run", lua.create_function(|lua, (name, payload): (String, Option<LuaValue>)| {
-        let p: Value = payload.map(|v| lua.from_value(v).unwrap_or(Value::Null)).unwrap_or(Value::Null);
+        let p: Value = payload.map(|v| json_of(lua, v).unwrap_or(Value::Null)).unwrap_or(Value::Null);
         ed(|e| { e.run_hook(&name, &p); })
     })?)?;
     s.set("hook", hk)?;
@@ -310,7 +335,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     var.set(
         "set",
         lua.create_function(|lua, (name, v): (String, LuaValue)| {
-            let v: Value = lua.from_value(v)?;
+            let v: Value = json_of(lua, v)?;
             ed(|e| e.set_var(&name, v))
         })?,
     )?;
@@ -319,7 +344,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, name: String| {
             let v = ed(|e| e.var(&name).cloned())?;
             match v {
-                Some(v) => lua.to_value(&v),
+                Some(v) => lua_of(lua, &v),
                 None => Ok(LuaValue::Nil),
             }
         })?,
@@ -327,7 +352,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     var.set(
         "define",
         lua.create_function(|lua, (name, v, doc): (String, LuaValue, Option<String>)| {
-            let v: Value = lua.from_value(v)?;
+            let v: Value = json_of(lua, v)?;
             ed(|e| e.defvar(&name, v, doc.as_deref().unwrap_or("")))
         })?,
     )?;
@@ -350,10 +375,10 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     }))?)?;
     buf.set("list", lua.create_function(|lua, ()| {
         let list = ed(|e| e.buffers.iter().map(|(id, s)| json!({"id": buffer_id_to_u64(id), "name": s.meta.name, "kind": s.meta.major})).collect::<Vec<_>>())?;
-        lua.to_value(&list)
+        lua_of(lua, &list)
     })?)?;
     buf.set("create", lua.create_function(|lua, (kind, name, params): (String, Option<String>, Option<LuaValue>)| {
-        let p: Value = params.map(|v| lua.from_value(v).unwrap_or(Value::Null)).unwrap_or(Value::Null);
+        let p: Value = params.map(|v| json_of(lua, v).unwrap_or(Value::Null)).unwrap_or(Value::Null);
         ed(|e| e.create_buffer(&kind, name.as_deref(), &p).map(buffer_id_to_u64).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
     })?)?;
     buf.set("show", lua.create_function(|_, id: u64| ed(|e| e.show_buffer(buffer_id_from_u64(id))))?)?;
@@ -376,7 +401,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 crate::ProcessStatus::Running(p) => json!({"running": true, "name": p}),
             }
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // serpis.buffer.activity(id?): {state, detail, program, attention, seconds}.
     buf.set("activity", lua.create_function(|lua, id: Option<u64>| {
@@ -390,11 +415,11 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 "seconds": t.map(|t| t.since.elapsed().as_secs()).unwrap_or(0),
             })
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // serpis.buffer.set_activity(id?, {state = "waiting", detail = "needs approval"} | nil): override what a buffer reports.
     buf.set("set_activity", lua.create_function(|lua, (id, spec): (Option<u64>, LuaValue)| {
-        let v: Value = if spec.is_nil() { Value::Null } else { lua.from_value(spec)? };
+        let v: Value = if spec.is_nil() { Value::Null } else { json_of(lua, spec)? };
         ed(|e| {
             let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
             if let Some(m) = e.meta_mut(id) {
@@ -451,7 +476,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         e.with_surface(|s, _| s.set_cursor(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1))));
     }))?)?;
     buf.set("set_local", lua.create_function(|lua, (key, v): (String, LuaValue)| {
-        let v: Value = lua.from_value(v)?;
+        let v: Value = json_of(lua, v)?;
         ed(|e| {
             let id = e.current_buffer();
             if let Some(m) = e.meta_mut(id) {
@@ -540,7 +565,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 })
                 .collect::<Vec<_>>()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // serpis.window.place(win, target, zone): what a mouse drop does. zone is "left", "right",
     // "up", "down" (split there) or "center" (tab them together).
@@ -564,10 +589,10 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     win.set("focus_id", lua.create_function(|_, w: u64| ed(|e| e.focus_window(crate::editor::window_id_from_u64(w))))?)?;
     win.set("configuration", lua.create_function(|lua, ()| {
         let c = ed(|e| e.window_configuration())?;
-        lua.to_value(&c)
+        lua_of(lua, &c)
     })?)?;
     win.set("set_configuration", lua.create_function(|lua, conf: LuaValue| {
-        let conf: Value = lua.from_value(conf)?;
+        let conf: Value = json_of(lua, conf)?;
         ed(|e| e.set_window_configuration(&conf).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
     })?)?;
     win.set("buffers", lua.create_function(|_, ()| ed(|e| e.visible_buffers().into_iter().map(buffer_id_to_u64).collect::<Vec<_>>()))?)?;
@@ -590,7 +615,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 }))
                 .collect::<Vec<_>>()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     wsp.set("switch", lua.create_function(|_, name: LuaValue| {
         let name = match name {
@@ -636,7 +661,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     // serpis.project.repo(dir): {worktree, main, branch, linked} for the repository around dir.
     project.set("repo", lua.create_function(|lua, dir: String| {
         match crate::git::repo(std::path::Path::new(&crate::expand_home(&dir))) {
-            Some(r) => lua.to_value(&json!({"worktree": r.worktree.to_string_lossy(), "main": r.main.to_string_lossy(), "branch": r.head_label(), "linked": r.is_linked()})),
+            Some(r) => lua_of(lua, &json!({"worktree": r.worktree.to_string_lossy(), "main": r.main.to_string_lossy(), "branch": r.head_label(), "linked": r.is_linked()})),
             None => Ok(LuaValue::Nil),
         }
     })?)?;
@@ -644,7 +669,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     project.set("worktrees", lua.create_function(|lua, dir: String| {
         let list = crate::git::worktrees(&crate::expand_home(&dir)).map_err(|e| mlua::Error::runtime(format!("{e:#}")))?;
         let v: Vec<Value> = list.iter().map(|w| json!({"path": w.path.to_string_lossy(), "branch": w.branch, "head": w.head, "main": w.main, "locked": w.locked})).collect();
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // serpis.project.new_worktree(dir, branch, {kind = "chat"|"terminal"|false, on_done = fn(path)}).
     project.set("new_worktree", lua.create_function(|lua, (dir, branch, opts): (String, String, Option<Table>)| {
@@ -673,7 +698,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     // serpis.project.list(): the sidebar's groups: {root, name, git, worktrees = {{path, branch, main, status, buffers}}}.
     project.set("list", lua.create_function(|lua, ()| {
         let v = ed(|e| crate::sidebar::projects(e).iter().map(crate::sidebar::Project::to_json).collect::<Vec<_>>())?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     s.set("project", project)?;
 
@@ -710,7 +735,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             };
             list.iter().map(crate::sidebar::Item::to_json).collect::<Vec<_>>()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // serpis.sidebar.selected(): the selected row as {kind = "buffer"|"project"|"worktree", id|path}.
     sb.set("selected", lua.create_function(|lua, ()| {
@@ -721,7 +746,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             Some(crate::sidebar::RowRef::Session(p)) => json!({"kind": "session", "path": p.to_string_lossy()}),
             None => Value::Null,
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     sb.set("open", lua.create_function(|_, id: u64| ed(|e| e.open_buffer(buffer_id_from_u64(id))))?)?;
     s.set("sidebar", sb)?;
@@ -758,6 +783,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         let mut s = crate::jump::Spec::new(re, action);
         s.group = match spec.get::<LuaValue>("group")? {
             LuaValue::Integer(n) => crate::jump::Group::Nth(n.max(0) as usize),
+            LuaValue::Number(n) => crate::jump::Group::Nth(n.max(0.0) as usize),
             LuaValue::String(g) if g.to_string_lossy() == "first" => crate::jump::Group::FirstMatched,
             _ => crate::jump::Group::Whole,
         };
@@ -777,7 +803,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 .map(|(t, l)| json!({"label": l, "buffer": buffer_id_to_u64(t.buffer), "line": t.start.line + 1, "col": t.start.col + 1, "part": t.part}))
                 .collect::<Vec<_>>()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     jump.set("cancel", lua.create_function(|_, ()| ed(crate::jump::cancel))?)?;
     s.set("jump", jump)?;
@@ -942,7 +968,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             let name: String = spec.get("name")?;
             let description: String = spec.get("description").unwrap_or_default();
             let params: LuaValue = spec.get("parameters")?;
-            let parameters: Value = if params.is_nil() { json!({"type": "object", "properties": {}}) } else { lua.from_value(params)? };
+            let parameters: Value = if params.is_nil() { json!({"type": "object", "properties": {}}) } else { json_of(lua, params)? };
             let execute: Function = spec.get("execute")?;
             let tools: Table = match lua.named_registry_value::<Table>("serpis_tools") {
                 Ok(t) => t,
@@ -984,7 +1010,90 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     agent.set("model", lua.create_function(|_, spec: String| ed(|e| e.set_var("agent-model", Value::String(spec))))?)?;
     // serpis.agent.reload_models(): re-read models.json and auth.json.
     agent.set("reload_models", lua.create_function(|_, ()| ed(|e| e.registry.reload()))?)?;
+    // serpis.agent.models(): every known model, {spec, provider, id, name, reasoning, configured}.
+    agent.set("models", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let configured = e.registry.configured_providers();
+            e.registry
+                .models()
+                .iter()
+                .map(|m| json!({"spec": format!("{}/{}", m.provider, m.id), "provider": m.provider, "id": m.id, "name": m.name, "reasoning": m.reasoning, "configured": configured.contains(&m.provider)}))
+                .collect::<Vec<_>>()
+        })?;
+        lua_of(lua, &v)
+    })?)?;
+    // serpis.agent.find_model("provider/model-id"): that model (as in models()) or nil.
+    agent.set("find_model", lua.create_function(|lua, spec: String| {
+        let v = ed(|e| e.find_model(&spec).map(|m| json!({"spec": spec, "provider": m.provider, "id": m.id, "name": m.name, "reasoning": m.reasoning, "configured": e.provider_configured(&m.provider)})))?;
+        lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
     s.set("agent", agent)?;
+
+    // Chats. Every function takes the chat's buffer id first (nil: the current buffer).
+    let chat = lua.create_table()?;
+    let chat_id = |id: Option<u64>| ed(|e| e.chat_id(id.map(buffer_id_from_u64)).map_err(|err| mlua::Error::runtime(err.to_string())))?;
+    // serpis.chat.list(): every chat as serpis.chat.info returns it.
+    chat.set("list", lua.create_function(|lua, ()| {
+        let v = ed(|e| e.chats.iter().map(|(id, c)| c.to_json(*id)).collect::<Vec<_>>())?;
+        lua_of(lua, &v)
+    })?)?;
+    // serpis.chat.info(buf?): {buffer, model, thinking, running, usage, title, cwd, session}.
+    chat.set("info", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let v = ed(|e| e.chats.get(&id).map(|c| c.to_json(id)).unwrap_or(Value::Null))?;
+        lua_of(lua, &v)
+    })?)?;
+    // serpis.chat.usage(buf?): the session's {input, output, cache_read, cache_write, total_tokens, cost}.
+    chat.set("usage", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let v = ed(|e| e.chats.get(&id).map(|c| crate::chat_api::usage_json(&c.usage)).unwrap_or_else(|| crate::chat_api::usage_json(&Default::default())))?;
+        lua_of(lua, &v)
+    })?)?;
+    chat.set("running", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| e.chats.get(&id).is_some_and(|c| c.running))
+    })?)?;
+    // serpis.chat.abort(buf?): stop the running agent (safe from the chat's own hooks).
+    chat.set("abort", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| e.abort_chat(id))
+    })?)?;
+    // serpis.chat.set_model(buf?, "provider/model-id"): errors when unknown or without credentials.
+    chat.set("set_model", lua.create_function(move |_, (id, spec): (Option<u64>, String)| {
+        let id = chat_id(id)?;
+        ed(|e| e.set_chat_model(id, &spec).map_err(|err| mlua::Error::runtime(err.to_string())))?
+    })?)?;
+    // serpis.chat.set_thinking(buf?, level): off, minimal, low, medium, high, xhigh, max (clamped to the model).
+    chat.set("set_thinking", lua.create_function(move |_, (id, level): (Option<u64>, String)| {
+        let id = chat_id(id)?;
+        ed(|e| e.set_chat_thinking(id, &level).map_err(|err| mlua::Error::runtime(err.to_string())))?
+    })?)?;
+    // serpis.chat.prompt(buf?, text): send text as if typed (a running agent is steered).
+    chat.set("prompt", lua.create_function(move |_, (id, text): (Option<u64>, String)| {
+        let id = chat_id(id)?;
+        ed(|e| e.with_chat_soon(id, move |c, e| {
+            c.submit(e, text, false);
+        }))
+    })?)?;
+    // serpis.chat.append(buf?, type, data): add a custom entry to the chat's session (pi's
+    // `custom` entries); it is restored when the session is resumed.
+    chat.set("append", lua.create_function(move |lua, (id, kind, data): (Option<u64>, String, LuaValue)| {
+        let id = chat_id(id)?;
+        let data: Value = json_of(lua, data)?;
+        ed(|e| e.append_chat_entry(id, &kind, data))
+    })?)?;
+    // serpis.chat.entries(buf?, type?): the chat's custom session entries' data, oldest first.
+    chat.set("entries", lua.create_function(move |lua, (id, kind): (Option<u64>, Option<String>)| {
+        let id = chat_id(id)?;
+        let v = ed(|e| {
+            e.chats
+                .get(&id)
+                .map(|c| c.entries.iter().filter(|(k, _)| kind.as_ref().is_none_or(|w| w == k)).map(|(_, d)| d.clone()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })?;
+        lua_of(lua, &v)
+    })?)?;
+    s.set("chat", chat)?;
 
     // Fonts: serpis.font.set({ mono = "Intel One Mono", sans = ..., size = 15, mono_size = 14 }).
     let font = lua.create_table()?;
@@ -1009,7 +1118,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             "size": e.theme.font_size,
             "mono_size": e.theme.mono_size,
         }))?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     font.set("list", lua.create_function(|_, ()| Ok(crate::fonts::families()))?)?;
     s.set("font", font)?;
@@ -1181,7 +1290,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 })
                 .collect::<Vec<_>>()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // Sidebar rows drawn last frame: {kind, id|path, x, y, w, h}.
     debug.set("sidebar_rows", lua.create_function(|lua, ()| {
@@ -1205,7 +1314,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 })
                 .collect::<Vec<_>>()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // Where the chat's composer controls are: {model = {x, y, w, h}, thinking = ..., send = ...}.
     debug.set("composer", lua.create_function(|lua, id: Option<u64>| {
@@ -1219,21 +1328,21 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 Value::Object(o)
             })
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // The open prompt's visible candidates, best first: {label, detail}.
     debug.set("candidates", lua.create_function(|lua, ()| {
         let v = ed(|e| {
             e.minibuffer.as_ref().map(|m| m.filtered.iter().map(|(i, _)| json!({"label": m.candidates[*i].label, "detail": m.candidates[*i].detail})).collect::<Vec<_>>()).unwrap_or_default()
         })?;
-        lua.to_value(&v)
+        lua_of(lua, &v)
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
     // Where a named control was drawn last frame: {x, y, w, h} or nil ("sidebar-toggle").
     debug.set("rect", lua.create_function(|lua, name: String| {
         let v = ed(|e| e.debug_rects.get(name.as_str()).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})))?;
-        lua.to_value(&v.unwrap_or(Value::Null))
+        lua_of(lua, &v.unwrap_or(Value::Null))
     })?)?;
     // The current chat's composer: {text, line, col, anchor = {line, col}?, focus = "prompt"|"transcript"}
     // (positions 1-based, within the composer).
@@ -1252,7 +1361,7 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
                 })
             })
         })?;
-        lua.to_value(&v.unwrap_or(Value::Null))
+        lua_of(lua, &v.unwrap_or(Value::Null))
     })?)?;
     // The open prompt's text, or nil.
     debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
@@ -1321,7 +1430,8 @@ pub fn reload(ed: &mut Editor) {
     let setup = || -> mlua::Result<()> {
         let package: Table = lua.globals().get("package")?;
         let path: String = package.get("path")?;
-        package.set("path", format!("{}/lua/?.lua;{}/lua/?/init.lua;{path}", dir.display(), dir.display()))?;
+        let d = dir.display();
+        package.set("path", format!("{d}/lua/?.lua;{d}/lua/?/init.lua;{d}/extensions/?.lua;{d}/extensions/?/init.lua;{path}"))?;
         lua.globals().set("serpis", api(&lua)?)?;
         Ok(())
     };
@@ -1355,13 +1465,56 @@ pub fn reload(ed: &mut Editor) {
         }
     };
     let r = with_editor_ptr(ed, || lua.load(&code).set_name(init.to_string_lossy()).exec());
-    match r {
-        Ok(()) => {
-            ed.run_hook("config-loaded", &Value::Null);
-            ed.message(format!("Loaded {}", init.display()));
-        }
-        Err(e) => ed.error(format!("init.lua: {e}")),
+    if let Err(e) = &r {
+        ed.error(format!("init.lua: {e}"));
     }
+    // Extensions run even when init.lua failed, each on its own: one broken file never stops
+    // the rest.
+    let disabled: Vec<String> = ed.var("extensions-disabled").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let mut loaded = Vec::new();
+    for (name, path) in extensions(&dir) {
+        if disabled.contains(&name) {
+            continue;
+        }
+        let code = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                ed.error(format!("extension {name}: {e}"));
+                continue;
+            }
+        };
+        match with_editor_ptr(ed, || lua.load(&code).set_name(path.to_string_lossy()).exec()) {
+            Ok(()) => loaded.push(name),
+            Err(e) => ed.error(format!("extension {name}: {e}")),
+        }
+    }
+    ed.loaded_extensions = loaded;
+    ed.run_hook("config-loaded", &Value::Null);
+    if r.is_ok() {
+        ed.message(format!("Loaded {}", init.display()));
+    }
+}
+
+/// The extensions in `<config>/extensions`, by name: `name.lua` files and `name/init.lua`
+/// directories (which can `require` their own modules), sorted.
+pub fn extensions(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = std::fs::read_dir(dir.join("extensions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_stem()?.to_string_lossy().into_owned();
+            if p.is_dir() {
+                let init = p.join("init.lua");
+                init.exists().then_some((name, init))
+            } else {
+                (p.extension()? == "lua").then_some((name, p))
+            }
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Debounced hot reload when config files change.

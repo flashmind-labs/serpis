@@ -187,8 +187,15 @@ From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configu
 
 ## Extend
 
-- **Lua**: `~/.config/serpis/init.lua` (created on first run with examples). Commands, keymaps, hooks,
-  variables, buffers, windows and agent tools: see the `serpis` table in `crates/serpis/src/lua.rs`.
+- **Lua** (LuaJIT): `~/.config/serpis/init.lua` (created on first run with examples), plus one file per
+  extension in `~/.config/serpis/extensions/` (`name.lua` or `name/init.lua`), loaded after it. Saving
+  any of them reloads them all. Commands, keymaps, hooks, settings, buffers, windows, chats (model,
+  usage, abort, session entries) and agent tools; the reference is `crates/serpis/src/extend.rs`. See
+  `examples/extensions/` for ports of pi's max-money and model-presets extensions.
+- **From a chat**: agents can extend serpis while it runs, like pi's agents write pi extensions.
+  `serpis_api` gives them the guide and the reference (plus the commands, settings and hooks defined
+  right now); `serpis_lua` runs Lua in the editor to load, test and inspect what they wrote. Hide
+  them with `agent-disabled-tools`.
 - **Rust**: a `dylib` crate depending on `serpis`; see `examples/plugins/hello`. Put the built library in
   `~/.config/serpis/plugins/` and it is loaded and hot-reloaded on rebuild. Plugins get `&mut Editor`:
   they can define buffer kinds, agent tools, interceptors, anything the built-ins do. They must be

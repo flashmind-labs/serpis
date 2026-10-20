@@ -76,6 +76,9 @@ pub struct Interceptor {
     pub f: InterceptorFn,
 }
 
+/// Work `Editor::defer` runs at the start of the next tick.
+type Deferred = Box<dyn FnOnce(&mut Editor)>;
+
 #[derive(Debug, Clone)]
 pub struct Var {
     pub value: Value,
@@ -232,6 +235,15 @@ pub struct Editor {
     pub debug_rects: HashMap<&'static str, Rect>,
     /// Jump labels on screen (avy/hop), and copies fading out.
     pub jump: crate::jump::JumpState,
+    /// What each chat is doing (model, usage, session entries), readable even while the chat
+    /// is busy (`serpis.chat`).
+    pub chats: HashMap<BufferId, crate::chat_api::ChatInfo>,
+    /// Buffers whose code is running (innermost last): `this_buffer`.
+    buffer_stack: Vec<BufferId>,
+    /// Work for the next tick that needs a busy buffer (`defer`).
+    deferred: Vec<Deferred>,
+    /// Lua extensions (`<config>/extensions`) that loaded without errors.
+    pub loaded_extensions: Vec<String>,
 }
 
 impl Editor {
@@ -305,6 +317,10 @@ impl Editor {
             frame_times: Default::default(),
             debug_rects: HashMap::new(),
             jump: Default::default(),
+            chats: HashMap::new(),
+            buffer_stack: Vec::new(),
+            deferred: Vec::new(),
+            loaded_extensions: Vec::new(),
         }
     }
 
@@ -540,12 +556,25 @@ impl Editor {
     /// Borrow a buffer out of the editor and call `f` with both.
     pub fn with_buffer<R>(&mut self, id: BufferId, f: impl FnOnce(&mut dyn Buffer, &mut Editor) -> R) -> Option<R> {
         let mut b = self.buffers.get_mut(id)?.buf.take()?;
+        self.buffer_stack.push(id);
         let r = f(b.as_mut(), self);
+        self.buffer_stack.pop();
         match self.buffers.get_mut(id) {
             Some(slot) => slot.buf = Some(b),
             None => b.on_kill(self),
         }
         Some(r)
+    }
+
+    /// The buffer whose code is running right now (a chat firing a hook, a buffer drawing).
+    pub fn this_buffer(&self) -> Option<BufferId> {
+        self.buffer_stack.last().copied()
+    }
+
+    /// Run `f` at the start of the next tick (when buffers that are busy now are free again).
+    pub fn defer(&mut self, f: impl FnOnce(&mut Editor) + 'static) {
+        self.deferred.push(Box::new(f));
+        self.ctx.request_repaint();
     }
 
     /// Downcast access to a buffer of a concrete type.
@@ -594,6 +623,7 @@ impl Editor {
         }
         let payload = serde_json::json!({"buffer": buffer_id_to_u64(id)});
         self.run_hook("buffer-killed", &payload);
+        self.chats.remove(&id);
         if let Some(mut slot) = self.buffers.remove(id) {
             if let Some(b) = slot.buf.as_mut() {
                 b.on_kill(self);
@@ -1094,6 +1124,9 @@ impl Editor {
     pub fn tick(&mut self) {
         while let Ok(task) = self.main_rx.try_recv() {
             task(self);
+        }
+        for f in std::mem::take(&mut self.deferred) {
+            f(self);
         }
         let ids: Vec<BufferId> = self.buffers.keys().collect();
         for id in ids {

@@ -53,7 +53,7 @@ when(function() return serpis.buffer.text():find("%S") ~= nil end, function() se
       serpis.keys.feed("^")
       local l, col = serpis.buffer.cursor()
       local line = serpis.buffer.line(l)
-      T.check("^ lands past the prompt", line:sub(utf8.offset(line, col), utf8.offset(line, col)), "e")
+      T.check("^ lands past the prompt", line:sub(col, col), "e")
       serpis.keys.feed("c w")
       T.check("cw enters insert", serpis.buffer.modes()[1], "vim-insert")
       serpis.buffer.insert("printf")

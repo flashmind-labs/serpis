@@ -24,7 +24,8 @@ uuid.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["glow", "clipboard", "links", "default_fonts", "system_fonts", "wayland", "x11"] }
 egui = "0.37"
 fontique = { version = "0.11", default-features = false, features = ["system", "fontconfig-dlopen"] }
-mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
+# LuaJIT (Lua 5.1 + extensions), like Neovim: fast, and familiar to plugin authors.
+mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54" }
 nix = { version = "0.29", features = ["term", "fs", "signal", "process", "ioctl"] }
 libloading = "0.8"

@@ -12,7 +12,7 @@ extensions can reach the same internals that the built-in packages use.
 |---|---|
 | GUI | egui / eframe 0.37 |
 | Rust extensions | `dylib` crates that link the shared `serpis` dylib and get `&mut Editor`. Hot reload = unregister everything the plugin owns, unload, load a fresh copy. Plugins must be built with the same rustc and serpis version (verified by a version-stamp symbol). |
-| Lua extensions | mlua (Lua 5.4, vendored). `~/.config/serpis/init.lua` plus `lua/` modules. Hot reload by re-running the file after dropping what it registered. |
+| Lua extensions | mlua (LuaJIT, vendored). `~/.config/serpis/init.lua` plus `lua/` modules and `extensions/`. Hot reload by re-running the files after dropping what they registered. Agents extend it from chats with the `serpis_api` and `serpis_lua` tools. |
 | Providers | Port pi-ai: same `Model` records, the same `models.json` / `auth.json` formats, the pi.dev model catalog, and API adapters per wire protocol. |
 | Web search | Both: provider-native search where the model supports it, otherwise a client-side backend trait (Brave, Exa, Tavily, DuckDuckGo). |
 | Terminal | libghostty-vt via `libghostty-rs` (built with zig 0.16). |

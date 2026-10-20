@@ -153,6 +153,8 @@ pub struct Loaded {
     pub thinking: Option<String>,
     pub name: Option<String>,
     pub leaf: Option<String>,
+    /// `custom` entries on the active branch: (customType, data), oldest first.
+    pub entries: Vec<(String, Value)>,
 }
 
 /// pi-ai message JSON → [`Message`], accepting pi's variants (string user content, bash
@@ -243,6 +245,11 @@ pub fn load(path: &Path) -> anyhow::Result<Loaded> {
             }
             "thinking_level_change" => out.thinking = s("thinkingLevel"),
             "session_info" => out.name = s("name").filter(|n| !n.is_empty()),
+            "custom" => {
+                if let Some(t) = s("customType") {
+                    out.entries.push((t, e.get("data").cloned().unwrap_or(Value::Null)));
+                }
+            }
             "message" if i >= start && Some(i) != compaction => {
                 if let Some(m) = e.get("message").and_then(parse_message) {
                     if let Message::Assistant(a) = &m {

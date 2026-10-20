@@ -671,7 +671,11 @@ pub fn install(ed: &mut Editor) {
         ed.message(format!("Thinking: {}", lvl.as_str()));
         Ok(())
     });
-    ed.define_command("chat-select-thinking", "Choose the thinking level from a picker.", o, |ed, _| {
+    ed.define_command("chat-select-thinking", "Choose the thinking level from a picker (param: level, e.g. \"high\").", o, |ed, a| {
+        if let Some(level) = a.str(0) {
+            let id = ed.chat_id(None)?;
+            return ed.set_chat_thinking(id, level);
+        }
         let (levels, current) = with_chat(ed, |c, _| {
             let levels = c.model.as_ref().map(serpis_ai::supported_thinking_levels).unwrap_or_else(|| serpis_ai::ThinkingLevel::ALL.to_vec());
             (levels, c.thinking)
@@ -717,7 +721,11 @@ pub fn install(ed: &mut Editor) {
     });
     ed.define_command("chat-history-previous", "Recall the previous prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_prev()));
     ed.define_command("chat-history-next", "Recall the next prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_next()));
-    ed.define_command("chat-select-model", "Choose the model for this chat.", o, |ed, _| {
+    ed.define_command("chat-select-model", "Choose the model for this chat (param: provider/model-id).", o, |ed, a| {
+        if let Some(spec) = a.str(0) {
+            let id = ed.chat_id(None)?;
+            return ed.set_chat_model(id, spec);
+        }
         let configured = ed.registry.configured_providers();
         let mut models: Vec<serpis_ai::Model> = ed
             .registry
