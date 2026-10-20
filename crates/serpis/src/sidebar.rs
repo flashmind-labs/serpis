@@ -622,6 +622,26 @@ fn move_selection(ed: &mut Editor, d: isize) {
     }
 }
 
+/// Buffers in the order the sidebar lists them.
+pub fn buffer_order(ed: &mut Editor) -> Vec<BufferId> {
+    projects(ed).iter().flat_map(|p| p.items().map(|i| i.buffer).collect::<Vec<_>>()).collect()
+}
+
+/// Open the buffer `step` places after the current one in the sidebar's order.
+fn step_buffer(ed: &mut Editor, step: isize) {
+    let order = buffer_order(ed);
+    if order.is_empty() {
+        return;
+    }
+    let cur = ed.current_buffer();
+    let n = order.len() as isize;
+    let next = match order.iter().position(|b| *b == cur) {
+        Some(i) => order[(i as isize + step).rem_euclid(n) as usize],
+        None => order[if step > 0 { 0 } else { (n - 1) as usize }],
+    };
+    ed.open_buffer(next);
+}
+
 pub fn set_visible(ed: &mut Editor, on: bool) {
     ed.set_var("sidebar-visible", json!(on));
     if !on {
@@ -958,6 +978,12 @@ pub fn install(ed: &mut Editor) {
         set_query(ed, a.str(0).unwrap_or("").to_string());
         Ok(())
     });
+    for (name, step, what) in [("sidebar-next-buffer", 1isize, "next"), ("sidebar-previous-buffer", -1, "previous")] {
+        ed.define_command(name, &format!("Open the {what} buffer in the sidebar's order (projects, worktrees, buffers), wrapping around."), o, move |ed, _| {
+            step_buffer(ed, step);
+            Ok(())
+        });
+    }
     ed.define_command("sidebar-open", "Open a buffer (param: buffer id; default: the selected one).", o, |ed, a| {
         if let Some(id) = target_buffer(ed, a) {
             ed.open_buffer(id);
