@@ -14,6 +14,7 @@ use crate::text::{CursorShape, PlainLines, ViewOptions};
 use crate::theme::Face;
 use crate::Editor;
 
+/// Chrome heights at the default font size; they grow with `Theme::ui_scale`.
 const HEADER_H: f32 = 30.0;
 const GAP: f32 = 6.0;
 const ECHO_H: f32 = 30.0;
@@ -23,10 +24,12 @@ const TAB_H: f32 = 24.0;
 pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, ed.theme.bg);
-    let mut body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - ECHO_H - GAP));
+    let echo_h = (ECHO_H * ed.theme.ui_scale()).round();
+    let mut body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - echo_h - GAP));
     ed.drop_targets.clear();
     if ed.var_bool("sidebar-visible") {
-        let w = ed.var("sidebar-width").and_then(Value::as_f64).unwrap_or(270.0) as f32;
+        // Set in points at the default font size; it grows with the text like the rest of the chrome.
+        let w = ed.var("sidebar-width").and_then(Value::as_f64).unwrap_or(270.0) as f32 * ed.theme.ui_scale();
         let w = w.clamp(180.0, (body.width() - 200.0).max(180.0));
         let side = Rect::from_min_size(body.min, egui::vec2(w, body.height()));
         body.min.x = side.right() + GAP;
@@ -36,7 +39,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
         ed.sidebar.focused = false;
     }
     draw_layout(ui, ed, body);
-    let echo = Rect::from_min_max(egui::pos2(full.left() + GAP, full.bottom() - ECHO_H), egui::pos2(full.right() - GAP, full.bottom()));
+    let echo = Rect::from_min_max(egui::pos2(full.left() + GAP, full.bottom() - echo_h), egui::pos2(full.right() - GAP, full.bottom()));
     draw_echo(ui, ed, echo);
     if ed.minibuffer.is_some() {
         draw_minibuffer_popup(ui, ed, echo);
@@ -120,7 +123,8 @@ enum TabAct {
 fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rects: &mut Vec<(u64, Rect)>) {
     let n = c.children.len();
     let tabbed = c.kind == Kind::Tabbed;
-    let bar_h = TAB_H * if tabbed { 1.0 } else { n as f32 };
+    let tab_h = (TAB_H * ed.theme.ui_scale()).round();
+    let bar_h = tab_h * if tabbed { 1.0 } else { n as f32 };
     let bar = Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_h));
     let grip_w = 20.0;
     let theme = ed.theme.clone();
@@ -137,9 +141,9 @@ fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rect
     for (i, ch) in c.children.iter().enumerate() {
         let r = if tabbed {
             let w = (rect.width() - grip_w) / n as f32;
-            Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, TAB_H - 2.0))
+            Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, tab_h - 2.0))
         } else {
-            Rect::from_min_size(egui::pos2(rect.left(), rect.top() + TAB_H * i as f32), egui::vec2(rect.width() - grip_w - 2.0, TAB_H - 2.0))
+            Rect::from_min_size(egui::pos2(rect.left(), rect.top() + tab_h * i as f32), egui::vec2(rect.width() - grip_w - 2.0, tab_h - 2.0))
         };
         tab_rects.push(r);
         let active = i == focused_child;
@@ -185,7 +189,7 @@ fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rect
         }
     }
     // The group grip.
-    let grip = Rect::from_min_size(egui::pos2(rect.right() - grip_w, rect.top()), egui::vec2(grip_w, TAB_H - 2.0));
+    let grip = Rect::from_min_size(egui::pos2(rect.right() - grip_w, rect.top()), egui::vec2(grip_w, tab_h - 2.0));
     let gresp = ui.interact(grip, ui.scope_id().with(("tab-grip", c.id)), Sense::click_and_drag()).on_hover_text("Drag to move this group; click to select it");
     let selected = ed.selected == Some(NodeRef::Container(c.id));
     crate::mouse::paint_grip(ui.painter(), grip, if gresp.hovered() || selected { theme.accent } else { theme.fg_faint });
@@ -346,7 +350,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     p.rect_stroke(rect, r, Stroke::new(1.0, if is_focus_win { theme.border_focused } else { theme.border }), StrokeKind::Inside);
 
     // Header.
-    let header = Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
+    let header = Rect::from_min_size(rect.min, egui::vec2(rect.width(), (HEADER_H * theme.ui_scale()).round()));
     p.rect_filled(header.shrink(1.0), CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, theme.bg_elevated);
     p.line_segment([egui::pos2(header.left() + 1.0, header.bottom()), egui::pos2(header.right() - 1.0, header.bottom())], Stroke::new(1.0, theme.border));
     let meta = ed.meta(id).cloned().unwrap_or_default();
@@ -376,13 +380,10 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let name_rect = Rect::from_min_size(egui::pos2(x, cy - ng.size().y / 2.0), ng.size());
     p.galley(name_rect.min, ng.clone(), theme.fg);
     x += ng.size().x + 10.0;
-    if !modeline.title.is_empty() {
-        let tg = p.layout_no_wrap(modeline.title.clone(), small.clone(), theme.fg_faint);
-        p.galley(egui::pos2(x, cy - tg.size().y / 2.0), tg, theme.fg_faint);
-    }
+    let title_x = x;
 
     // Right side: buttons, then state badge and status entries.
-    let bsz = 22.0;
+    let bsz = (22.0 * theme.ui_scale()).round();
     let mut bx = header.right() - 8.0 - bsz;
     let wid = ui.scope_id().with(("win", format!("{w:?}")));
     let hover = theme.border;
@@ -433,6 +434,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         p.galley(badge.center() - g.size() / 2.0, g, theme.bg);
         bx = badge.left() - 10.0;
     }
+    let mut status_left = bx;
     for s in header_extra.iter().chain(modeline.status.iter()).rev() {
         let g = p.layout_no_wrap(s.clone(), small.clone(), theme.fg_faint);
         bx -= g.size().x;
@@ -440,7 +442,14 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
             break;
         }
         p.galley(egui::pos2(bx, cy - g.size().y / 2.0), g, theme.fg_faint);
+        status_left = bx;
         bx -= 14.0;
+    }
+    // The title takes what is left between the name and the status entries.
+    if !modeline.title.is_empty() && status_left - 12.0 > title_x {
+        let tg = p.layout_no_wrap(modeline.title.clone(), small.clone(), theme.fg_faint);
+        let clip = Rect::from_min_max(egui::pos2(title_x, header.top()), egui::pos2(status_left - 12.0, header.bottom()));
+        p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(title_x, cy - tg.size().y / 2.0), tg, theme.fg_faint);
     }
 
     // Header interactions: click the name for the buffer switcher, drag to move the window
@@ -580,15 +589,6 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         return;
     }
     let p = ui.painter();
-    if let Some((msg, level, _)) = &ed.echo {
-        let color = match level {
-            Level::Info => theme.fg_dim,
-            Level::Warn => theme.yellow,
-            Level::Error => theme.red,
-        };
-        let line = msg.lines().next().unwrap_or("");
-        p.text(egui::pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, line, font.clone(), color);
-    }
     let mut right = String::new();
     if !ed.pending_keys.is_empty() {
         right.push_str(&format!("{}-   ", crate::keys::format_seq(&ed.pending_keys)));
@@ -602,7 +602,18 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     }
     right.push_str(&ed.var_str("keybinding-scheme").unwrap_or_else(|| "regular".into()));
     let r = p.text(rect.right_center() - egui::vec2(8.0, 0.0), Align2::RIGHT_CENTER, right, FontId::proportional(theme.font_size - 2.0), theme.fg_faint);
-    crate::mouse::workspace_chips(ui, ed, r.left() - 12.0, rect.center().y);
+    let chips_left = crate::mouse::workspace_chips(ui, ed, r.left() - 12.0, rect.center().y);
+    // The message gets the room left of the status and workspace chips.
+    if let Some((msg, level, _)) = &ed.echo {
+        let color = match level {
+            Level::Info => theme.fg_dim,
+            Level::Warn => theme.yellow,
+            Level::Error => theme.red,
+        };
+        let line = msg.lines().next().unwrap_or("");
+        let clip = Rect::from_min_max(rect.min, egui::pos2(chips_left - 12.0, rect.bottom()));
+        ui.painter().with_clip_rect(clip.intersect(ui.clip_rect())).text(egui::pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, line, font.clone(), color);
+    }
 }
 
 fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {

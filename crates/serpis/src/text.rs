@@ -10,7 +10,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use egui::text::{CCursor, LayoutJob, TextFormat};
+use egui::text::{CCursor, LayoutJob};
 use egui::{Color32, Galley, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::theme::{Face, Theme};
@@ -332,13 +332,39 @@ impl Doc {
 // Styled lines and the view
 // ---------------------------------------------------------------------------
 
-/// Background block decoration (chat cards, diff hunks).
+/// A card behind consecutive lines (messages, tool calls, code, tables), like a CSS box: the
+/// first line has `top`, the last `bottom`; lines in between continue it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
     pub bg: Color32,
+    /// A colored strip on the left edge.
     pub bar: Option<Color32>,
     pub top: bool,
     pub bottom: bool,
+    /// A 1px outline around the whole card.
+    pub border: Option<Color32>,
+    /// Shrink to the widest line and sit at the right edge (chat bubbles), at most this
+    /// fraction of the column.
+    pub shrink: Option<f32>,
+}
+
+impl Block {
+    pub fn new(bg: Color32) -> Self {
+        Block { bg, bar: None, top: false, bottom: false, border: None, shrink: None }
+    }
+    pub fn bar(self, c: Color32) -> Self {
+        Block { bar: Some(c), ..self }
+    }
+    pub fn border(self, c: Color32) -> Self {
+        Block { border: Some(c), ..self }
+    }
+    pub fn shrink(self, frac: f32) -> Self {
+        Block { shrink: Some(frac), ..self }
+    }
+    /// This block as line `i` of `n`.
+    pub fn nth(self, i: usize, n: usize) -> Self {
+        Block { top: i == 0, bottom: i + 1 == n, ..self }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -348,10 +374,21 @@ pub struct StyledLine {
     /// Byte ranges overriding `face`.
     pub spans: Vec<(Range<usize>, Face)>,
     pub block: Option<Block>,
-    /// Left indentation in points.
+    /// Left inset in points (inside a block: the padding; a block's right padding matches it).
     pub indent: f32,
-    /// Extra space above the line in points.
+    /// Space above the line, outside its block.
     pub gap_above: f32,
+    /// Never wrap: shrink the text to fit the width instead.
+    pub fit: bool,
+    /// Padding above and below the text, inside its block.
+    pub pad_top: f32,
+    pub pad_bottom: f32,
+    /// A hairline under the line, inside its block (table rows, card headers).
+    pub rule_below: Option<Color32>,
+    /// Extra horizontal space before byte offsets (table columns).
+    pub pads: Vec<(usize, f32)>,
+    /// A marker hanging left of the text (list bullets and numbers).
+    pub marker: Option<(String, Face)>,
 }
 
 impl StyledLine {
@@ -374,26 +411,89 @@ impl StyledLine {
         self.gap_above = g;
         self
     }
+    pub fn pad(mut self, top: f32, bottom: f32) -> Self {
+        self.pad_top = top;
+        self.pad_bottom = bottom;
+        self
+    }
+    pub fn rule(mut self, c: Color32) -> Self {
+        self.rule_below = Some(c);
+        self
+    }
+    pub fn marker(mut self, m: impl Into<String>, face: Face) -> Self {
+        self.marker = Some((m.into(), face));
+        self
+    }
+    pub fn spans(mut self, spans: Vec<(Range<usize>, Face)>) -> Self {
+        self.spans = spans;
+        self
+    }
+
+    /// Hash of everything that affects layout and paint.
+    pub fn layout_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.text.hash(&mut h);
+        (self.face as u8).hash(&mut h);
+        for (r, f) in &self.spans {
+            (r.start, r.end, *f as u8).hash(&mut h);
+        }
+        for v in [self.indent, self.gap_above, self.pad_top, self.pad_bottom] {
+            v.to_bits().hash(&mut h);
+        }
+        self.fit.hash(&mut h);
+        self.rule_below.map(|c| c.to_array()).hash(&mut h);
+        for (o, w) in &self.pads {
+            (*o, w.to_bits()).hash(&mut h);
+        }
+        self.marker.as_ref().map(|(m, f)| (m, *f as u8)).hash(&mut h);
+        if let Some(b) = &self.block {
+            (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
+        }
+        h.finish()
+    }
 }
 
 pub fn layout_job(line: &StyledLine, theme: &Theme, wrap_width: f32) -> LayoutJob {
+    layout_job_scaled(line, theme, wrap_width, 1.0)
+}
+
+/// Lay out a line; a `fit` line is shrunk (to half size at most) rather than wrapped.
+pub fn layout_line(painter: &egui::Painter, line: &StyledLine, theme: &Theme, wrap_width: f32) -> std::sync::Arc<Galley> {
+    if !line.fit {
+        return painter.layout_job(layout_job(line, theme, wrap_width));
+    }
+    let g = painter.layout_job(layout_job(line, theme, f32::INFINITY));
+    if g.size().x <= wrap_width || !wrap_width.is_finite() {
+        return g;
+    }
+    let k = (wrap_width / g.size().x).max(0.5);
+    painter.layout_job(layout_job_scaled(line, theme, f32::INFINITY, k))
+}
+
+/// [`layout_job`] with every font scaled by `scale`.
+pub fn layout_job_scaled(line: &StyledLine, theme: &Theme, wrap_width: f32, scale: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap_width;
     job.halign = egui::Align::LEFT;
+    // Spans share the line's line height, so bold and inline code sit on its baseline.
+    let base_height = theme.format(line.face).line_height;
     let fmt = |face: Face| {
-        let (font_id, color, background) = theme.face(face);
-        TextFormat {
-            font_id,
-            color,
-            background,
-            italics: face == Face::Thinking,
-            ..Default::default()
+        let mut f = theme.format(face);
+        if base_height.is_some() {
+            f.line_height = base_height;
         }
+        f.font_id.size *= scale;
+        f.extra_letter_spacing *= scale;
+        f.line_height = f.line_height.map(|h| h * scale);
+        f
     };
-    if line.spans.is_empty() {
+    if line.spans.is_empty() && line.pads.is_empty() {
         job.append(&line.text, 0.0, fmt(line.face));
         return job;
     }
+    // Faces per byte range, then cut at the pad offsets (each pad leads its section).
+    let mut runs: Vec<(Range<usize>, Face)> = Vec::new();
     let mut spans = line.spans.clone();
     spans.sort_by_key(|(r, _)| r.start);
     let mut at = 0;
@@ -403,13 +503,24 @@ pub fn layout_job(line: &StyledLine, theme: &Theme, wrap_width: f32) -> LayoutJo
             continue;
         }
         if s > at {
-            job.append(&line.text[at..s], 0.0, fmt(line.face));
+            runs.push((at..s, line.face));
         }
-        job.append(&line.text[s..e], 0.0, fmt(face));
+        runs.push((s..e, face));
         at = e;
     }
-    if at < line.text.len() {
-        job.append(&line.text[at..], 0.0, fmt(line.face));
+    if at < line.text.len() || runs.is_empty() {
+        runs.push((at..line.text.len(), line.face));
+    }
+    let pad_at = |o: usize| line.pads.iter().filter(|(p, _)| *p == o).map(|(_, w)| *w).sum::<f32>() * scale;
+    for (r, face) in runs {
+        let mut cuts: Vec<usize> = line.pads.iter().map(|(o, _)| *o).filter(|o| *o > r.start && *o < r.end && line.text.is_char_boundary(*o)).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut from = r.start;
+        for c in cuts.into_iter().chain(std::iter::once(r.end)) {
+            job.append(&line.text[from..c], pad_at(from), fmt(face));
+            from = c;
+        }
     }
     job
 }
@@ -456,8 +567,7 @@ impl LineSource for [StyledLine] {
         self[i].clone()
     }
     fn hash(&self, i: usize) -> u64 {
-        let l = &self[i];
-        hash_str(&l.text, (l.face as u64) ^ (l.spans.len() as u64) << 8 ^ (l.indent as u64) << 16 ^ (l.gap_above as u64) << 24)
+        self[i].layout_hash()
     }
 }
 
@@ -479,9 +589,14 @@ pub struct DocView {
     pub follow_tail: bool,
     pub wrap: bool,
     pub padding: Vec2,
+    /// Content column width; wider views center it (like a max-width page).
+    pub max_width: f32,
     reveal: bool,
-    heights: Vec<(u64, f32)>,
+    /// Per line: (layout hash, slot height, natural text width plus insets, card).
+    heights: Vec<(u64, f32, f32, Option<Block>)>,
     width_key: f32,
+    /// [`Theme::layout_key`] the cached heights were measured with.
+    style_key: u64,
     placed: Vec<Placed>,
     viewport: Rect,
     /// Preferred column for vertical motion.
@@ -498,9 +613,11 @@ impl Default for DocView {
             follow_tail: false,
             wrap: true,
             padding: egui::vec2(12.0, 8.0),
+            max_width: f32::INFINITY,
             reveal: false,
             heights: Vec::new(),
             width_key: 0.0,
+            style_key: 0,
             placed: Vec::new(),
             viewport: Rect::NOTHING,
             goal_col: None,
@@ -563,21 +680,35 @@ impl DocView {
         let mut resp = ViewResponse::default();
         let painter = ui.painter_at(rect);
         let n = src.len();
-        let inner_w = (rect.width() - 2.0 * self.padding.x).max(20.0);
-        let wrap_w = if self.wrap { inner_w } else { f32::INFINITY };
+        // The content column: centered when the view is wider than `max_width`.
+        let side = self.padding.x.max((rect.width() - self.max_width) / 2.0);
+        let col_left = rect.left() + side;
+        let col_w = (rect.width() - 2.0 * side).max(20.0);
+        let col_right = col_left + col_w;
+        let wrap_of = |line: &StyledLine| -> f32 {
+            if !self.wrap {
+                return f32::INFINITY;
+            }
+            let w = match &line.block {
+                Some(b) => col_w * b.shrink.unwrap_or(1.0) - 2.0 * line.indent,
+                None => col_w - line.indent,
+            };
+            w.max(20.0)
+        };
 
-        // Heights (cached by line hash and width).
-        if (self.width_key - inner_w).abs() > 0.5 {
+        // Heights (cached by line layout hash, column width and theme).
+        if (self.width_key - col_w).abs() > 0.5 || self.style_key != theme.layout_key() {
             self.heights.clear();
-            self.width_key = inner_w;
+            self.width_key = col_w;
+            self.style_key = theme.layout_key();
         }
-        self.heights.resize(n, (u64::MAX, 0.0));
+        self.heights.resize(n, (u64::MAX, 0.0, 0.0, None));
         for i in 0..n {
             let h = src.hash(i);
             if self.heights[i].0 != h {
                 let line = src.styled(i);
-                let g = painter.layout_job(layout_job(&line, theme, (wrap_w - line.indent).max(20.0)));
-                self.heights[i] = (h, g.size().y.max(1.0) + line.gap_above);
+                let g = layout_line(&painter, &line, theme, wrap_of(&line));
+                self.heights[i] = (h, g.size().y.max(1.0) + line.gap_above + line.pad_top + line.pad_bottom, g.size().x + 2.0 * line.indent, line.block);
             }
         }
         let total: f32 = self.heights.iter().map(|h| h.1).sum::<f32>() + 2.0 * self.padding.y;
@@ -621,31 +752,63 @@ impl DocView {
         self.placed.clear();
         let mut y = rect.top() + self.padding.y - self.scroll_y;
         let selection = self.anchor.map(|a| ordered(a, self.cursor));
+        let radius = theme.radius + 4;
+        // Outline of the card being drawn: top edge and horizontal extent.
+        let mut outline: Option<(f32, f32, f32, Color32)> = None;
+        // Width of the shrink-to-fit card a line belongs to.
+        let mut shrink_w: Option<f32> = None;
         for i in 0..n {
             let h = self.heights[i].1;
-            if y + h < rect.top() {
-                y += h;
-                continue;
-            }
-            if y > rect.bottom() {
+            let below = y > rect.bottom();
+            if below && outline.is_none() {
                 break;
             }
-            let line = src.styled(i);
-            let g = painter.layout_job(layout_job(&line, theme, (wrap_w - line.indent).max(20.0)));
-            let line_top = y + line.gap_above;
-            let origin = egui::pos2(rect.left() + self.padding.x + line.indent, line_top);
+            let line = if y + h < rect.top() || below { None } else { Some(src.styled(i)) };
+            let block = self.heights[i].3;
+            // A shrinking card is as wide as its widest line (measured across the group).
+            if let Some(b) = block.filter(|b| b.shrink.is_some()) {
+                if b.top || shrink_w.is_none() {
+                    let first = (0..=i).rev().find(|j| self.heights[*j].3.is_none_or(|lb| lb.top)).unwrap_or(i);
+                    let last = (i..n).find(|j| self.heights[*j].3.is_none_or(|lb| lb.bottom)).unwrap_or(n - 1);
+                    let w = self.heights[first..=last].iter().map(|h| h.2).fold(0.0, f32::max);
+                    shrink_w = Some(w.min(col_w * b.shrink.unwrap_or(1.0)));
+                }
+            }
+            let (bx0, bx1) = match block {
+                Some(b) if b.shrink.is_some() => (col_right - shrink_w.unwrap_or(col_w), col_right),
+                _ => (col_left, col_right),
+            };
+            let Some(line) = line else {
+                if let Some(b) = block {
+                    if let (Some(c), None, false) = (b.border, outline, b.top) {
+                        outline = Some((rect.top() - 40.0, bx0, bx1, c));
+                    }
+                    if b.bottom {
+                        if let Some((top, x0, x1, c)) = outline.take() {
+                            if below {
+                                painter.rect_stroke(Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, y)), radius, Stroke::new(1.0, c), egui::StrokeKind::Inside);
+                            }
+                        }
+                        shrink_w = None;
+                    }
+                }
+                y += h;
+                if below && outline.is_none() {
+                    break;
+                }
+                continue;
+            };
+            let g = layout_line(&painter, &line, theme, wrap_of(&line));
+            let slot_top = y + line.gap_above;
+            let origin = egui::pos2(if block.is_some() { bx0 + line.indent } else { col_left + line.indent }, slot_top + line.pad_top);
             let line_rect = Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), y + h));
-            if let Some(b) = line.block {
-                let block_rect = Rect::from_min_max(
-                    egui::pos2(rect.left() + self.padding.x * 0.5, if b.top { line_top - 3.0 } else { y }),
-                    egui::pos2(rect.right() - self.padding.x * 0.5, if b.bottom { y + h + 3.0 } else { y + h + 0.5 }),
-                );
-                let r = theme.radius;
+            if let Some(b) = block {
+                let block_rect = Rect::from_min_max(egui::pos2(bx0, if b.top { slot_top } else { y }), egui::pos2(bx1, y + h));
                 let cr = egui::CornerRadius {
-                    nw: if b.top { r } else { 0 },
-                    ne: if b.top { r } else { 0 },
-                    sw: if b.bottom { r } else { 0 },
-                    se: if b.bottom { r } else { 0 },
+                    nw: if b.top { radius } else { 0 },
+                    ne: if b.top { radius } else { 0 },
+                    sw: if b.bottom { radius } else { 0 },
+                    se: if b.bottom { radius } else { 0 },
                 };
                 painter.rect_filled(block_rect, cr, b.bg);
                 if let Some(bar) = b.bar {
@@ -655,6 +818,19 @@ impl DocView {
                         bar,
                     );
                 }
+                if let Some(c) = b.border {
+                    if b.top || outline.is_none() {
+                        outline = Some((if b.top { slot_top } else { rect.top() - 40.0 }, bx0, bx1, c));
+                    }
+                }
+            }
+            if let (Some(c), false) = (line.rule_below, block.is_some_and(|b| b.bottom)) {
+                painter.hline(bx0..=bx1, (y + h).round() - 0.5, Stroke::new(1.0, c));
+            }
+            if let Some((m, face)) = &line.marker {
+                let mg = painter.layout_job(layout_job(&StyledLine::new(m.clone(), *face), theme, f32::INFINITY));
+                let first_row = g.rows.first().map(|r| r.rect().height()).unwrap_or(mg.size().y);
+                painter.galley(egui::pos2(origin.x - 8.0 - mg.size().x, origin.y + (first_row - mg.size().y) / 2.0), mg, theme.fg);
             }
             // Selection.
             if let Some((a, b)) = selection {
@@ -666,6 +842,14 @@ impl DocView {
                 }
             }
             painter.galley(origin, g.clone(), theme.fg);
+            if let Some(b) = block {
+                if b.bottom {
+                    if let Some((top, x0, x1, c)) = outline.take() {
+                        painter.rect_stroke(Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, y + h)), radius, Stroke::new(1.0, c), egui::StrokeKind::Inside);
+                    }
+                    shrink_w = None;
+                }
+            }
             self.placed.push(Placed {
                 line: i,
                 origin,
@@ -673,6 +857,10 @@ impl DocView {
                 rect: line_rect,
             });
             y += h;
+        }
+        // A card running past the bottom edge.
+        if let Some((top, x0, x1, c)) = outline {
+            painter.rect_stroke(Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, rect.bottom() + 40.0)), radius, Stroke::new(1.0, c), egui::StrokeKind::Inside);
         }
 
         // Cursor.

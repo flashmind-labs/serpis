@@ -87,6 +87,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("prefix-passthrough-timeout", json!(0.0), "Seconds before a lone prefix key in a passthrough buffer is sent to the program (0: wait for the next key, like Emacs; C-c C-c sends C-c).");
     ed.defvar("terminal-escape", json!("auto"), "Where ESC goes in a terminal in vim insert state: \"auto\" (the program when it is full-screen, else vim normal state), \"terminal\" or \"serpis\". C-c C-z cycles it per terminal.");
     ed.defvar("leader-key", json!("SPC"), "The key `<leader>` stands for in key bindings (vim normal state uses `<leader> b b`, ...). \"\" turns leader bindings off.");
+    ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
     ed.defvar("agent-native-web-search", json!(true), "Use the provider's own web search when the model supports it.");

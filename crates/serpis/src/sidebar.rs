@@ -1138,6 +1138,7 @@ pub fn install(ed: &mut Editor) {
 // Drawing
 // ---------------------------------------------------------------------------------------------
 
+/// Row heights at the default font size; they grow with `Theme::ui_scale`.
 const ROW_PROJECT: f32 = 32.0;
 const ROW_WORKTREE: f32 = 24.0;
 const ROW_ITEM: f32 = 42.0;
@@ -1259,9 +1260,10 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     p.rect_stroke(rect, r, Stroke::new(1.0, if ed.sidebar.focused { theme.border_focused } else { theme.border }), StrokeKind::Inside);
     let time = ui.input(|i| i.time);
     let mut acts: Vec<Act> = Vec::new();
+    let k = theme.ui_scale();
 
     // Search box.
-    let search_r = Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(rect.width() - 20.0, 30.0));
+    let search_r = Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(rect.width() - 20.0, (30.0 * k).round()));
     let sresp = ui.interact(search_r, ui.scope_id().with("sidebar-search"), Sense::click());
     if sresp.clicked() {
         acts.push(Act::Focus);
@@ -1289,7 +1291,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     }
 
     // Footer.
-    let footer_h = 34.0;
+    let footer_h = (34.0 * k).round();
     let footer = Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.bottom() - footer_h), egui::pos2(rect.right() - 8.0, rect.bottom() - 6.0));
     let list_rect = Rect::from_min_max(egui::pos2(rect.left() + 4.0, search_r.bottom() + 8.0), egui::pos2(rect.right() - 4.0, footer.top() - 4.0));
     ui.painter().line_segment([egui::pos2(rect.left() + 8.0, footer.top() - 2.0), egui::pos2(rect.right() - 8.0, footer.top() - 2.0)], Stroke::new(1.0, theme.border));
@@ -1338,14 +1340,14 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         let item_row = |ui: &mut egui::Ui, it: &Item, indent: f32, rows: &mut Vec<RowRef>, acts: &mut Vec<Act>, any_working: &mut bool, subtitle: Option<String>| {
             let idx = rows.len();
             rows.push(RowRef::Item(it.buffer));
-            let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_ITEM), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_ITEM * k), Sense::hover());
             rects.borrow_mut().push(r);
             let is_sel = sb_focused && idx == selected;
             if is_sel && reveal {
                 ui.scroll_to_rect(r, None);
             }
             let hovered = ui.rect_contains_pointer(r);
-            let kill_r = Rect::from_center_size(egui::pos2(r.right() - 16.0, r.top() + 13.0), Vec2::splat(20.0));
+            let kill_r = Rect::from_center_size(egui::pos2(r.right() - 16.0 * k, r.top() + 13.0 * k), Vec2::splat(20.0 * k));
             let main_r = if hovered { Rect::from_min_max(r.min, egui::pos2(kill_r.left() - 2.0, r.bottom())) } else { r };
             let id = ui.scope_id().with(("sb-item", buffer_id_to_u64(it.buffer)));
             if hovered && row_button(ui, kill_r, id.with("kill"), &theme, "Kill buffer", cross) {
@@ -1370,8 +1372,8 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 p.rect_filled(Rect::from_min_size(egui::pos2(card.left(), card.top() + 6.0), egui::vec2(2.5, card.height() - 12.0)), 1.5, theme.accent);
             }
             let x = card.left() + 10.0 + indent;
-            let y1 = card.top() + 12.0;
-            let y2 = card.bottom() - 11.0;
+            let y1 = card.top() + 12.0 * k;
+            let y2 = card.bottom() - 11.0 * k;
             // Kind icon, tinted by state.
             let icon_r = Rect::from_center_size(egui::pos2(x + 5.0, y1), Vec2::splat(10.0));
             let icol = if st == ActivityState::Idle { if it.current { theme.accent } else { theme.fg_dim } } else { col };
@@ -1465,7 +1467,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         let session_row = |ui: &mut egui::Ui, i: &crate::session::Info, indent: f32, sub: bool, rows: &mut Vec<RowRef>, acts: &mut Vec<Act>| {
             let idx = rows.len();
             rows.push(RowRef::Session(i.path.clone()));
-            let h = if sub { ROW_ITEM } else { 26.0 };
+            let h = if sub { ROW_ITEM } else { 26.0 } * k;
             let (r, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
             rects.borrow_mut().push(r);
             let is_sel = sb_focused && idx == selected;
@@ -1482,7 +1484,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 p.rect_stroke(card, 6, Stroke::new(1.0, theme.border_focused), StrokeKind::Inside);
             }
             let x = card.left() + 10.0 + indent;
-            let y1 = if sub { card.top() + 12.0 } else { card.center().y };
+            let y1 = if sub { card.top() + 12.0 * k } else { card.center().y };
             // A clock face.
             let c = egui::pos2(x + 5.0, y1);
             p.circle_stroke(c, 4.5, Stroke::new(1.1, theme.fg_faint));
@@ -1495,7 +1497,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             text(p, egui::pos2(x + 16.0, y1), &i.title(), small.clone(), theme.fg_dim, rx - x - 22.0);
             if sub {
                 let project = i.project.as_deref().map(dir_name).unwrap_or_else(|| dir_name(&i.cwd));
-                text(p, egui::pos2(x + 16.0, card.bottom() - 11.0), &format!("{project} · {} msgs · saved session", i.messages), small.clone(), theme.fg_faint, card.right() - x - 26.0);
+                text(p, egui::pos2(x + 16.0, card.bottom() - 11.0 * k), &format!("{project} · {} msgs · saved session", i.messages), small.clone(), theme.fg_faint, card.right() - x - 26.0);
             }
             let resp = resp.on_hover_text(format!("Resume · {}", i.path.display()));
             if resp.clicked() {
@@ -1516,7 +1518,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         };
 
         if !query.is_empty() {
-            let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), Sense::hover());
+            let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 22.0 * k), Sense::hover());
             let n = found.len();
             text(ui.painter(), egui::pos2(hr.left() + 10.0, hr.center().y), &format!("{n} match{}", if n == 1 { "" } else { "es" }), small.clone(), theme.fg_faint, w);
             for it in &found {
@@ -1528,7 +1530,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 item_row(ui, it, 0.0, &mut rows, &mut acts, &mut any_working, Some(sub));
             }
             if !found_sessions.is_empty() {
-                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), Sense::hover());
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 26.0 * k), Sense::hover());
                 text(ui.painter(), egui::pos2(hr.left() + 10.0, hr.center().y + 2.0), &format!("Saved sessions ({})", found_sessions.len()), small.clone(), theme.fg_faint, w);
                 for i in &found_sessions {
                     session_row(ui, i, 0.0, true, &mut rows, &mut acts);
@@ -1542,7 +1544,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             let collapsed = ed_ref.sidebar.collapsed.contains(&key);
             let idx = rows.len();
             rows.push(RowRef::Project(key.clone()));
-            let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_PROJECT), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_PROJECT * k), Sense::hover());
             rects.borrow_mut().push(r);
             let is_sel = sb_focused && idx == selected;
             if is_sel && reveal {
@@ -1550,7 +1552,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             }
             let hovered = ui.rect_contains_pointer(r);
             let id = ui.scope_id().with(("sb-project", key.to_string_lossy().into_owned()));
-            let bsz = 22.0;
+            let bsz = (22.0 * k).round();
             let mut bx = r.right() - 6.0 - bsz;
             let mut buttons_left = r.right();
             if hovered && pr.root.is_some() {
@@ -1633,7 +1635,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             // Worktree headers appear for git projects; plain projects list buffers directly.
             let show_wt = pr.git;
             if pr.items().next().is_none() && !show_wt {
-                let (er, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), Sense::hover());
+                let (er, _) = ui.allocate_exact_size(egui::vec2(w, 22.0 * k), Sense::hover());
                 text(ui.painter(), egui::pos2(er.left() + 40.0, er.center().y), "No chats yet", small.clone(), theme.fg_faint, w);
             }
             for wt in &pr.worktrees {
@@ -1641,7 +1643,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 if show_wt {
                     let idx = rows.len();
                     rows.push(RowRef::Worktree(wt.path.clone()));
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_WORKTREE), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(w, ROW_WORKTREE * k), Sense::hover());
                     rects.borrow_mut().push(r);
                     let is_sel = sb_focused && idx == selected;
                     if is_sel && reveal {
@@ -1652,18 +1654,18 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                     let mut buttons_left = r.right();
                     if hovered {
                         let dir = json!(wt.path.to_string_lossy());
-                        let mut bx = r.right() - 6.0 - 20.0;
+                        let mut bx = r.right() - 6.0 - 20.0 * k;
                         let mut btns = vec![("New chat here", "project-new-chat", 0)];
                         if !wt.main {
                             btns.insert(0, ("Remove worktree", "worktree-remove", 1));
                         }
                         for (tip, cmd, kind) in btns {
-                            let br = Rect::from_min_size(egui::pos2(bx, r.center().y - 10.0), Vec2::splat(20.0));
+                            let br = Rect::from_min_size(egui::pos2(bx, r.center().y - 10.0 * k), Vec2::splat(20.0 * k));
                             if row_button(ui, br, id.with(cmd), &theme, tip, |p, rr, c| if kind == 0 { plus(p, rr, c) } else { cross(p, rr, c) }) {
                                 acts.push(Act::Run(cmd.into(), vec![dir.clone()]));
                             }
                             buttons_left = br.left();
-                            bx -= 22.0;
+                            bx -= 22.0 * k;
                         }
                     }
                     let resp = ui.interact(Rect::from_min_max(r.min, egui::pos2(buttons_left - 2.0, r.bottom())), id, Sense::click());
@@ -1723,7 +1725,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 }
             }
             if !pr.sessions.is_empty() {
-                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 20.0), Sense::hover());
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 20.0 * k), Sense::hover());
                 text(ui.painter(), egui::pos2(hr.left() + 32.0, hr.center().y + 2.0), "Recent sessions", small.clone(), theme.fg_faint, w);
                 for i in &pr.sessions {
                     session_row(ui, i, 22.0, false, &mut rows, &mut acts);
@@ -1732,7 +1734,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             ui.add_space(6.0);
         }
         if projects.is_empty() {
-            let (er, _) = ui.allocate_exact_size(egui::vec2(w, 40.0), Sense::hover());
+            let (er, _) = ui.allocate_exact_size(egui::vec2(w, 40.0 * k), Sense::hover());
             text(ui.painter(), egui::pos2(er.left() + 12.0, er.center().y), "No projects yet: start a chat or run project-add", small.clone(), theme.fg_faint, w - 20.0);
         }
     });
@@ -1770,7 +1772,7 @@ pub fn draw_handle(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     }
     if resp.dragged() {
         if let Some(p) = resp.interact_pointer_pos() {
-            let w = (p.x - ui.max_rect().left()).clamp(180.0, 640.0);
+            let w = (p.x - ui.max_rect().left()).clamp(180.0, 900.0) / ed.theme.ui_scale();
             ed.set_var("sidebar-width", json!(w.round()));
         }
     }

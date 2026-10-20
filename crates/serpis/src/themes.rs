@@ -128,6 +128,9 @@ impl ThemeSpec {
             font_size: base.font_size,
             mono_size: base.mono_size,
             radius: base.radius,
+            tracking: base.tracking.clone(),
+            bold_weight: base.bold_weight,
+            font_epoch: base.font_epoch,
         })
     }
 }
@@ -202,6 +205,9 @@ impl Editor {
         };
         t.font_size = base.font_size;
         t.mono_size = base.mono_size;
+        t.tracking = base.tracking.clone();
+        t.bold_weight = base.bold_weight;
+        t.font_epoch = base.font_epoch;
         Ok(t)
     }
 

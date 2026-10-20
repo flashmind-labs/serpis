@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use egui::{Rect, Stroke};
+use egui::{Color32, Rect, Stroke};
 use serde_json::Value;
 use serpis_agent::{AgentConfig, AgentEvent, AgentHandle, ToolGate, ToolHooks, ToolResult};
 use serpis_ai::*;
@@ -80,6 +80,10 @@ pub struct ChatBuffer {
     pub title: String,
     /// Error of the last run, if it failed.
     last_error: Option<String>,
+    /// Width of the transcript's content column (tables are laid out for it).
+    text_w: f32,
+    /// Theme and font state the transcript was rendered with (cards carry its colors).
+    style_key: u64,
     /// Where the conversation is recorded (created with the first prompt).
     pub session: Option<crate::session::SessionWriter>,
     session_failed: bool,
@@ -124,6 +128,8 @@ impl ChatBuffer {
             history_index: None,
             title: String::new(),
             last_error: None,
+            text_w: 0.0,
+            style_key: 0,
             session: None,
             session_failed: false,
         };
@@ -452,51 +458,75 @@ impl ChatBuffer {
 
     fn rebuild(&mut self, ed: &Editor) {
         let t = &ed.theme;
+        let k = t.ui_scale();
+        let m = Measure::Fonts(&ed.ctx, t);
         let mut out: Vec<StyledLine> = Vec::new();
         let mut owner: Vec<Option<usize>> = Vec::new();
         let push = |out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, l: StyledLine, e: Option<usize>| {
             out.push(l);
             owner.push(e);
         };
+        let mut prev_tool = false;
         for (ei, e) in self.entries.iter().enumerate() {
+            let is_tool = matches!(e, Entry::Tool { .. });
             match e {
                 Entry::User { text, queued } => {
-                    let blk = Block { bg: t.user_bg, bar: Some(t.accent), top: true, bottom: false };
-                    let label = if *queued { "You · queued (steering)" } else { "You" };
-                    push(&mut out, &mut owner, StyledLine::new(label, Face::UserLabel).block(blk).indent(10.0).gap(14.0), Some(ei));
-                    let lines: Vec<&str> = text.lines().collect();
-                    for (i, l) in lines.iter().enumerate() {
-                        let b = Block { top: false, bottom: i + 1 == lines.len(), ..blk };
-                        push(&mut out, &mut owner, StyledLine::new(*l, Face::UserText).block(b).indent(10.0), Some(ei));
+                    // A bubble on the right, as wide as its text.
+                    let blk = Block::new(t.user_bg).shrink(0.82);
+                    let mut lines: Vec<StyledLine> = Vec::new();
+                    if *queued {
+                        lines.push(StyledLine::new("Queued · steers the running agent", Face::Meta));
+                    }
+                    lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText)));
+                    if lines.is_empty() {
+                        lines.push(StyledLine::new("", Face::UserText));
+                    }
+                    let n = lines.len();
+                    for (i, l) in lines.into_iter().enumerate() {
+                        let mut l = l.block(blk.nth(i, n)).indent(14.0 * k);
+                        if i == 0 {
+                            l = l.gap(26.0 * k);
+                            l.pad_top = 9.0 * k;
+                        }
+                        if i + 1 == n {
+                            l.pad_bottom = 9.0 * k;
+                        }
+                        push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
                 Entry::Assistant { blocks, model, streaming, continuation, usage, error } => {
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
                     if !continuation && (has_content || *streaming || error.is_some()) {
-                        let mut label = format!("◆ {}", short_model(model));
+                        let mut label = format!("◆  {}", short_model(model));
                         if *streaming && blocks.is_empty() {
                             label.push_str("  ·  thinking…");
                         }
-                        push(&mut out, &mut owner, StyledLine::new(label, Face::Accent).gap(14.0), Some(ei));
+                        let diamond = "◆".len();
+                        push(&mut out, &mut owner, StyledLine::new(label, Face::Label).spans(vec![(0..diamond, Face::Accent)]).gap(26.0 * k).pad(0.0, 4.0 * k), Some(ei));
                     }
                     for b in blocks {
                         match b {
                             AssistantContent::Thinking { thinking, redacted, .. } => {
-                                let body: Vec<&str> = thinking.trim().lines().collect();
+                                let body: Vec<&str> = thinking.trim().lines().filter(|l| !l.trim().is_empty()).collect();
                                 if body.is_empty() && !*redacted {
                                     continue;
                                 }
                                 let shown: &[&str] = if *streaming || body.len() <= 4 { &body } else { &body[body.len() - 3..] };
-                                let blk = Block { bg: t.bg_alt, bar: Some(t.fg_faint), top: true, bottom: false };
-                                let head = if *streaming { "thinking…".to_string() } else if body.len() > shown.len() { format!("thought · {} lines", body.len()) } else { "thought".to_string() };
-                                push(&mut out, &mut owner, StyledLine::new(head, Face::Thinking).block(blk).indent(10.0).gap(4.0), Some(ei));
+                                let blk = Block::new(Color32::TRANSPARENT).bar(t.border);
+                                let head = if *streaming { "Thinking…".to_string() } else if body.len() > shown.len() { format!("Thought · {} lines", body.len()) } else { "Thought".to_string() };
+                                let n = shown.len() + 1;
+                                push(&mut out, &mut owner, StyledLine::new(head, Face::Meta).block(blk.nth(0, n)).indent(14.0 * k).gap(10.0 * k).pad(2.0 * k, 2.0 * k), Some(ei));
                                 for (i, l) in shown.iter().enumerate() {
-                                    push(&mut out, &mut owner, StyledLine::new(*l, Face::Thinking).block(Block { top: false, bottom: i + 1 == shown.len(), ..blk }).indent(10.0), Some(ei));
+                                    let mut line = StyledLine::new(*l, Face::Thinking).block(blk.nth(i + 1, n)).indent(14.0 * k);
+                                    if i + 2 == n {
+                                        line.pad_bottom = 2.0 * k;
+                                    }
+                                    push(&mut out, &mut owner, line, Some(ei));
                                 }
                             }
                             AssistantContent::Text { text, .. } => {
-                                for l in markdown_lines(text, t) {
+                                for l in markdown_lines(text, t, &m, self.text_w) {
                                     push(&mut out, &mut owner, l, Some(ei));
                                 }
                             }
@@ -504,27 +534,43 @@ impl ChatBuffer {
                         }
                     }
                     if let Some(err) = error {
-                        for l in err.lines() {
-                            push(&mut out, &mut owner, StyledLine::new(format!("✗ {l}"), Face::Error), Some(ei));
+                        let blk = Block::new(t.red.gamma_multiply(0.10)).border(t.red.gamma_multiply(0.45));
+                        let lines: Vec<&str> = err.lines().collect();
+                        let n = lines.len().max(1);
+                        for (i, l) in lines.iter().enumerate() {
+                            let mut line = StyledLine::new(*l, Face::Error).block(blk.nth(i, n)).indent(14.0 * k);
+                            if i == 0 {
+                                line = line.gap(10.0 * k);
+                                line.pad_top = 8.0 * k;
+                            }
+                            if i + 1 == n {
+                                line.pad_bottom = 8.0 * k;
+                            }
+                            push(&mut out, &mut owner, line, Some(ei));
                         }
                     }
-                    if let Some(u) = usage {
+                    // Usage closes an answer; turns that only call tools don't repeat it.
+                    let calls_tools = blocks.iter().any(|b| matches!(b, AssistantContent::ToolCall(_)));
+                    if let Some(u) = usage.as_ref().filter(|_| !calls_tools || error.is_some()) {
                         if u.total_tokens > 0 {
-                            push(&mut out, &mut owner, StyledLine::new(format_usage(u), Face::Dim).gap(2.0), Some(ei));
+                            push(&mut out, &mut owner, StyledLine::new(format_usage(u), Face::Meta).gap(8.0 * k), Some(ei));
                         }
                     }
                 }
                 Entry::Tool { name, args, partial, result, expanded, started, elapsed, .. } => {
-                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), *expanded, *started, *elapsed, t) {
+                    let gap = if prev_tool { 6.0 } else { 14.0 } * k;
+                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), *expanded, *started, *elapsed, t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
                 Entry::Info { text, face } => {
-                    for l in text.lines() {
-                        push(&mut out, &mut owner, StyledLine::new(l, *face).gap(6.0), Some(ei));
+                    let face = if *face == Face::Dim { Face::Meta } else { *face };
+                    for (i, l) in text.lines().enumerate() {
+                        push(&mut out, &mut owner, StyledLine::new(l, face).gap(if i == 0 { 12.0 * k } else { 0.0 }), Some(ei));
                     }
                 }
             }
+            prev_tool = is_tool;
         }
         if out.is_empty() {
             push(&mut out, &mut owner, StyledLine::new("", Face::Default), None);
@@ -787,52 +833,327 @@ fn inline_spans(text: &str) -> (String, Vec<(Range<usize>, Face)>) {
     (out, spans)
 }
 
-fn markdown_lines(text: &str, t: &crate::theme::Theme) -> Vec<StyledLine> {
+/// Cells of a markdown table row: `| a | b |` → `["a", "b"]` (`\|` stays a pipe).
+fn table_cells(line: &str) -> Vec<String> {
+    let l = line.trim();
+    let l = l.strip_prefix('|').unwrap_or(l);
+    let l = if l.ends_with('|') && !l.ends_with("\\|") { &l[..l.len() - 1] } else { l };
+    let mut cells = vec![String::new()];
+    let mut chars = l.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                cells.last_mut().unwrap().push('|');
+                chars.next();
+            }
+            '|' => cells.push(String::new()),
+            c => cells.last_mut().unwrap().push(c),
+        }
+    }
+    cells.into_iter().map(|c| c.trim().to_string()).collect()
+}
+
+/// A delimiter row's column alignments (`:--`, `:-:`, `--:`), if `line` is one.
+fn table_alignments(line: &str) -> Option<Vec<egui::Align>> {
+    let l = line.trim();
+    if !l.contains('-') || !l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')) {
+        return None;
+    }
+    let cells = table_cells(l);
+    cells
+        .iter()
+        .map(|c| {
+            let ok = !c.is_empty() && c.trim_matches(':').chars().all(|ch| ch == '-');
+            ok.then(|| match (c.starts_with(':'), c.ends_with(':')) {
+                (true, true) => egui::Align::Center,
+                (false, true) => egui::Align::Max,
+                _ => egui::Align::Min,
+            })
+        })
+        .collect()
+}
+
+/// Measures text exactly as the transcript lays it out (tests count characters instead).
+pub enum Measure<'a> {
+    Fonts(&'a egui::Context, &'a crate::theme::Theme),
+    Chars(f32),
+}
+
+impl Measure<'_> {
+    fn width(&self, text: &str, face: Face) -> f32 {
+        match self {
+            _ if text.is_empty() => 0.0,
+            Measure::Chars(w) => text.chars().count() as f32 * w,
+            Measure::Fonts(ctx, theme) => {
+                let job = crate::text::layout_job(&StyledLine::new(text, face), theme, f32::INFINITY);
+                ctx.fonts_mut(|f| f.layout_job(job)).size().x
+            }
+        }
+    }
+
+    fn scale(&self) -> f32 {
+        match self {
+            Measure::Fonts(_, t) => t.ui_scale(),
+            Measure::Chars(_) => 1.0,
+        }
+    }
+}
+
+/// Byte ranges of the lines `text` wraps into at `width` (at spaces; long words break).
+fn wrap_ranges(text: &str, width: f32, face: Face, m: &Measure) -> Vec<Range<usize>> {
     let mut out = Vec::new();
-    let mut in_code = false;
-    let code_blk = Block { bg: t.tool_bg, bar: None, top: false, bottom: false };
-    let src: Vec<&str> = text.split('\n').collect();
-    let mut first = true;
-    for (i, raw) in src.iter().enumerate() {
-        let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") {
-            if !in_code {
-                in_code = true;
-                let lang = trimmed.trim_start_matches('`').trim();
-                out.push(StyledLine::new(if lang.is_empty() { " ".to_string() } else { lang.to_string() }, Face::Dim).block(Block { top: true, ..code_blk }).indent(8.0).gap(4.0));
-            } else {
-                in_code = false;
-                if let Some(last) = out.last_mut() {
-                    if let Some(b) = &mut last.block {
-                        b.bottom = true;
+    let mut start = 0;
+    let mut end = 0;
+    for (i, word) in text.split_inclusive(' ').scan(0, |at, w| {
+        let s = *at;
+        *at += w.len();
+        Some((s, w))
+    }) {
+        let word_end = i + word.trim_end().len();
+        if end > start && m.width(&text[start..word_end], face) > width {
+            out.push(start..end);
+            start = i;
+        }
+        // A word wider than the line breaks by characters.
+        while m.width(&text[start..word_end], face) > width {
+            let mut cut = start;
+            for (ci, ch) in text[start..word_end].char_indices() {
+                if cut > start && m.width(&text[start..start + ci + ch.len_utf8()], face) > width {
+                    break;
+                }
+                cut = start + ci + ch.len_utf8();
+            }
+            if cut <= start || cut >= word_end {
+                break;
+            }
+            out.push(start..cut);
+            start = cut;
+        }
+        end = word_end;
+    }
+    if end > start || out.is_empty() {
+        out.push(start..end.max(start));
+    }
+    out
+}
+
+/// A markdown table in the reading font: measured columns, a tinted header, hairlines
+/// between rows, and cells that wrap when the table is wider than `avail`.
+fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::theme::Theme, m: &Measure, avail: f32) -> Vec<StyledLine> {
+    let k = m.scale();
+    let pad_x = 12.0 * k;
+    let gap = 22.0 * k;
+    let parse = |l: &str| -> Vec<(String, Vec<(Range<usize>, Face)>)> { table_cells(l).iter().map(|c| inline_spans(c)).collect() };
+    let head = parse(header);
+    let body: Vec<_> = rows.iter().map(|r| parse(r)).collect();
+    let cols = std::iter::once(&head).chain(&body).map(Vec::len).max().unwrap_or(0).max(aligns.len()).max(1);
+    let face_of = |row: usize| if row == 0 { Face::Bold } else { Face::AssistantText };
+    let all: Vec<&Vec<(String, Vec<(Range<usize>, Face)>)>> = std::iter::once(&head).chain(&body).collect();
+    let cell = |r: usize, c: usize| all[r].get(c).map(|(s, _)| s.as_str()).unwrap_or("");
+    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| m.width(cell(r, c), face_of(r))).fold(0.0, f32::max)).collect();
+    let minimum: Vec<f32> = (0..cols)
+        .map(|c| {
+            let word = (0..all.len()).flat_map(|r| cell(r, c).split(' ').map(move |w| (r, w))).map(|(r, w)| m.width(w, face_of(r))).fold(0.0, f32::max);
+            natural[c].min(word.max(56.0 * k)).min(160.0 * k)
+        })
+        .collect();
+    // The widest columns give up room first.
+    let budget = (avail - 2.0 * pad_x - gap * (cols - 1) as f32).max(cols as f32 * 40.0 * k);
+    let mut widths = natural.clone();
+    while widths.iter().sum::<f32>() > budget + 0.5 {
+        let over = widths.iter().sum::<f32>() - budget;
+        let Some(i) = (0..cols).filter(|i| widths[*i] > minimum[*i] + 0.5).max_by(|a, b| widths[*a].total_cmp(&widths[*b])) else { break };
+        let next = (0..cols).filter(|j| *j != i).map(|j| widths[j]).fold(minimum[i], f32::max);
+        widths[i] -= over.min((widths[i] - next).max(4.0 * k)).min(widths[i] - minimum[i]);
+    }
+    let col_x: Vec<f32> = (0..cols).map(|c| widths[..c].iter().sum::<f32>() + gap * c as f32).collect();
+    let border = t.border;
+    let card = Block::new(Color32::TRANSPARENT).border(border);
+    let head_bg = Block { bg: t.bg_elevated, ..card };
+    let space = m.width(" ", Face::AssistantText);
+    let mut out: Vec<StyledLine> = Vec::new();
+    for (r, row) in all.iter().enumerate() {
+        let face = face_of(r);
+        let wrapped: Vec<Vec<Range<usize>>> = (0..cols).map(|c| wrap_ranges(cell(r, c), widths[c], face, m)).collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for li in 0..height {
+            let mut text = String::new();
+            let mut spans = Vec::new();
+            let mut pads = Vec::new();
+            let mut x = 0.0;
+            for c in 0..cols {
+                if c > 0 {
+                    text.push(' ');
+                    x += space;
+                }
+                let (src, src_spans) = row.get(c).cloned().unwrap_or_default();
+                let range = wrapped[c].get(li).cloned().unwrap_or(0..0);
+                let seg = &src[range.clone()];
+                let w = m.width(seg, face);
+                let slack = (widths[c] - w).max(0.0);
+                let align = match aligns.get(c).copied().unwrap_or(egui::Align::Min) {
+                    egui::Align::Max => slack,
+                    egui::Align::Center => slack / 2.0,
+                    egui::Align::Min => 0.0,
+                };
+                let at = text.len();
+                pads.push((at, (col_x[c] + align - x).max(0.0)));
+                text.push_str(seg);
+                for (sr, f) in src_spans {
+                    let (s0, s1) = (sr.start.max(range.start), sr.end.min(range.end));
+                    if s0 < s1 {
+                        spans.push((at + s0 - range.start, at + s1 - range.start, f));
                     }
                 }
+                x = col_x[c] + align + w;
             }
+            let mut line = StyledLine::new(text, face).spans(spans.into_iter().map(|(a, b, f)| (a..b, f)).collect()).indent(pad_x);
+            line.pads = pads;
+            line.block = Some(if r == 0 { head_bg } else { card });
+            if li == 0 {
+                line.pad_top = 7.0 * k;
+            }
+            if li + 1 == height {
+                line.pad_bottom = 7.0 * k;
+                line.rule_below = Some(border);
+            }
+            out.push(line);
+        }
+    }
+    let n = out.len();
+    for (i, l) in out.iter_mut().enumerate() {
+        if let Some(b) = l.block.as_mut() {
+            b.top = i == 0;
+            b.bottom = i + 1 == n;
+        }
+    }
+    if let Some(first) = out.first_mut() {
+        first.gap_above = 12.0 * k;
+    }
+    out
+}
+
+/// A list item: (nesting level, marker, text) for `- x`, `* x`, `+ x` and `1. x`.
+fn list_item(raw: &str) -> Option<(usize, String, &str)> {
+    let trimmed = raw.trim_start();
+    let level = (raw.len() - trimmed.len()) / 2;
+    if let Some(b) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")).or_else(|| trimmed.strip_prefix("+ ")) {
+        return Some((level, "•".into(), b));
+    }
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 && digits < 4 {
+        let rest = &trimmed[digits..];
+        if let Some(b) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
+            return Some((level, format!("{}.", &trimmed[..digits]), b));
+        }
+    }
+    None
+}
+
+/// Markdown to styled lines for a column `avail` points wide.
+fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) -> Vec<StyledLine> {
+    let k = m.scale();
+    let mut out: Vec<StyledLine> = Vec::new();
+    let src: Vec<&str> = text.split('\n').collect();
+    // Space owed to the next line: paragraph breaks, the start of the message.
+    let mut gap = 2.0 * k;
+    let mut prev_list = false;
+    let mut i = 0;
+    let code_card = Block::new(t.tool_bg).border(t.border);
+    while i < src.len() {
+        let raw = src[i];
+        let trimmed = raw.trim_start();
+        if trimmed.is_empty() {
+            gap = gap.max(10.0 * k);
+            prev_list = false;
+            i += 1;
             continue;
         }
-        if in_code {
-            let mut l = StyledLine::new(*raw, Face::Code).block(code_blk).indent(8.0);
-            if i + 1 == src.len() {
-                l.block.as_mut().unwrap().bottom = true;
+        // Fenced code: a bordered card, the language as a small caption.
+        if trimmed.starts_with("```") {
+            let lang = trimmed.trim_start_matches('`').trim().to_string();
+            let mut code: Vec<&str> = Vec::new();
+            i += 1;
+            while i < src.len() && !src[i].trim_start().starts_with("```") {
+                code.push(src[i]);
+                i += 1;
             }
-            out.push(l);
+            i += 1;
+            let mut lines: Vec<StyledLine> = Vec::new();
+            if !lang.is_empty() {
+                lines.push(StyledLine::new(lang, Face::Meta).pad(8.0 * k, 0.0));
+            }
+            lines.extend(code.iter().map(|l| StyledLine::new(*l, Face::Code)));
+            if lines.is_empty() {
+                lines.push(StyledLine::new("", Face::Code));
+            }
+            let n = lines.len();
+            for (j, mut l) in lines.into_iter().enumerate() {
+                l = l.block(code_card.nth(j, n)).indent(14.0 * k);
+                if j == 0 {
+                    l.gap_above = gap.max(10.0 * k);
+                    l.pad_top = l.pad_top.max(10.0 * k);
+                }
+                if j + 1 == n {
+                    l.pad_bottom = 10.0 * k;
+                }
+                out.push(l);
+            }
+            gap = 10.0 * k;
+            prev_list = false;
             continue;
         }
-        let gap = if first { 4.0 } else { 0.0 };
-        first = false;
+        // A table: a row of cells, a delimiter row, then more rows.
+        if trimmed.starts_with('|') {
+            if let Some(aligns) = src.get(i + 1).and_then(|l| table_alignments(l)) {
+                let rows: Vec<&str> = src[i + 2..].iter().take_while(|l| l.trim_start().starts_with('|')).copied().collect();
+                i += 2 + rows.len();
+                let mut lines = table_lines(raw, &aligns, &rows, t, m, avail);
+                if let Some(f) = lines.first_mut() {
+                    f.gap_above = gap.max(12.0 * k);
+                }
+                out.extend(lines);
+                gap = 12.0 * k;
+                prev_list = false;
+                continue;
+            }
+        }
+        i += 1;
+        // A thematic break.
+        if trimmed.len() >= 3 && (trimmed.chars().all(|c| c == '-') || trimmed.chars().all(|c| c == '*') || trimmed.chars().all(|c| c == '_')) {
+            out.push(StyledLine::new("", Face::Meta).rule(t.border).gap(gap).pad(6.0 * k, 6.0 * k));
+            gap = 10.0 * k;
+            continue;
+        }
         if let Some(h) = trimmed.strip_prefix('#') {
-            let h = h.trim_start_matches('#').trim();
-            let (s, spans) = inline_spans(h);
-            out.push(StyledLine { text: s, face: Face::Heading, spans, gap_above: 6.0, ..Default::default() });
+            let level = 1 + h.chars().take_while(|c| *c == '#').count();
+            let (s, spans) = inline_spans(h.trim_start_matches('#').trim());
+            let face = if level <= 2 { Face::Heading } else { Face::Bold };
+            out.push(StyledLine::new(s, face).spans(spans).gap(gap.max(if level <= 2 { 18.0 } else { 14.0 } * k)).pad(0.0, 4.0 * k));
+            gap = 0.0;
+            prev_list = false;
             continue;
         }
-        let (body, indent) = if let Some(b) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
-            (format!("•  {b}"), 6.0 + (raw.len() - trimmed.len()) as f32 * 4.0)
-        } else {
-            (raw.to_string(), 0.0)
-        };
-        let (s, spans) = inline_spans(&body);
-        out.push(StyledLine { text: s, face: Face::AssistantText, spans, indent, gap_above: gap, ..Default::default() });
+        if let Some((level, marker, body)) = list_item(raw) {
+            let (s, spans) = inline_spans(body);
+            let indent = 22.0 * k + level as f32 * 20.0 * k;
+            let g = if prev_list { 3.0 * k } else { gap.max(4.0 * k) };
+            out.push(StyledLine::new(s, Face::AssistantText).spans(spans).indent(indent).gap(g).marker(marker, Face::Dim));
+            gap = 0.0;
+            prev_list = true;
+            continue;
+        }
+        if let Some(q) = trimmed.strip_prefix('>') {
+            let (s, spans) = inline_spans(q.trim_start());
+            let blk = Block::new(Color32::TRANSPARENT).bar(t.border).nth(0, 1);
+            out.push(StyledLine::new(s, Face::Dim).spans(spans).block(blk).indent(14.0 * k).gap(gap).pad(2.0 * k, 2.0 * k));
+            gap = 0.0;
+            continue;
+        }
+        let (s, spans) = inline_spans(raw.trim_end());
+        out.push(StyledLine::new(s, Face::AssistantText).spans(spans).gap(gap));
+        gap = 0.0;
+        prev_list = false;
     }
     out
 }
@@ -881,6 +1202,8 @@ fn tool_summary(name: &str, args: &Value) -> String {
     }
 }
 
+/// A tool call as a card: a header row (status, name, what it acts on, time), a hairline,
+/// then its output or diff.
 #[allow(clippy::too_many_arguments)]
 fn tool_lines(
     name: &str,
@@ -891,46 +1214,53 @@ fn tool_lines(
     started: Option<Instant>,
     elapsed: Option<Duration>,
     t: &crate::theme::Theme,
+    gap: f32,
 ) -> Vec<StyledLine> {
-    let (icon, bar) = match result {
-        None if started.is_some() => ("●", t.yellow),
-        None => ("○", t.fg_faint),
-        Some(r) if r.is_error => ("✗", t.red),
-        Some(_) => ("✓", t.green),
+    let k = t.ui_scale();
+    let (icon, icon_face) = match result {
+        None if started.is_some() => ("●", Face::Warning),
+        None => ("○", Face::Meta),
+        Some(r) if r.is_error => ("✗", Face::Error),
+        Some(_) => ("✓", Face::ToolOk),
     };
-    let blk = Block { bg: t.tool_bg, bar: Some(bar), top: true, bottom: false };
+    let card = Block::new(t.tool_bg).border(t.border);
     let expanded = expanded.unwrap_or_else(|| default_expanded(name, result));
-    let mut header = format!("{icon} {name}  {}", tool_summary(name, args));
-    if let Some(e) = elapsed {
-        if e.as_millis() >= 100 {
-            header.push_str(&format!("   {:.1}s", e.as_secs_f32()));
-        }
-    } else if let Some(s) = started {
-        header.push_str(&format!("   {:.0}s", s.elapsed().as_secs_f32()));
+    let mut header = format!("{icon}  ");
+    let mut spans = vec![(0..icon.len(), icon_face)];
+    let s0 = header.len();
+    header.push_str(name);
+    spans.push((s0..header.len(), Face::ToolHeader));
+    let summary = tool_summary(name, args);
+    if !summary.is_empty() {
+        header.push_str("  ");
+        let s1 = header.len();
+        header.push_str(&summary);
+        spans.push((s1..header.len(), Face::ToolArgs));
     }
-    let name_end = 2 + icon.len() + name.len();
-    let mut lines = vec![StyledLine {
-        text: header,
-        face: Face::ToolArgs,
-        spans: vec![(icon.len() + 1..name_end.saturating_sub(1).max(icon.len() + 1), Face::ToolHeader)],
-        block: Some(blk),
-        indent: 10.0,
-        gap_above: 6.0,
-    }];
-    let body_blk = Block { top: false, ..blk };
-    let mut body: Vec<StyledLine> = Vec::new();
+    let time = match (elapsed, started) {
+        (Some(e), _) if e.as_millis() >= 100 => format!("{:.1}s", e.as_secs_f32()),
+        (None, Some(s)) => format!("{:.0}s", s.elapsed().as_secs_f32()),
+        _ => String::new(),
+    };
+    if !time.is_empty() {
+        header.push_str("   ");
+        let s2 = header.len();
+        header.push_str(&time);
+        spans.push((s2..header.len(), Face::Meta));
+    }
 
-    // Edit and write show diffs.
+    // Body lines, each with an optional row tint (diffs).
+    let mut body: Vec<(StyledLine, Option<Color32>)> = Vec::new();
     let diff = result.and_then(|r| r.details.get("diff")).and_then(Value::as_str);
     if let (Some(d), Some(r)) = (diff, result) {
         if !r.is_error {
             for l in d.lines() {
-                let face = match l.chars().next() {
-                    Some('+') => Face::DiffAdd,
-                    Some('-') => Face::DiffDel,
-                    _ => Face::DiffContext,
+                let (face, tint) = match l.chars().next() {
+                    Some('+') => (Face::DiffAdd, Some(t.diff_add_bg)),
+                    Some('-') => (Face::DiffDel, Some(t.diff_del_bg)),
+                    _ => (Face::DiffContext, None),
                 };
-                body.push(StyledLine::new(l, face).block(body_blk).indent(10.0));
+                body.push((StyledLine::new(l, face), tint));
             }
         }
     }
@@ -939,27 +1269,25 @@ fn tool_lines(
             let content = arg(args, "content");
             let n = content.lines().count();
             if n > 0 {
-                body.push(StyledLine::new(format!("{n} lines"), Face::Dim).block(body_blk).indent(10.0));
+                body.push((StyledLine::new(format!("{n} lines"), Face::Meta), None));
                 for l in content.lines() {
-                    body.push(StyledLine::new(format!("+ {l}"), Face::DiffAdd).block(body_blk).indent(10.0));
+                    body.push((StyledLine::new(format!("+ {l}"), Face::DiffAdd), Some(t.diff_add_bg)));
                 }
             }
         } else if name == "bash" {
             let cmd = arg(args, "command");
-            if cmd.lines().count() > 1 {
-                for l in cmd.lines().skip(1) {
-                    body.push(StyledLine::new(l, Face::ToolArgs).block(body_blk).indent(10.0));
-                }
+            for l in cmd.lines().skip(1) {
+                body.push((StyledLine::new(l, Face::ToolArgs), None));
             }
             let out = result.map(|r| tool_text(r)).or(partial.map(str::to_string)).unwrap_or_default();
             let face = if result.is_some_and(|r| r.is_error) { Face::ToolError } else { Face::ToolOutput };
             for l in out.lines() {
-                body.push(StyledLine::new(l, face).block(body_blk).indent(10.0));
+                body.push((StyledLine::new(l, face), None));
             }
         } else if let Some(r) = result {
             let face = if r.is_error { Face::ToolError } else { Face::ToolOutput };
             for l in tool_text(r).lines() {
-                body.push(StyledLine::new(l, face).block(body_blk).indent(10.0));
+                body.push((StyledLine::new(l, face), None));
             }
         }
     }
@@ -973,34 +1301,41 @@ fn tool_lines(
         total.min(if name == "read" { 0 } else { 4 })
     };
     // Bash previews show the tail, everything else the head.
-    let slice: Vec<StyledLine> = if name == "bash" && !expanded && total > shown {
-        body[total - shown..].to_vec()
-    } else {
-        body[..shown].to_vec()
-    };
+    let mut slice: Vec<(StyledLine, Option<Color32>)> = if name == "bash" && !expanded && total > shown { body[total - shown..].to_vec() } else { body[..shown].to_vec() };
     if total > shown {
-        let more = StyledLine::new(
-            format!("… {} more lines  (TAB / click to expand)", total - shown),
-            Face::Dim,
-        )
-        .block(body_blk)
-        .indent(10.0);
+        let more = (StyledLine::new(format!("{} more lines · TAB or click to expand", total - shown), Face::Meta), None);
         if name == "bash" {
-            lines.push(more);
-            lines.extend(slice);
+            slice.insert(0, more);
         } else {
-            lines.extend(slice);
-            lines.push(more);
+            slice.push(more);
         }
-    } else {
-        lines.extend(slice);
     }
-    if let Some(last) = lines.last_mut() {
-        if let Some(b) = &mut last.block {
-            b.bottom = true;
+
+    let n = slice.len() + 1;
+    let mut head = StyledLine::new(header, Face::ToolArgs).spans(spans).block(card.nth(0, n)).indent(12.0 * k).gap(gap).pad(7.0 * k, 7.0 * k);
+    if n > 1 {
+        head.rule_below = Some(t.border);
+    }
+    let mut lines = vec![head];
+    for (i, (l, tint)) in slice.into_iter().enumerate() {
+        let blk = Block { bg: tint.map(|c| blend(t.tool_bg, c)).unwrap_or(t.tool_bg), ..card.nth(i + 1, n) };
+        let mut l = l.block(blk).indent(12.0 * k);
+        if i == 0 {
+            l.pad_top = 6.0 * k;
         }
+        if i + 2 == n {
+            l.pad_bottom = 8.0 * k;
+        }
+        lines.push(l);
     }
     lines
+}
+
+/// `over` (translucent) painted on `base`, as an opaque color.
+fn blend(base: Color32, over: Color32) -> Color32 {
+    let a = over.a() as f32 / 255.0;
+    let mix = |b: u8, o: u8| (b as f32 * (1.0 - a) + o as f32).round().min(255.0) as u8;
+    Color32::from_rgb(mix(base.r(), over.r()), mix(base.g(), over.g()), mix(base.b(), over.b()))
 }
 
 fn tool_text(r: &ToolResultMessage) -> String {
@@ -1111,6 +1446,20 @@ impl Buffer for ChatBuffer {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
+        // A centered reading column; tables are laid out for its width.
+        let k = ed.theme.ui_scale();
+        self.view.padding = egui::vec2(24.0 * k, 18.0 * k);
+        self.view.max_width = ed.var("chat-max-width").and_then(Value::as_f64).unwrap_or(860.0) as f32 * k;
+        let text_w = (rect.width() - 2.0 * self.view.padding.x).min(self.view.max_width).max(40.0);
+        if (text_w - self.text_w).abs() > 1.0 {
+            self.text_w = text_w;
+            self.dirty = true;
+        }
+        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32);
+        if style_key != self.style_key {
+            self.style_key = style_key;
+            self.dirty = true;
+        }
         if self.dirty {
             self.rebuild(ed);
         }
@@ -1120,7 +1469,7 @@ impl Buffer for ChatBuffer {
 
         // Prompt geometry: grows with content up to 40% of the window.
         let row_h = ui.fonts_mut(|f| f.row_height(&theme.prop()));
-        let footer_h = 22.0;
+        let footer_h = (22.0 * theme.ui_scale()).round();
         let prompt_lines = self.prompt.doc.lines.len().max(1) as f32;
         let prompt_h = (prompt_lines * row_h + 2.0 * self.prompt.view.padding.y + footer_h).min(rect.height() * 0.4).max(row_h + 2.0 * self.prompt.view.padding.y + footer_h);
         let margin = 10.0;
@@ -1171,7 +1520,7 @@ impl Buffer for ChatBuffer {
         let small = egui::FontId::proportional(theme.font_size - 2.0);
         let model = self.model.as_ref().map(|m| format!("{} · {}", m.provider, short_model(&m.id))).unwrap_or_else(|| "no model".into());
         let left = format!("{model}  ·  thinking {}", self.thinking.as_str());
-        painter.text(footer.left_center(), egui::Align2::LEFT_CENTER, left, small.clone(), theme.fg_dim);
+
         let mut right = String::new();
         if self.running() {
             let secs = self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
@@ -1193,7 +1542,10 @@ impl Buffer for ChatBuffer {
                 }
             }
         }
-        painter.text(footer.right_center(), egui::Align2::RIGHT_CENTER, right, small, if self.running() { theme.yellow } else { theme.fg_faint });
+        let r = painter.text(footer.right_center(), egui::Align2::RIGHT_CENTER, right, small.clone(), if self.running() { theme.yellow } else { theme.fg_faint });
+        // Model and thinking take the room left of the activity and usage.
+        let clip = Rect::from_min_max(footer.min, egui::pos2(r.left() - 12.0, footer.max.y + 4.0));
+        painter.with_clip_rect(clip.intersect(painter.clip_rect())).text(footer.left_center(), egui::Align2::LEFT_CENTER, left, small, theme.fg_dim);
         if self.running() {
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
@@ -1342,5 +1694,66 @@ impl TextSurface for ChatBuffer {
             Focus::Transcript => self.view.reveal_cursor(),
             Focus::Prompt => self.prompt.reveal_cursor(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lines that belong to the table (they carry a bordered card).
+    fn table(lines: &[StyledLine]) -> Vec<&StyledLine> {
+        lines.iter().filter(|l| l.block.is_some_and(|b| b.border.is_some())).collect()
+    }
+
+    #[test]
+    fn tables_measure_columns() {
+        let t = crate::theme::Theme::default();
+        let m = Measure::Chars(8.0);
+        let md = "Results:\n\n| Run | Lead |\n|---|--:|\n| 1 connection, 60s | **91%** |\n| 3 | `x` |\n\nafter";
+        let lines = markdown_lines(md, &t, &m, 2000.0);
+        let rows = table(&lines);
+        assert_eq!(rows.len(), 3, "header and two rows, no ASCII rules");
+        assert_eq!(rows[0].text, "Run Lead");
+        assert_eq!(rows[0].face, Face::Bold);
+        assert_eq!(rows[1].text, "1 connection, 60s 91%");
+        // Column 2 starts at the same x in every row: 17 chars of column 1 plus the gap.
+        let x2 = |l: &StyledLine, at: usize| -> f32 { l.pads.iter().filter(|(o, _)| *o <= at).map(|(_, w)| *w).sum::<f32>() + l.text[..at].chars().count() as f32 * 8.0 };
+        let col2 = 17.0 * 8.0 + 22.0;
+        assert_eq!(x2(rows[0], 4), col2, "Lead starts the second column");
+        assert_eq!(x2(rows[1], 18), col2 + 8.0, "91% right-aligned under Lead");
+        // Cell markup is kept as spans; rows end with hairlines; the card has rounded ends.
+        assert!(rows[1].spans.iter().any(|(r, f)| *f == Face::Bold && &rows[1].text[r.clone()] == "91%"));
+        assert!(rows[2].spans.iter().any(|(r, f)| *f == Face::InlineCode && &rows[2].text[r.clone()] == "x"));
+        assert!(rows[0].block.unwrap().top && rows[2].block.unwrap().bottom);
+        assert!(rows.iter().all(|l| l.rule_below.is_some()));
+        assert!(lines.iter().any(|l| l.text == "after"));
+        assert!(table(&markdown_lines("| not a table", &t, &m, 2000.0)).is_empty());
+    }
+
+    #[test]
+    fn narrow_tables_wrap_inside_cells() {
+        let t = crate::theme::Theme::default();
+        let m = Measure::Chars(8.0);
+        let md = "| Run | Result |\n|---|---|\n| 1 connection, 180s, Rust and Python together | ~1% / -90ms in both |\n| 3 | ok |";
+        let rows = markdown_lines(md, &t, &m, 300.0);
+        let rows = table(&rows);
+        assert!(rows.len() > 3, "the long row wraps: {:?}", rows.iter().map(|l| &l.text).collect::<Vec<_>>());
+        // Every physical line fits: its last cell ends inside the column.
+        for l in &rows {
+            let end = l.pads.iter().map(|(_, w)| *w).sum::<f32>() + l.text.chars().count() as f32 * 8.0;
+            assert!(end <= 300.0 - 24.0 + 0.5, "{} ends at {end}", l.text);
+        }
+        assert!(rows.iter().any(|l| l.text.contains("together")));
+    }
+
+    #[test]
+    fn lists_hang_their_markers() {
+        let t = crate::theme::Theme::default();
+        let lines = markdown_lines("- one\n- two\n  - nested\n3. three", &t, &Measure::Chars(8.0), 800.0);
+        let markers: Vec<&str> = lines.iter().filter_map(|l| l.marker.as_ref().map(|(m, _)| m.as_str())).collect();
+        assert_eq!(markers, ["•", "•", "•", "3."]);
+        assert_eq!(lines[0].text, "one");
+        assert!(lines[2].indent > lines[1].indent);
     }
 }

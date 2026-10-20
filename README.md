@@ -35,7 +35,11 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 
 Fonts are set in `init.lua` with an installed family name or a font file, e.g.
 `serpis.font.set({ mono = "Intel One Mono", sans = "Inter", mono_size = 14 })`, or picked with
-`select-font` / `select-ui-font`.
+`select-font` / `select-ui-font`. The defaults match t3code's: the system UI font (San Francisco on
+macOS) and SF Mono. Variable fonts are set up the way browsers set them up: the optical size
+follows the text size (`font-optical-size`), weights come from `font-sans-weight` /
+`font-mono-weight`, bold and headings use `font-bold-weight`, and the font's own tracking table
+spaces UI text (`font-tracking`). Markdown tables in chats render as aligned grids.
 
 `set-keybinding-scheme` switches to `emacs` or `vim` (or call `serpis.keys.scheme("vim")` in
 `init.lua`). Vim works everywhere: in the chat transcript and prompt, in text buffers, and in
