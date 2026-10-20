@@ -6,7 +6,7 @@ use std::time::Duration;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::buffer::WindowId;
-use crate::editor::{Layout, Level};
+use crate::editor::{Container, Kind, Level, Node, NodeRef};
 use crate::packages::vim;
 use crate::text::{CursorShape, PlainLines, ViewOptions};
 use crate::theme::Face;
@@ -15,13 +15,14 @@ use crate::Editor;
 const HEADER_H: f32 = 30.0;
 const GAP: f32 = 6.0;
 const ECHO_H: f32 = 30.0;
+/// Height of a tab bar (tabbed) or of one title bar (stacked).
+const TAB_H: f32 = 24.0;
 
 pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, ed.theme.bg);
     let body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - ECHO_H - GAP));
-    let root = ed.layout.root;
-    draw_node(ui, ed, root, body);
+    draw_layout(ui, ed, body);
     let echo = Rect::from_min_max(egui::pos2(full.left() + GAP, full.bottom() - ECHO_H), egui::pos2(full.right() - GAP, full.bottom()));
     draw_echo(ui, ed, echo);
     if ed.minibuffer.is_some() {
@@ -42,46 +43,150 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
     }
 }
 
-fn draw_node(ui: &mut egui::Ui, ed: &mut Editor, idx: usize, rect: Rect) {
-    match ed.layout.nodes[idx] {
-        Layout::Leaf(w) => draw_window(ui, ed, w, rect),
-        Layout::Split { vertical, ratio, a, b } => {
-            let (ra, rb, divider) = if vertical {
-                let y = rect.top() + rect.height() * ratio;
-                (
-                    Rect::from_min_max(rect.min, egui::pos2(rect.right(), y - GAP / 2.0)),
-                    Rect::from_min_max(egui::pos2(rect.left(), y + GAP / 2.0), rect.max),
-                    Rect::from_min_max(egui::pos2(rect.left(), y - GAP / 2.0), egui::pos2(rect.right(), y + GAP / 2.0)),
-                )
-            } else {
-                let x = rect.left() + rect.width() * ratio;
-                (
-                    Rect::from_min_max(rect.min, egui::pos2(x - GAP / 2.0, rect.bottom())),
-                    Rect::from_min_max(egui::pos2(x + GAP / 2.0, rect.top()), rect.max),
-                    Rect::from_min_max(egui::pos2(x - GAP / 2.0, rect.top()), egui::pos2(x + GAP / 2.0, rect.bottom())),
-                )
+fn draw_layout(ui: &mut egui::Ui, ed: &mut Editor, body: Rect) {
+    if !ed.layout.contains(ed.focused) {
+        ed.focused = ed.layout.leaves()[0];
+    }
+    ed.layout.note_focus(ed.focused);
+    // Windows hidden behind tabs keep no rectangle (overlays and jumps skip them).
+    for w in ed.layout.leaves() {
+        ed.windows[w].rect = Rect::NOTHING;
+    }
+    if let Some(f) = ed.layout.fullscreen.filter(|f| ed.layout.contains(*f)) {
+        draw_window(ui, ed, f, body);
+        return;
+    }
+    let root = ed.layout.root.clone();
+    let mut rects = Vec::new();
+    draw_container(ui, ed, &root, body, &mut rects);
+    if let Some(NodeRef::Container(id)) = ed.selected {
+        if let Some((_, r)) = rects.iter().find(|(c, _)| *c == id) {
+            ui.painter().rect_stroke(r.expand(GAP / 2.0 - 1.0), ed.theme.radius + 3, Stroke::new(2.0, ed.theme.accent), StrokeKind::Inside);
+        }
+    }
+}
+
+/// A short title for a tab or stack entry: the buffer name, or an i3-style summary.
+fn node_title(ed: &Editor, n: &Node) -> String {
+    match n {
+        Node::Window(w) => ed.meta(ed.windows[*w].buffer).map(|m| m.name.clone()).unwrap_or_default(),
+        Node::Container(c) => {
+            let k = match c.kind {
+                Kind::SplitH => "H",
+                Kind::SplitV => "V",
+                Kind::Tabbed => "T",
+                Kind::Stacked => "S",
             };
-            // Dividers resize by dragging; double-click balances.
-            let resp = ui.interact(divider, ui.scope_id().with(("divider", idx)), Sense::click_and_drag());
+            format!("{k}[{}]", c.children.iter().map(|ch| node_title(ed, ch)).collect::<Vec<_>>().join(" "))
+        }
+    }
+}
+
+fn draw_child(ui: &mut egui::Ui, ed: &mut Editor, n: &Node, rect: Rect, rects: &mut Vec<(u64, Rect)>) {
+    match n {
+        Node::Window(w) => draw_window(ui, ed, *w, rect),
+        Node::Container(c) => draw_container(ui, ed, c, rect, rects),
+    }
+}
+
+fn draw_container(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rects: &mut Vec<(u64, Rect)>) {
+    rects.push((c.id, rect));
+    if c.children.is_empty() {
+        return;
+    }
+    if c.kind.single() {
+        // Tabs side by side, or one title bar per child stacked on top.
+        let n = c.children.len();
+        let bars = if c.kind == Kind::Tabbed { 1 } else { n };
+        let bar_h = TAB_H * bars as f32;
+        let theme = ed.theme.clone();
+        let focused_child = c.focus.min(n - 1);
+        let holds_focus = |ch: &Node| {
+            let mut ws = Vec::new();
+            ch.leaves(&mut ws);
+            ws.contains(&ed.focused)
+        };
+        let mut clicked = None;
+        for (i, ch) in c.children.iter().enumerate() {
+            let r = if c.kind == Kind::Tabbed {
+                let w = rect.width() / n as f32;
+                Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, TAB_H - 2.0))
+            } else {
+                Rect::from_min_size(egui::pos2(rect.left(), rect.top() + TAB_H * i as f32), egui::vec2(rect.width(), TAB_H - 2.0))
+            };
+            let active = i == focused_child;
+            let resp = ui.interact(r, ui.scope_id().with(("tab", c.id, i)), Sense::click());
+            let bg = if active && holds_focus(ch) {
+                theme.accent.gamma_multiply(0.35)
+            } else if active {
+                theme.bg_elevated
+            } else if resp.hovered() {
+                theme.border
+            } else {
+                theme.bg_alt
+            };
+            let p = ui.painter();
+            p.rect_filled(r, 4, bg);
+            let title = node_title(ed, ch);
+            let font = FontId::proportional(theme.font_size - 1.5);
+            let g = p.layout_no_wrap(title, font, if active { theme.fg } else { theme.fg_dim });
+            let clip = p.with_clip_rect(r.shrink(2.0));
+            clip.galley(egui::pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, theme.fg);
+            if resp.clicked() {
+                clicked = ch.focus_leaf();
+            }
+        }
+        if let Some(w) = clicked {
+            ed.focus_window(w);
+        }
+        let body = Rect::from_min_max(egui::pos2(rect.left(), rect.top() + bar_h), rect.max);
+        if let Some(ch) = c.children.get(focused_child) {
+            draw_child(ui, ed, ch, body, rects);
+        }
+        return;
+    }
+    let horizontal = c.kind.horizontal();
+    let n = c.children.len();
+    let len = if horizontal { rect.width() } else { rect.height() } - GAP * (n - 1) as f32;
+    let start = if horizontal { rect.left() } else { rect.top() };
+    let mut pos = start;
+    for (i, ch) in c.children.iter().enumerate() {
+        let size = len * c.sizes.get(i).copied().unwrap_or(1.0 / n as f32);
+        let r = if horizontal {
+            Rect::from_min_max(egui::pos2(pos, rect.top()), egui::pos2(pos + size, rect.bottom()))
+        } else {
+            Rect::from_min_max(egui::pos2(rect.left(), pos), egui::pos2(rect.right(), pos + size))
+        };
+        draw_child(ui, ed, ch, r, rects);
+        pos += size;
+        if i + 1 < n {
+            // Dividers resize the two children around them; double-click evens the container.
+            let divider = if horizontal {
+                Rect::from_min_max(egui::pos2(pos, rect.top()), egui::pos2(pos + GAP, rect.bottom()))
+            } else {
+                Rect::from_min_max(egui::pos2(rect.left(), pos), egui::pos2(rect.right(), pos + GAP))
+            };
+            let resp = ui.interact(divider, ui.scope_id().with(("divider", c.id, i)), Sense::click_and_drag());
             if resp.hovered() || resp.dragged() {
-                ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
-                ui.painter().rect_filled(divider.shrink2(if vertical { egui::vec2(0.0, 2.0) } else { egui::vec2(2.0, 0.0) }), 2.0, ed.theme.border_focused.gamma_multiply(0.6));
+                ui.ctx().set_cursor_icon(if horizontal { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
+                ui.painter().rect_filled(divider.shrink2(if horizontal { egui::vec2(2.0, 0.0) } else { egui::vec2(0.0, 2.0) }), 2.0, ed.theme.border_focused.gamma_multiply(0.6));
             }
             if resp.dragged() {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    let r = if vertical { (p.y - rect.top()) / rect.height() } else { (p.x - rect.left()) / rect.width() };
-                    if let Layout::Split { ratio, .. } = &mut ed.layout.nodes[idx] {
-                        *ratio = r.clamp(0.08, 0.92);
-                    }
+                    // Fraction of the usable length up to the pointer, minus the gaps before it.
+                    let along = if horizontal { p.x } else { p.y } - start - GAP * i as f32 - GAP / 2.0;
+                    ed.layout.set_divider(c.id, i, along / len);
                 }
             }
             if resp.double_clicked() {
-                if let Layout::Split { ratio, .. } = &mut ed.layout.nodes[idx] {
-                    *ratio = 0.5;
+                if let Some(path) = ed.layout.path(NodeRef::Container(c.id)) {
+                    if let Some(cc) = ed.layout.container_mut(&path) {
+                        let k = cc.sizes.len().max(1) as f32;
+                        cc.sizes.iter_mut().for_each(|s| *s = 1.0 / k);
+                    }
                 }
             }
-            draw_node(ui, ed, a, ra);
-            draw_node(ui, ed, b, rb);
+            pos += GAP;
         }
     }
 }
@@ -156,7 +261,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         p.line_segment([r.left_top(), r.right_bottom()], s);
         p.line_segment([r.right_top(), r.left_bottom()], s);
     })
-    .on_hover_text("Close window (kill buffer if last)");
+    .on_hover_text("Close window (the buffer stays open)");
     bx -= bsz + 2.0;
     let below = icon_button(ui, Rect::from_min_size(egui::pos2(bx, cy - bsz / 2.0), Vec2::splat(bsz)), wid.with("below"), fg, hover, |p, r, s| {
         p.rect_stroke(r, 2.0, s, StrokeKind::Inside);
@@ -197,34 +302,32 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     // Header interactions: name opens the buffer switcher, double-click maximizes.
     let head_resp = ui.interact(Rect::from_min_max(header.min, egui::pos2(name_rect.right() + 8.0, header.bottom())), wid.with("head"), Sense::click());
     if head_resp.clicked() {
-        ed.focused = w;
+        ed.focus_window(w);
         ed.call("switch-to-buffer");
     }
     if head_resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if close.clicked() {
-        ed.focused = w;
-        if !ed.delete_window(w) {
-            ed.call("kill-current-buffer");
-        }
+        ed.focus_window(w);
+        ed.close_window();
         return;
     }
     if right.clicked() {
-        ed.focused = w;
+        ed.focus_window(w);
         ed.split_window(false);
         return;
     }
     if below.clicked() {
-        ed.focused = w;
+        ed.focus_window(w);
         ed.split_window(true);
         return;
     }
 
     // Body.
     let body = Rect::from_min_max(egui::pos2(rect.left() + 1.0, header.bottom() + 1.0), rect.max - Vec2::splat(1.0));
-    if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(body) {
-        ed.focused = w;
+    if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(body) && (ed.focused != w || ed.selected.is_some()) {
+        ed.focus_window(w);
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));
     child.set_clip_rect(body);

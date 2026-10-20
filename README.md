@@ -23,7 +23,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `s-n` / `s-t` | new chat / new terminal |
 | `s-\` / `s-\|` | split right / below |
 | `s-]` `s-[` `s-1..9` | move between windows |
-| `s-w` | close window |
+| `s-w` / `s-W` | close window (the buffer stays) / kill buffer |
 | `RET` / `S-RET` / `M-RET` | send / newline / queue follow-up |
 | `ESC` or `C-c C-c` | abort the agent |
 | `TAB` | fold/unfold the tool output at point |
@@ -41,6 +41,33 @@ terminals, where normal state navigates the scrollback and edits the command lin
 Claude Code's prompt. zsh gets OSC 133 prompt marks automatically; other shells fall back to
 `terminal-prompt-regexp`. `SPC` is the leader and `C-w` the window prefix.
 Windows can also be split, closed and resized with the mouse (header buttons, draggable dividers).
+
+## Windows and workspaces
+
+Layout works like i3/sway. A window is a view onto a buffer, and closing it (`close-window`, `:q`)
+never kills the buffer: hidden buffers stay in `switch-to-hidden-buffer`. Killing is separate
+(`kill-current-buffer`) and asks first when a terminal runs a program other than its idle shell
+(`confirm-kill-processes` / `confirm-quit-processes`: `"running"`, `"always"`, `"never"`; the
+`kill-buffer-query` hook can veto or approve).
+
+Each workspace is a tree of containers holding any number of windows, laid out `splith`, `splitv`,
+`tabbed` or `stacked`:
+
+- `windmove-*` focuses along the tree (tabs with left/right), `window-move-*` moves the window:
+  it swaps with a neighbor, enters the container next to it, or leaves its container, as in i3
+  (vim: `C-w H/J/K/L`).
+- `focus-parent` / `focus-child` select a whole container, so moves, closes and workspace moves
+  apply to all of it.
+- `layout-toggle-split`, `layout-tabbed`, `layout-stacked`, `layout-toggle-all`,
+  `window-fullscreen-toggle`; dividers between any two windows drag, double-click evens them.
+- Workspaces keep their live layouts: `workspace-1..9`, `workspace` (picker with preview),
+  `workspace-move-window-1..9`, `workspace-back-and-forth`, `workspace-rename`. Settings:
+  `workspace-display-names`, `workspace-auto-back-and-forth`, `workspace-move-follows`,
+  `workspace-keep-empty`, `workspace-initial-buffer`.
+
+From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configuration`,
+`serpis.workspace.switch/move_window/list/rename`, and the hooks `workspace-switched` and
+`window-layout-changed`.
 
 ## Extend
 
@@ -66,5 +93,5 @@ docs/PLAN.md          design and roadmap
 
 ```sh
 cargo test                 # unit tests
-scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal copy mode
+scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces
 ```

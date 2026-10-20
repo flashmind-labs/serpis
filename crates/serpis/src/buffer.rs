@@ -99,6 +99,11 @@ pub trait Buffer: Any {
     /// Called before the buffer is destroyed.
     fn on_kill(&mut self, _ed: &mut Editor) {}
 
+    /// Whether the buffer runs a process, and what it is doing (confirms kills and quits).
+    fn process_status(&self) -> ProcessStatus {
+        ProcessStatus::None
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -114,6 +119,17 @@ macro_rules! impl_any {
             self
         }
     };
+}
+
+/// What a buffer's process is doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessStatus {
+    /// Not a process buffer.
+    None,
+    /// A shell waiting at its prompt.
+    Idle,
+    /// A program in the foreground, by name.
+    Running(String),
 }
 
 pub struct BufferSlot {

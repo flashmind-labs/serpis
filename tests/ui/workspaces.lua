@@ -2,26 +2,27 @@ local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 package.path = os.getenv("SERPIS_TEST_DIR") .. "/../../examples/lua/?.lua;" .. package.path
 serpis.keys.scheme("vim")
 require("workspaces").setup()
--- The module defines commands; bindings are the user's choice.
+-- Workspaces are core commands; bindings are the user's choice.
 for i = 1, 9 do
   serpis.keymap.set("global", "s-" .. i, "workspace-" .. i)
-  serpis.keymap.set("global", "C-s-" .. i, "workspace-move-buffer-" .. i)
+  serpis.keymap.set("global", "C-s-" .. i, "workspace-move-window-" .. i)
 end
-serpis.keymap.set("global", "s-p", "workspace-switch")
+serpis.keymap.set("global", "s-p", "workspace")
 local d = serpis.debug
-local function ws() return serpis.var.get("workspaces").current end
+local function ws() return serpis.workspace.current() end
 local function names()
   local t = {}
   for _, id in ipairs(serpis.window.buffers()) do table.insert(t, serpis.buffer.name(id)) end
   return table.concat(t, ",")
 end
 T.check("vim scheme", serpis.keys.scheme(), "vim")
-T.check("starts on 1", ws(), 1)
+T.check("starts on 1", ws(), "1")
 T.check("ws1 shows chat", names(), "*chat*")
+T.check("display name", serpis.workspace.list()[1].display, "一")
 -- Real key events through the input path.
 d.key("2", {"cmd"})
 serpis.defer(300, function()
-  T.check("s-2 switches", ws(), 2)
+  T.check("s-2 switches", ws(), "2")
   T.check("new ws is scratch", names(), "*scratch*")
   serpis.command.run("new-terminal")
   serpis.window.split("right")
@@ -29,42 +30,39 @@ serpis.defer(300, function()
   local ws2 = names()
   d.key("1", {"cmd"})
   serpis.defer(300, function()
-    T.check("s-1 back to 1", ws(), 1)
+    T.check("s-1 back to 1", ws(), "1")
     T.check("ws1 restored", names(), "*chat*")
     d.key("2", {"cmd"})
     serpis.defer(300, function()
       T.check("ws2 layout restored", names(), ws2)
-      -- Move the focused buffer (*scratch*<2>) to workspace 3.
+      -- Move the focused window (*scratch*<2>) to workspace 3.
       d.key("3", {"ctrl", "cmd"})
       serpis.defer(300, function()
         T.check("moved: ws2 lost a window", names(), "*terminal*")
-        T.check("still on 2", ws(), 2)
+        T.check("still on 2", ws(), "2")
         d.key("3", {"cmd"})
         serpis.defer(300, function()
-          T.check("ws3 has moved buffer", names(), "*scratch*<2>")
-          -- Picker with preview: open, move down (preview), screenshot, cancel.
+          T.check("ws3 has moved window", names(), "*scratch*<2>")
+          -- Picker with preview: open, move down (preview), cancel.
           d.key("P", {"cmd"})
           serpis.defer(400, function()
             serpis.keys.feed("C-n")
             serpis.defer(400, function()
               T.check("preview changes layout", names() ~= "*scratch*<2>", true)
-              serpis.defer(600, function()
-                serpis.keys.feed("ESC")
-                serpis.defer(300, function()
-                  T.check("cancel restores", names(), "*scratch*<2>")
-                  T.check("cancel keeps ws", ws(), 3)
-                  -- Config reload: state must survive, keys must still work.
-                  -- reload-config re-runs init.lua in a fresh Lua state; workspace state lives in a variable.
-                  serpis.command.run("reload-config"); require("workspaces").setup()
-                  for i = 1, 9 do serpis.keymap.set("global", "s-" .. i, "workspace-" .. i) end
-                  serpis.defer(1500, function()
-                    T.check("state survives reload", ws(), 3)
-                    d.key("1", {"cmd"})
-                    serpis.defer(300, function()
-                      T.check("keys after reload", ws(), 1)
-                      T.check("vim still on chat", serpis.buffer.modes()[1] ~= nil, true)
-                      T.finish()
-                    end)
+              serpis.keys.feed("ESC")
+              serpis.defer(300, function()
+                T.check("cancel restores", names(), "*scratch*<2>")
+                T.check("cancel keeps ws", ws(), "3")
+                -- Config reload: workspaces live in the editor, keys rebind.
+                serpis.command.run("reload-config"); require("workspaces").setup()
+                for i = 1, 9 do serpis.keymap.set("global", "s-" .. i, "workspace-" .. i) end
+                serpis.defer(1500, function()
+                  T.check("state survives reload", ws(), "3")
+                  d.key("1", {"cmd"})
+                  serpis.defer(300, function()
+                    T.check("keys after reload", ws(), "1")
+                    T.check("vim still on chat", serpis.buffer.modes()[1] ~= nil, true)
+                    T.finish()
                   end)
                 end)
               end)

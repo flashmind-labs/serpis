@@ -156,10 +156,6 @@ pub fn install(ed: &mut Editor) {
         ed.message(format!("C-u {}", ed.prefix_arg.unwrap()));
         Ok(())
     });
-    ed.define_command("quit", "Quit serpis.", o, |ed, _| {
-        ed.quit_requested = true;
-        Ok(())
-    });
     ed.define_command("reload-config", "Reload init.lua and Rust plugins.", o, |ed, _| {
         crate::lua::reload(ed);
         crate::plugins::reload_all(ed);
@@ -255,12 +251,6 @@ pub fn install(ed: &mut Editor) {
         ed.split_window(true);
         Ok(())
     });
-    ed.define_command("delete-window", "Close the focused window.", o, |ed, _| {
-        if !ed.delete_window(ed.focused) {
-            ed.message("Attempt to delete minibuffer or sole ordinary window");
-        }
-        Ok(())
-    });
     ed.define_command("delete-other-windows", "Make the focused window fill the frame.", o, |ed, _| {
         ed.delete_other_windows();
         Ok(())
@@ -271,39 +261,6 @@ pub fn install(ed: &mut Editor) {
     });
     ed.define_command("previous-window", "Focus the previous window.", o, |ed, a| {
         ed.other_window(-(a.count() as isize));
-        Ok(())
-    });
-    for dir in ["left", "right", "up", "down"] {
-        ed.define_command(&format!("windmove-{dir}"), &format!("Focus the window to the {dir}."), o, move |ed, _| {
-            ed.windmove(dir);
-            Ok(())
-        });
-    }
-    ed.define_command("enlarge-window-horizontally", "Widen the focused window.", o, |ed, a| {
-        ed.layout.resize(ed.focused, false, 0.05 * a.count() as f32);
-        Ok(())
-    });
-    ed.define_command("shrink-window-horizontally", "Narrow the focused window.", o, |ed, a| {
-        ed.layout.resize(ed.focused, false, -0.05 * a.count() as f32);
-        Ok(())
-    });
-    ed.define_command("enlarge-window", "Make the focused window taller.", o, |ed, a| {
-        ed.layout.resize(ed.focused, true, 0.05 * a.count() as f32);
-        Ok(())
-    });
-    ed.define_command("shrink-window", "Make the focused window shorter.", o, |ed, a| {
-        ed.layout.resize(ed.focused, true, -0.05 * a.count() as f32);
-        Ok(())
-    });
-    ed.define_command("balance-windows", "Make all windows the same size.", o, |ed, _| {
-        ed.layout.balance();
-        Ok(())
-    });
-    ed.define_command("select-window-by-number", "Focus window N (prefix or param).", o, |ed, a| {
-        let n = a.params.first().and_then(Value::as_u64).map(|v| v as usize).or(a.prefix.map(|p| p as usize)).unwrap_or(1);
-        if let Some(w) = ed.layout.leaves().get(n.saturating_sub(1)) {
-            ed.focused = *w;
-        }
         Ok(())
     });
 
@@ -333,24 +290,6 @@ pub fn install(ed: &mut Editor) {
                 ed.show_buffer(id);
             }
             None => {}
-        });
-        Ok(())
-    });
-    ed.define_command("kill-current-buffer", "Kill the focused buffer.", o, |ed, _| {
-        let id = ed.current_buffer();
-        ed.kill_buffer(id);
-        Ok(())
-    });
-    ed.define_command("kill-buffer", "Kill a buffer chosen by name.", o, |ed, _| {
-        let cands = ed
-            .buffers
-            .iter()
-            .map(|(id, s)| Candidate::new(s.meta.name.clone()).detail(s.meta.major.clone()).value(buffer_id_to_u64(id).to_string()))
-            .collect();
-        ed.completing_read("Kill buffer: ", cands, true, |ed, c, _| {
-            if let Some(c) = c {
-                ed.kill_buffer(crate::editor::buffer_id_from_u64(c.value.parse().unwrap_or(0)));
-            }
         });
         Ok(())
     });

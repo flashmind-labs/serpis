@@ -132,102 +132,7 @@ impl MainSender {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Layout {
-    Leaf(WindowId),
-    Split { vertical: bool, ratio: f32, a: usize, b: usize },
-}
-
-/// Window layout as an arena-backed binary tree (`vertical` = stacked top/bottom).
-#[derive(Debug, Clone)]
-pub struct LayoutTree {
-    pub nodes: Vec<Layout>,
-    pub root: usize,
-}
-
-impl LayoutTree {
-    fn new(w: WindowId) -> Self {
-        LayoutTree {
-            nodes: vec![Layout::Leaf(w)],
-            root: 0,
-        }
-    }
-    fn find_leaf(&self, w: WindowId) -> Option<usize> {
-        self.nodes.iter().position(|n| *n == Layout::Leaf(w))
-    }
-    fn parent(&self, idx: usize) -> Option<usize> {
-        self.nodes.iter().position(|n| matches!(n, Layout::Split { a, b, .. } if *a == idx || *b == idx))
-    }
-    pub fn leaves(&self) -> Vec<WindowId> {
-        let mut out = Vec::new();
-        self.collect(self.root, &mut out);
-        out
-    }
-    fn collect(&self, i: usize, out: &mut Vec<WindowId>) {
-        match self.nodes[i] {
-            Layout::Leaf(w) => out.push(w),
-            Layout::Split { a, b, .. } => {
-                self.collect(a, out);
-                self.collect(b, out);
-            }
-        }
-    }
-    fn split(&mut self, target: WindowId, new: WindowId, vertical: bool) {
-        let Some(i) = self.find_leaf(target) else { return };
-        let a = self.nodes.len();
-        self.nodes.push(Layout::Leaf(target));
-        let b = self.nodes.len();
-        self.nodes.push(Layout::Leaf(new));
-        self.nodes[i] = Layout::Split { vertical, ratio: 0.5, a, b };
-    }
-    fn remove(&mut self, target: WindowId) -> bool {
-        let Some(i) = self.find_leaf(target) else { return false };
-        let Some(p) = self.parent(i) else { return false };
-        let Layout::Split { a, b, .. } = self.nodes[p] else { return false };
-        let sibling = if a == i { b } else { a };
-        self.nodes[p] = self.nodes[sibling];
-        self.compact();
-        true
-    }
-    /// Rebuild the arena with only nodes reachable from the root.
-    fn compact(&mut self) {
-        fn copy(src: &[Layout], i: usize, out: &mut Vec<Layout>) -> usize {
-            let idx = out.len();
-            out.push(src[i]);
-            if let Layout::Split { vertical, ratio, a, b } = src[i] {
-                let na = copy(src, a, out);
-                let nb = copy(src, b, out);
-                out[idx] = Layout::Split { vertical, ratio, a: na, b: nb };
-            }
-            idx
-        }
-        let mut out = Vec::new();
-        copy(&self.nodes, self.root, &mut out);
-        self.nodes = out;
-        self.root = 0;
-    }
-    /// Resize the split containing `w` along `vertical` by `delta` (fraction).
-    pub fn resize(&mut self, w: WindowId, vertical: bool, delta: f32) {
-        let Some(mut i) = self.find_leaf(w) else { return };
-        while let Some(p) = self.parent(i) {
-            if let Layout::Split { vertical: v, ratio, a, .. } = &mut self.nodes[p] {
-                if *v == vertical {
-                    let d = if *a == i { delta } else { -delta };
-                    *ratio = (*ratio + d).clamp(0.1, 0.9);
-                    return;
-                }
-            }
-            i = p;
-        }
-    }
-    pub fn balance(&mut self) {
-        for n in &mut self.nodes {
-            if let Layout::Split { ratio, .. } = n {
-                *ratio = 0.5;
-            }
-        }
-    }
-}
+pub use crate::layout::{Container, Dir, Kind, LayoutTree, Node, NodeRef};
 
 pub struct Window {
     pub buffer: BufferId,
@@ -256,8 +161,17 @@ pub struct Overlay {
 pub struct Editor {
     pub buffers: SlotMap<BufferId, BufferSlot>,
     pub windows: SlotMap<WindowId, Window>,
+    /// The current workspace's layout; other workspaces are kept in `workspaces`.
     pub layout: LayoutTree,
     pub focused: WindowId,
+    /// Inactive workspaces (the current one lives in `layout`/`focused`).
+    pub workspaces: Vec<crate::workspace::Workspace>,
+    /// Name of the current workspace.
+    pub workspace: String,
+    pub prev_workspace: Option<String>,
+    /// A container selected with `focus-parent`; window commands act on it instead of the
+    /// focused window.
+    pub selected: Option<NodeRef>,
     pub keymaps: Keymaps,
     pub commands: HashMap<String, Command>,
     pub hooks: HashMap<String, Vec<Hook>>,
@@ -297,7 +211,7 @@ pub struct Editor {
     /// Status text computed this frame.
     pub status_cache: Vec<String>,
     /// Layout seen at the end of the previous frame (for `window-layout-changed`).
-    last_layout: Option<Value>,
+    pub(crate) last_layout: Option<Value>,
     /// Fading highlights drawn over buffers.
     pub flashes: Vec<Flash>,
     /// User-defined palettes (`serpis.theme.define`).
@@ -329,6 +243,10 @@ impl Editor {
             windows,
             layout: LayoutTree::new(w),
             focused: w,
+            workspaces: Vec::new(),
+            workspace: "1".into(),
+            prev_workspace: None,
+            selected: None,
             keymaps: Keymaps::default(),
             commands: HashMap::new(),
             hooks: HashMap::new(),
@@ -637,8 +555,8 @@ impl Editor {
 
     /// Show `id` in another window, splitting if there is only one.
     pub fn pop_to_buffer(&mut self, id: BufferId) {
-        if let Some((w, _)) = self.windows.iter().find(|(_, w)| w.buffer == id) {
-            self.focused = w;
+        if let Some(w) = self.layout.visible_leaves().into_iter().find(|w| self.windows[*w].buffer == id) {
+            self.focus_window(w);
             return;
         }
         if self.layout.leaves().len() == 1 {
@@ -678,30 +596,83 @@ impl Editor {
     // Windows
     // ------------------------------------------------------------------
 
-    pub fn split_window(&mut self, below: bool) -> WindowId {
-        let buffer = self.current_buffer();
-        let w = self.windows.insert(Window {
+    pub fn new_window(&mut self, buffer: BufferId) -> WindowId {
+        self.windows.insert(Window {
             buffer,
             rect: Rect::NOTHING,
             history: Vec::new(),
-        });
-        self.layout.split(self.focused, w, below);
-        self.focused = w;
+        })
+    }
+
+    /// Focus `w` (in the current workspace) and drop any container selection.
+    pub fn focus_window(&mut self, w: WindowId) {
+        if self.layout.contains(w) {
+            self.focused = w;
+            self.selected = None;
+            self.layout.note_focus(w);
+            if self.layout.fullscreen.is_some_and(|f| f != w) {
+                self.layout.fullscreen = Some(w);
+            }
+        }
+    }
+
+    /// What window commands act on: the selected container, else the focused window.
+    pub fn target_node(&self) -> NodeRef {
+        self.selected.filter(|r| self.layout.path(*r).is_some()).unwrap_or(NodeRef::Window(self.focused))
+    }
+
+    /// Split the focused window; the new window shows the same buffer and takes focus.
+    pub fn split_window(&mut self, below: bool) -> WindowId {
+        let w = self.new_window(self.current_buffer());
+        self.layout.fullscreen = None;
+        self.layout.split(self.focused, w, if below { Kind::SplitV } else { Kind::SplitH });
+        self.focus_window(w);
         w
     }
 
+    /// Close a window (a view; its buffer lives on). The last window can't be closed.
     pub fn delete_window(&mut self, w: WindowId) -> bool {
-        if self.layout.leaves().len() <= 1 {
+        if self.layout.leaves().len() <= 1 || !self.layout.contains(w) {
             return false;
         }
-        if !self.layout.remove(w) {
-            return false;
-        }
+        let parent = self.layout.parent_of(NodeRef::Window(w));
+        self.layout.remove(NodeRef::Window(w));
         self.windows.remove(w);
         if self.focused == w {
-            self.focused = self.layout.leaves()[0];
+            // Focus lands where the closed window was, like i3.
+            let next = parent
+                .and_then(|p| self.layout.node(NodeRef::Container(p)))
+                .and_then(Node::focus_leaf)
+                .or_else(|| self.layout.root.children.get(self.layout.root.focus).and_then(Node::focus_leaf))
+                .unwrap_or_else(|| self.layout.leaves()[0]);
+            self.focus_window(next);
         }
         true
+    }
+
+    /// Remove a subtree (window or container) and delete its windows.
+    pub fn delete_node(&mut self, r: NodeRef) -> bool {
+        match r {
+            NodeRef::Window(w) => self.delete_window(w),
+            NodeRef::Container(_) => {
+                let Some(node) = self.layout.node(r) else { return false };
+                let mut ws = Vec::new();
+                node.leaves(&mut ws);
+                if ws.len() >= self.layout.leaves().len() {
+                    return false;
+                }
+                self.layout.remove(r);
+                for w in ws {
+                    self.windows.remove(w);
+                }
+                self.selected = None;
+                if !self.layout.contains(self.focused) {
+                    let next = self.layout.root.children.get(self.layout.root.focus).and_then(Node::focus_leaf).unwrap_or_else(|| self.layout.leaves()[0]);
+                    self.focus_window(next);
+                }
+                true
+            }
+        }
     }
 
     pub fn delete_other_windows(&mut self) {
@@ -712,40 +683,31 @@ impl Editor {
             }
         }
         self.layout = LayoutTree::new(keep);
+        self.selected = None;
     }
 
     pub fn other_window(&mut self, delta: isize) {
-        let leaves = self.layout.leaves();
+        let leaves = self.layout.visible_leaves();
         let i = leaves.iter().position(|w| *w == self.focused).unwrap_or(0) as isize;
         let n = leaves.len() as isize;
-        self.focused = leaves[((i + delta) % n + n) as usize % n as usize];
+        let w = leaves[((i + delta) % n + n) as usize % n as usize];
+        self.focus_window(w);
     }
 
-    /// Focus the nearest window in a direction (`left`, `right`, `up`, `down`).
+    /// Focus the window in a direction (`left`, `right`, `up`, `down`), following the tree
+    /// like i3: tabs are reached with left/right, stacked entries with up/down.
     pub fn windmove(&mut self, dir: &str) -> bool {
-        let cur = self.windows[self.focused].rect;
-        let c = cur.center();
-        let best = self
-            .layout
-            .leaves()
-            .into_iter()
-            .filter(|w| *w != self.focused)
-            .filter_map(|w| {
-                let r = self.windows[w].rect;
-                let ok = match dir {
-                    "left" => r.right() <= cur.left() + 1.0 && r.top() < cur.bottom() && r.bottom() > cur.top(),
-                    "right" => r.left() >= cur.right() - 1.0 && r.top() < cur.bottom() && r.bottom() > cur.top(),
-                    "up" => r.bottom() <= cur.top() + 1.0 && r.left() < cur.right() && r.right() > cur.left(),
-                    _ => r.top() >= cur.bottom() - 1.0 && r.left() < cur.right() && r.right() > cur.left(),
-                };
-                ok.then(|| (w, r.center().distance(c)))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((w, _)) = best {
-            self.focused = w;
-            true
-        } else {
-            false
+        let Some(d) = Dir::parse(dir) else { return false };
+        let from = match self.selected {
+            Some(r) => self.layout.node(r).and_then(Node::focus_leaf).unwrap_or(self.focused),
+            None => self.focused,
+        };
+        match self.layout.focus_dir(from, d) {
+            Some(w) => {
+                self.focus_window(w);
+                true
+            }
+            None => false,
         }
     }
 
@@ -753,24 +715,15 @@ impl Editor {
     // Window configurations
     // ------------------------------------------------------------------
 
-    /// Snapshot of the window layout (tree, ratios, buffers, focus) as plain data, so it can
-    /// be kept in variables, survive config reloads and be restored later.
+    /// Snapshot of the current workspace's layout (tree, sizes, buffers, focus) as plain
+    /// data, so it can be kept in variables, survive config reloads and be restored later.
     pub fn window_configuration(&self) -> Value {
         let leaves = self.layout.leaves();
-        fn node(ed: &Editor, i: usize) -> Value {
-            match ed.layout.nodes[i] {
-                Layout::Leaf(w) => serde_json::json!({"buffer": buffer_id_to_u64(ed.windows[w].buffer)}),
-                Layout::Split { vertical, ratio, a, b } => serde_json::json!({
-                    "split": if vertical { "below" } else { "right" },
-                    "ratio": ratio,
-                    "a": node(ed, a),
-                    "b": node(ed, b),
-                }),
-            }
-        }
+        let tree = self.layout.to_json(&|w| serde_json::json!({"buffer": buffer_id_to_u64(self.windows[w].buffer)}));
         serde_json::json!({
-            "tree": node(self, self.layout.root),
+            "tree": tree,
             "focused": leaves.iter().position(|w| *w == self.focused).unwrap_or(0),
+            "fullscreen": self.layout.fullscreen.is_some(),
         })
     }
 
@@ -788,41 +741,34 @@ impl Editor {
         let tree = conf.get("tree").ok_or_else(|| anyhow::anyhow!("window configuration has no tree"))?;
         let scratch = self.scratch_buffer();
         // Build the new tree first so a malformed configuration leaves the layout intact.
-        fn build(ed: &mut Editor, v: &Value, nodes: &mut Vec<Layout>, fallback: BufferId) -> anyhow::Result<usize> {
-            if let Some(b) = v.get("buffer").and_then(Value::as_u64) {
-                let id = buffer_id_from_u64(b);
-                let buffer = if ed.buffers.contains_key(id) { id } else { fallback };
-                let w = ed.windows.insert(Window { buffer, rect: Rect::NOTHING, history: Vec::new() });
-                nodes.push(Layout::Leaf(w));
-                return Ok(nodes.len() - 1);
-            }
-            let vertical = v.get("split").and_then(Value::as_str) == Some("below");
-            let ratio = v.get("ratio").and_then(Value::as_f64).unwrap_or(0.5) as f32;
-            let idx = nodes.len();
-            nodes.push(Layout::Split { vertical, ratio, a: 0, b: 0 });
-            let a = build(ed, v.get("a").ok_or_else(|| anyhow::anyhow!("split without a"))?, nodes, fallback)?;
-            let b = build(ed, v.get("b").ok_or_else(|| anyhow::anyhow!("split without b"))?, nodes, fallback)?;
-            nodes[idx] = Layout::Split { vertical, ratio, a, b };
-            Ok(idx)
-        }
-        let old: Vec<WindowId> = self.layout.leaves();
-        let mut nodes = Vec::new();
-        if let Err(e) = build(self, tree, &mut nodes, scratch) {
-            for n in &nodes {
-                if let Layout::Leaf(w) = n {
-                    self.windows.remove(*w);
+        let mut created = Vec::new();
+        let built = LayoutTree::from_json(tree, &mut |v| {
+            let id = v.get("buffer").and_then(Value::as_u64).map(buffer_id_from_u64).filter(|id| self.buffers.contains_key(*id)).unwrap_or(scratch);
+            let w = self.new_window(id);
+            created.push(w);
+            w
+        });
+        let mut layout = match built {
+            Ok(t) => t,
+            Err(e) => {
+                for w in created {
+                    self.windows.remove(w);
                 }
+                return Err(e);
             }
-            return Err(e);
+        };
+        for w in self.layout.leaves() {
+            self.windows.remove(w);
         }
-        // Keep each window's buffer history when the same buffer stays visible.
-        for w in &old {
-            self.windows.remove(*w);
-        }
-        self.layout = LayoutTree { nodes, root: 0 };
-        let leaves = self.layout.leaves();
+        let leaves = layout.leaves();
         let f = conf.get("focused").and_then(Value::as_u64).unwrap_or(0) as usize;
-        self.focused = leaves[f.min(leaves.len() - 1)];
+        let focused = leaves[f.min(leaves.len() - 1)];
+        if conf.get("fullscreen").and_then(Value::as_bool) == Some(true) {
+            layout.fullscreen = Some(focused);
+        }
+        self.layout = layout;
+        self.selected = None;
+        self.focus_window(focused);
         self.run_hook("window-configuration-changed", &Value::Null);
         Ok(())
     }

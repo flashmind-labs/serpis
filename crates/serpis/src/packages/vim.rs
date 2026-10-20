@@ -192,7 +192,11 @@ fn install_keymaps(ed: &mut Editor) {
         ("C-w s", "split-window-below"),
         ("C-w v", "split-window-right"),
         ("C-w c", "delete-window"),
-        ("C-w q", "delete-window"),
+        ("C-w q", "close-window"),
+        ("C-w H", "window-move-left"),
+        ("C-w J", "window-move-down"),
+        ("C-w K", "window-move-up"),
+        ("C-w L", "window-move-right"),
         ("C-w o", "delete-other-windows"),
         ("C-w =", "balance-windows"),
         ("C-w >", "enlarge-window-horizontally"),
@@ -313,16 +317,11 @@ fn ex(ed: &mut Editor, line: &str) {
     let run = |ed: &mut Editor, c: &str| ed.call(c);
     match cmd {
         "w" | "write" => run(ed, "save-buffer"),
-        "q" | "quit" | "clo" | "close" => {
-            if !ed.delete_window(ed.focused) {
-                run(ed, "kill-current-buffer");
-            }
-        }
+        // Windows are views: `:q` closes the view and leaves the buffer alive.
+        "q" | "quit" | "clo" | "close" => run(ed, "close-window"),
         "wq" | "x" => {
             run(ed, "save-buffer");
-            if !ed.delete_window(ed.focused) {
-                run(ed, "kill-current-buffer");
-            }
+            run(ed, "close-window");
         }
         "qa" | "qall" | "qa!" => run(ed, "quit"),
         "e" | "edit" if !arg.is_empty() => {

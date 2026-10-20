@@ -357,10 +357,27 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         ed(|e| e.create_buffer(&kind, name.as_deref(), &p).map(buffer_id_to_u64).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
     })?)?;
     buf.set("show", lua.create_function(|_, id: u64| ed(|e| e.show_buffer(buffer_id_from_u64(id))))?)?;
-    buf.set("kill", lua.create_function(|_, id: Option<u64>| ed(|e| {
+    // serpis.buffer.kill(id?, {confirm = true}): with `confirm`, ask like kill-buffer does.
+    buf.set("kill", lua.create_function(|_, (id, opts): (Option<u64>, Option<Table>)| ed(|e| {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
-        e.kill_buffer(id)
+        if opts.and_then(|o| o.get::<bool>("confirm").ok()).unwrap_or(false) {
+            e.kill_buffer_interactive(id)
+        } else {
+            e.kill_buffer(id)
+        }
     }))?)?;
+    buf.set("hidden", lua.create_function(|_, ()| ed(|e| e.hidden_buffers().into_iter().map(buffer_id_to_u64).collect::<Vec<_>>()))?)?;
+    buf.set("process", lua.create_function(|lua, id: Option<u64>| {
+        let v = ed(|e| {
+            let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+            match e.process_status(id) {
+                crate::ProcessStatus::None => Value::Null,
+                crate::ProcessStatus::Idle => json!({"running": false}),
+                crate::ProcessStatus::Running(p) => json!({"running": true, "name": p}),
+            }
+        })?;
+        lua.to_value(&v)
+    })?)?;
     buf.set("by_name", lua.create_function(|_, name: String| ed(|e| e.buffer_by_name(&name).map(buffer_id_to_u64)))?)?;
     buf.set("scratch", lua.create_function(|_, ()| ed(|e| buffer_id_to_u64(e.scratch_buffer())))?)?;
     buf.set("exists", lua.create_function(|_, id: u64| ed(|e| e.buffers.contains_key(buffer_id_from_u64(id))))?)?;
@@ -419,10 +436,46 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     win.set("split", lua.create_function(|_, dir: Option<String>| ed(|e| {
         e.split_window(dir.as_deref() == Some("below"));
     }))?)?;
-    win.set("delete", lua.create_function(|_, ()| ed(|e| e.delete_window(e.focused)))?)?;
+    win.set("delete", lua.create_function(|_, ()| ed(|e| {
+        let r = e.target_node();
+        e.delete_node(r)
+    }))?)?;
+    // Close the view (the last window buries its buffer instead); buffers are never killed.
+    win.set("close", lua.create_function(|_, ()| ed(|e| e.close_window()))?)?;
     win.set("only", lua.create_function(|_, ()| ed(|e| e.delete_other_windows()))?)?;
     win.set("other", lua.create_function(|_, n: Option<isize>| ed(|e| e.other_window(n.unwrap_or(1))))?)?;
-    win.set("move", lua.create_function(|_, dir: String| ed(|e| e.windmove(&dir)))?)?;
+    // Directional focus, and i3-style move of the focused window (or selected container).
+    win.set("focus", lua.create_function(|_, dir: String| ed(|e| e.windmove(&dir)))?)?;
+    win.set("move", lua.create_function(|_, dir: String| {
+        let d = crate::layout::Dir::parse(&dir).ok_or_else(|| mlua::Error::runtime(format!("bad direction {dir}")))?;
+        ed(|e| e.move_window(d))
+    })?)?;
+    win.set("focus_parent", lua.create_function(|_, ()| ed(|e| e.focus_parent()))?)?;
+    win.set("focus_child", lua.create_function(|_, ()| ed(|e| e.focus_child()))?)?;
+    // serpis.window.layout() returns the focused container's layout; layout("tabbed") sets it.
+    win.set("layout", lua.create_function(|_, kind: Option<String>| ed(|e| {
+        if let Some(k) = kind.as_deref() {
+            let k = crate::layout::Kind::parse(k).ok_or_else(|| mlua::Error::runtime(format!("bad layout {k}")))?;
+            e.set_layout_kind(k);
+        }
+        Ok(e.layout_kind().map(|k| k.name().to_string()))
+    })?)?)?;
+    win.set("fullscreen", lua.create_function(|_, on: Option<bool>| ed(|e| {
+        let on = on.unwrap_or(e.layout.fullscreen.is_none());
+        e.layout.fullscreen = on.then_some(e.focused);
+        on
+    }))?)?;
+    win.set("resize", lua.create_function(|_, (dir, amount): (String, Option<f32>)| ed(|e| {
+        let r = e.target_node();
+        let a = amount.unwrap_or(0.05);
+        match dir.as_str() {
+            "wider" => e.layout.resize(r, true, a),
+            "narrower" => e.layout.resize(r, true, -a),
+            "taller" => e.layout.resize(r, false, a),
+            "shorter" => e.layout.resize(r, false, -a),
+            _ => false,
+        }
+    }))?)?;
     win.set("count", lua.create_function(|_, ()| ed(|e| e.layout.leaves().len()))?)?;
     win.set("configuration", lua.create_function(|lua, ()| {
         let c = ed(|e| e.window_configuration())?;
@@ -434,6 +487,58 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     win.set("buffers", lua.create_function(|_, ()| ed(|e| e.visible_buffers().into_iter().map(buffer_id_to_u64).collect::<Vec<_>>()))?)?;
     s.set("window", win)?;
+
+    // Workspaces.
+    let wsp = lua.create_table()?;
+    wsp.set("current", lua.create_function(|_, ()| ed(|e| e.workspace.clone()))?)?;
+    wsp.set("previous", lua.create_function(|_, ()| ed(|e| e.prev_workspace.clone()))?)?;
+    wsp.set("list", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            e.workspace_names()
+                .into_iter()
+                .map(|n| json!({
+                    "name": n,
+                    "display": e.workspace_display(&n),
+                    "current": n == e.workspace,
+                    "empty": e.workspace_is_empty(&n),
+                    "buffers": e.workspace_buffers(&n).into_iter().map(buffer_id_to_u64).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>()
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    wsp.set("switch", lua.create_function(|_, name: LuaValue| {
+        let name = match name {
+            LuaValue::Integer(i) => i.to_string(),
+            LuaValue::Number(n) => (n as i64).to_string(),
+            LuaValue::String(s) => s.to_string_lossy().to_string(),
+            _ => return Err(mlua::Error::runtime("workspace name expected")),
+        };
+        ed(|e| e.switch_workspace(&name))
+    })?)?;
+    // serpis.workspace.move_window(name, {follow = bool}): the focused window or selected container.
+    wsp.set("move_window", lua.create_function(|_, (name, opts): (LuaValue, Option<Table>)| {
+        let name = match name {
+            LuaValue::Integer(i) => i.to_string(),
+            LuaValue::Number(n) => (n as i64).to_string(),
+            LuaValue::String(s) => s.to_string_lossy().to_string(),
+            _ => return Err(mlua::Error::runtime("workspace name expected")),
+        };
+        ed(|e| {
+            let follow = opts.and_then(|o| o.get::<bool>("follow").ok()).unwrap_or_else(|| e.var_bool("workspace-move-follows"));
+            let r = e.target_node();
+            e.move_to_workspace(r, &name, follow)
+        })
+    })?)?;
+    wsp.set("rename", lua.create_function(|_, (from, to): (String, String)| {
+        ed(|e| e.rename_workspace(&from, &to).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
+    })?)?;
+    wsp.set("back_and_forth", lua.create_function(|_, ()| ed(|e| {
+        if let Some(p) = e.prev_workspace.clone() {
+            e.switch_workspace(&p);
+        }
+    }))?)?;
+    s.set("workspace", wsp)?;
 
     // Projects.
     let project = lua.create_table()?;
@@ -527,6 +632,13 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             });
             e.minibuffer_preview(select, cancel, keep_order);
         })
+    })?)?;
+    // serpis.minibuffer.y_or_n(prompt, function(yes) ... end): one-key yes/no question.
+    mb.set("y_or_n", lua.create_function(|lua, (prompt, f): (String, Function)| {
+        let l = lua.clone();
+        ed(|e| e.y_or_n(&prompt, move |e, yes| {
+            call(e, &l, &f, &json!(yes));
+        }))
     })?)?;
     s.set("minibuffer", mb)?;
 

@@ -24,7 +24,7 @@ use libghostty_vt::screen::{CellSemanticContent, CellWide, Screen};
 use libghostty_vt::style::{RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport, Terminal};
 
-use crate::buffer::{Buffer, Modeline};
+use crate::buffer::{Buffer, Modeline, ProcessStatus};
 use crate::editor::Editor;
 use crate::impl_any;
 use crate::keys::{Key, KeyChord};
@@ -564,6 +564,20 @@ impl TerminalBuffer {
     }
 }
 
+/// The executable name of process `pid`.
+fn process_name(pid: i32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 256];
+        let n = unsafe { nix::libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
+    }
+}
+
 /// Draw a cursor in cell `r`; a block repaints the character under it in the background color.
 fn paint_cursor(painter: &egui::Painter, r: Rect, shape: CursorShape, color: Color32, ch: Option<char>, font: &FontId, bg: Color32) {
     match shape {
@@ -965,6 +979,17 @@ impl Buffer for TerminalBuffer {
             url::Url::parse(p).ok().and_then(|u| u.to_file_path().ok()).unwrap_or_else(|| std::path::PathBuf::from(p))
         });
         Some(pwd.unwrap_or_else(|| self.cwd.clone()))
+    }
+
+    fn process_status(&self) -> ProcessStatus {
+        if self.exited {
+            return ProcessStatus::None;
+        }
+        // The terminal's foreground process group is the shell itself while it waits for input.
+        match nix::unistd::tcgetpgrp(self.master.as_ref()) {
+            Ok(pg) if pg != self.child => ProcessStatus::Running(process_name(pg.as_raw()).unwrap_or_else(|| format!("pid {pg}"))),
+            _ => ProcessStatus::Idle,
+        }
     }
 
     fn on_kill(&mut self, _ed: &mut Editor) {

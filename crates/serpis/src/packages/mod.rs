@@ -82,7 +82,7 @@ pub fn install_base(ed: &mut Editor) {
         ("s-t", "new-terminal"),
         ("s-o", "find-file"),
         ("s-s", "save-buffer"),
-        ("s-w", "delete-window"),
+        ("s-w", "close-window"),
         ("s-W", "kill-current-buffer"),
         ("s-\\", "split-window-right"),
         ("s-|", "split-window-below"),
@@ -105,8 +105,8 @@ pub fn install_base(ed: &mut Editor) {
     for n in 1..=9 {
         ed.bind("global", &format!("s-{n}"), &format!("select-window-{n}"), o);
         ed.define_command(&format!("select-window-{n}"), &format!("Focus window {n}."), o, move |ed, _| {
-            if let Some(w) = ed.layout.leaves().get(n - 1) {
-                ed.focused = *w;
+            if let Some(w) = ed.layout.visible_leaves().get(n - 1).copied() {
+                ed.focus_window(w);
             }
             Ok(())
         });

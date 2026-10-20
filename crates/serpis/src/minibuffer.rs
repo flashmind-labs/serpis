@@ -56,6 +56,8 @@ pub struct Minibuffer {
     pub keep_order: bool,
     /// Value last reported to `on_select`.
     pub(crate) previewed: Option<Option<String>>,
+    /// Typing a candidate's first letter accepts it at once (`y_or_n`).
+    pub instant: bool,
 }
 
 /// Subsequence fuzzy match; returns a score (higher is better) and matched char positions.
@@ -155,6 +157,7 @@ impl Editor {
             on_cancel: None,
             keep_order: false,
             previewed: None,
+            instant: false,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -184,6 +187,7 @@ impl Editor {
             on_cancel: None,
             keep_order: false,
             previewed: None,
+            instant: false,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -221,6 +225,28 @@ pub fn accept(ed: &mut Editor) {
 }
 
 impl Editor {
+    /// Ask a yes/no question answered with one key (`y` / `n`; `C-g` or `ESC` means no).
+    pub fn y_or_n(&mut self, prompt: &str, f: impl FnOnce(&mut Editor, bool) + 'static) {
+        let f = std::rc::Rc::new(std::cell::RefCell::new(Some(f)));
+        let on_cancel = f.clone();
+        self.completing_read(&format!("{prompt} (y or n) "), vec![Candidate::new("yes"), Candidate::new("no")], true, move |ed, c, _| {
+            let f = f.borrow_mut().take();
+            if let Some(f) = f {
+                f(ed, c.is_some_and(|c| c.value == "yes"));
+            }
+        });
+        if let Some(mb) = &mut self.minibuffer {
+            mb.instant = true;
+            mb.keep_order = true;
+            mb.on_cancel = Some(Box::new(move |ed| {
+                let f = on_cancel.borrow_mut().take();
+                if let Some(f) = f {
+                    f(ed, false);
+                }
+            }));
+        }
+    }
+
     /// Attach live-preview and cancel callbacks to the open prompt.
     pub fn minibuffer_preview(&mut self, on_select: Option<SelectFn>, on_cancel: Option<CancelFn>, keep_order: bool) {
         if let Some(mb) = &mut self.minibuffer {
@@ -265,9 +291,20 @@ pub fn insert_text(ed: &mut Editor, text: &str) {
 }
 
 pub fn self_insert(ed: &mut Editor, chord: &KeyChord) {
-    if let Some(c) = chord.printable() {
-        insert_text(ed, &c.to_string());
+    let Some(c) = chord.printable() else { return };
+    if let Some(mb) = &mut ed.minibuffer {
+        if mb.instant {
+            let lc = c.to_lowercase().next().unwrap_or(c);
+            if let Some(i) = mb.candidates.iter().position(|k| k.label.to_lowercase().starts_with(lc)) {
+                let label = mb.candidates[i].label.clone();
+                mb.input.set_text(&label);
+                mb.refilter();
+                accept(ed);
+            }
+            return;
+        }
     }
+    insert_text(ed, &c.to_string());
 }
 
 fn edit(ed: &mut Editor, f: impl FnOnce(&mut TextArea)) {
