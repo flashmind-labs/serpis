@@ -397,6 +397,19 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let buttons_left = bx - 2.0;
     bx -= 10.0;
     let p = ui.painter();
+    // Fullscreen (monocle): say so, with how many windows it hides; clicking restores.
+    let mut fullscreen_badge = None;
+    let indicator = ed.var_str("fullscreen-indicator").unwrap_or_default();
+    if ed.layout.fullscreen == Some(w) && !indicator.is_empty() {
+        let hidden = ed.layout.leaves().len().saturating_sub(1);
+        let label = if hidden > 0 { format!("{indicator} +{hidden}") } else { indicator };
+        let g = p.layout_no_wrap(label, FontId::monospace(10.5), theme.bg);
+        let badge = Rect::from_min_size(egui::pos2(bx - g.size().x - 12.0, cy - 9.0), egui::vec2(g.size().x + 12.0, 18.0));
+        p.rect_filled(badge, 9.0, theme.yellow);
+        p.galley(badge.center() - g.size() / 2.0, g, theme.bg);
+        bx = badge.left() - 8.0;
+        fullscreen_badge = Some(badge);
+    }
     if let Some(st) = vim::state_of(ed, id) {
         let label = st.label();
         let color = match st {
@@ -439,7 +452,10 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         ed.call("window-fullscreen-toggle");
     } else if head_resp.clicked() {
         ed.focus_window(w);
-        if on_name {
+        let on_badge = head_resp.interact_pointer_pos().zip(fullscreen_badge).is_some_and(|(p, b)| b.contains(p));
+        if on_badge {
+            ed.call("window-fullscreen-toggle");
+        } else if on_name {
             ed.call("switch-to-buffer");
         }
     }

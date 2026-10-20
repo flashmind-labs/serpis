@@ -69,7 +69,7 @@ impl Editor {
         self.active_keymaps().iter().any(|n| {
             self.keymaps
                 .get(n)
-                .is_some_and(|m| !matches!(m.lookup(&seq), keymap::Lookup::None))
+                .is_some_and(|m| !matches!(self.lookup_in(m, &seq), keymap::Lookup::None))
         })
     }
 }
@@ -79,6 +79,7 @@ pub fn bootstrap(ed: &mut Editor) {
     use serde_json::{Value, json};
     let o = editor::BUILTIN;
     ed.defvar("keybinding-scheme", json!("regular"), "Active keybinding scheme: regular, emacs or vim.");
+    ed.defvar("leader-key", json!("SPC"), "The key `<leader>` stands for in key bindings (vim normal state uses `<leader> b b`, ...). \"\" turns leader bindings off.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
     ed.defvar("agent-native-web-search", json!(true), "Use the provider's own web search when the model supports it.");

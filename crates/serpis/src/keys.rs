@@ -45,6 +45,11 @@ pub struct KeyChord {
 
 impl KeyChord {
     pub fn ch(c: char) -> Self {
+        // Space is the named key `SPC` however it arrives (typed text or a key event), so
+        // bindings like `SPC b b` match real input.
+        if c == ' ' {
+            return KeyChord::named("space");
+        }
         KeyChord {
             mods: Mods::NONE,
             key: Key::Char(c),
@@ -254,6 +259,50 @@ pub fn chord_from_egui(key: egui::Key, m: egui::Modifiers) -> Option<KeyChord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a keyboard delivers for a bound chord: plain characters (and space) arrive as
+    /// typed text, everything else as a key event.
+    fn delivered(c: &KeyChord) -> Option<KeyChord> {
+        let mods = egui::Modifiers { alt: c.mods.meta, ctrl: c.mods.ctrl, shift: c.mods.shift, mac_cmd: c.mods.sup, command: c.mods.sup, };
+        match &c.key {
+            Key::Char(ch) if !c.mods.is_command() => Some(KeyChord::ch(*ch)),
+            Key::Named(n) if n == "space" && !c.mods.is_command() && !c.mods.shift => Some(KeyChord::ch(' ')),
+            Key::Char(ch) => {
+                let shift = ch.is_ascii_uppercase();
+                let key = egui::Key::from_name(&ch.to_ascii_uppercase().to_string())?;
+                chord_from_egui(key, egui::Modifiers { shift: mods.shift || shift, ..mods })
+            }
+            Key::Named(n) => {
+                let name = match n.as_str() {
+                    "return" => "Enter",
+                    "escape" => "Escape",
+                    "tab" => "Tab",
+                    "backspace" => "Backspace",
+                    "space" => "Space",
+                    "up" => "ArrowUp",
+                    "down" => "ArrowDown",
+                    "left" => "ArrowLeft",
+                    "right" => "ArrowRight",
+                    other => return egui::Key::from_name(&other.to_uppercase()).and_then(|k| chord_from_egui(k, mods)),
+                };
+                chord_from_egui(egui::Key::from_name(name)?, mods)
+            }
+        }
+    }
+
+    /// Every kind of binding must be reachable from real input (`SPC` once wasn't: typed
+    /// space arrived as a character while bindings named it).
+    #[test]
+    fn bindings_match_real_input() {
+        for s in ["SPC", "C-SPC", "a", "A", ":", "s-p", "s-P", "s--", "s-=", "s-+", "s-0", "C-s-3", "C-x", "M-x", "RET", "ESC", "TAB", "DEL", "<up>", "C-w H", "<f5>"] {
+            for chord in parse_seq(s).unwrap() {
+                if cfg!(not(target_os = "macos")) && chord.mods.sup {
+                    continue;
+                }
+                assert_eq!(delivered(&chord).as_ref(), Some(&chord), "{s}");
+            }
+        }
+    }
 
     #[test]
     fn roundtrip() {

@@ -183,6 +183,7 @@ fn dir_arg(a: &crate::editor::Args) -> Option<Dir> {
 pub fn install(ed: &mut Editor) {
     let o = BUILTIN;
     ed.defvar("confirm-kill-processes", json!("running"), "Confirm killing a process buffer: \"running\" (a program other than the idle shell), \"always\" or \"never\".");
+    ed.defvar("fullscreen-indicator", json!("FULLSCREEN"), "Badge on a fullscreen window's header (\"\" hides it); shows how many windows it hides, and clicking it restores the layout.");
     ed.defvar("confirm-quit-processes", json!("running"), "Confirm quitting with process buffers: \"running\", \"always\" or \"never\".");
 
     // ------------------------------------------------------------ closing vs killing

@@ -876,7 +876,7 @@ impl Editor {
     fn lookup(&self, seq: &[KeyChord]) -> Lookup {
         for name in self.active_keymaps() {
             if let Some(map) = self.keymaps.get(&name) {
-                match map.lookup(seq) {
+                match self.lookup_in(map, seq) {
                     Lookup::None => continue,
                     other => return other,
                 }
@@ -885,11 +885,27 @@ impl Editor {
         Lookup::None
     }
 
+    /// `seq` with the `leader-key` chord written as `<leader>`, when it contains it.
+    pub fn leader_form(&self, seq: &[KeyChord]) -> Option<Vec<KeyChord>> {
+        let leader: KeyChord = self.var_str("leader-key").filter(|s| !s.is_empty())?.parse().ok()?;
+        seq.contains(&leader).then(|| seq.iter().map(|c| if *c == leader { KeyChord::named("leader") } else { c.clone() }).collect())
+    }
+
+    /// Look `seq` up in one keymap: a binding of the literal keys wins, then one written
+    /// with `<leader>`.
+    pub fn lookup_in(&self, map: &crate::keymap::Keymap, seq: &[KeyChord]) -> Lookup {
+        match map.lookup(seq) {
+            Lookup::None => self.leader_form(seq).map(|s| map.lookup(&s)).unwrap_or(Lookup::None),
+            other => other,
+        }
+    }
+
     /// Bindings available after the pending prefix (for which-key).
     pub fn pending_bindings(&self) -> Vec<(String, String)> {
         let mut seen = std::collections::BTreeMap::new();
         for name in self.active_keymaps().into_iter().rev() {
-            if let Some(sub) = self.keymaps.get(&name).and_then(|m| m.submap(&self.pending_keys)) {
+            let leader = self.leader_form(&self.pending_keys);
+            if let Some(sub) = self.keymaps.get(&name).and_then(|m| m.submap(&self.pending_keys).or_else(|| leader.as_ref().and_then(|l| m.submap(l)))) {
                 for (chord, b) in &sub.bindings {
                     let desc = match b {
                         crate::keymap::Binding::Command { name, .. } => name.clone(),
