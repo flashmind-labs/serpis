@@ -1164,6 +1164,8 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         })?;
         lua.to_value(&v)
     })?)?;
+    // Durations of recent frames in ms, newest last (input, logic and drawing).
+    debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
     // The open prompt's text, or nil.
     debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
     debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;

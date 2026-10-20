@@ -8,12 +8,13 @@ use crate::packages::vim;
 
 pub struct App {
     pub ed: Editor,
+    frame_start: Option<std::time::Instant>,
     _rt: Option<tokio::runtime::Runtime>,
 }
 
 impl App {
     pub fn new(ed: Editor, rt: tokio::runtime::Runtime) -> Self {
-        App { ed, _rt: Some(rt) }
+        App { ed, frame_start: None, _rt: Some(rt) }
     }
 }
 
@@ -29,6 +30,7 @@ fn command_chord(c: char) -> KeyChord {
 
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.frame_start = Some(std::time::Instant::now());
         // Context menus are egui popups: let them see ESC so it closes them.
         let popup_open = egui::Popup::is_any_open(ctx);
         let ed = &mut self.ed;
@@ -103,6 +105,17 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         crate::ui::draw(ui, &mut self.ed);
+        if let Some(t) = self.frame_start.take() {
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            if ms > 100.0 {
+                tracing::warn!(target: "serpis::perf", "slow frame: {ms:.0} ms");
+            }
+            let times = &mut self.ed.frame_times;
+            times.push_back(ms);
+            if times.len() > 240 {
+                times.pop_front();
+            }
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

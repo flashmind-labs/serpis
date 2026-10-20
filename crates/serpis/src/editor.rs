@@ -226,6 +226,8 @@ pub struct Editor {
     pub sidebar: crate::sidebar::Sidebar,
     /// Saved chat sessions, as last read.
     pub sessions: crate::session_ui::Sessions,
+    /// How long recent frames took (input, logic and drawing), in milliseconds, newest last.
+    pub frame_times: std::collections::VecDeque<f32>,
 }
 
 impl Editor {
@@ -296,6 +298,7 @@ impl Editor {
             theme_generation: 0,
             sidebar: Default::default(),
             sessions: Default::default(),
+            frame_times: Default::default(),
         }
     }
 

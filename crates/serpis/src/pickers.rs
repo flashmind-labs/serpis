@@ -61,26 +61,27 @@ impl Editor {
     /// sessions, then where serpis started.
     pub fn known_projects(&mut self) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::new();
-        let mut add = |p: PathBuf| {
-            if p.is_dir() && !out.contains(&p) {
+        let mut add = |p: PathBuf, check: bool| {
+            if !out.contains(&p) && (!check || p.is_dir()) {
                 out.push(p);
             }
         };
         for it in crate::sidebar::items(self) {
             if let Some(p) = it.project {
-                add(p);
+                add(p, false);
             }
         }
         for p in self.pinned_projects() {
-            add(p);
+            add(p, true);
         }
-        for i in &self.sessions.list {
-            add(i.project.clone().unwrap_or_else(|| i.cwd.clone()));
+        // Session directories were checked by the background scan; never stat them here.
+        for i in self.sessions.list.iter().filter(|i| i.exists) {
+            add(i.project.clone().unwrap_or_else(|| i.cwd.clone()), false);
         }
         if let Some(root) = self.project_root_of(&self.cwd.clone()) {
-            add(root);
+            add(root, false);
         }
-        add(self.cwd.clone());
+        add(self.cwd.clone(), false);
         out
     }
 
@@ -96,13 +97,20 @@ impl Editor {
             })
             .collect();
         let source = move |input: &str| -> Vec<Candidate> {
-            let looks_like_path = input.starts_with('/') || input.starts_with('~') || input.starts_with('.');
-            if !looks_like_path {
+            if !input.contains('/') {
+                // Known projects first, then the folders in your home folder.
                 let mut out = vec![Candidate::new("Browse…").detail("Choose a folder in the system dialog").value(BROWSE)];
                 out.extend(known.iter().cloned());
+                let home = dirs::home_dir().unwrap_or_default();
+                out.extend(subfolders(&home, false).into_iter().filter(|c| !known.iter().any(|k| k.value == c.value)).map(|c| {
+                    let detail = tilde(Path::new(&c.value));
+                    c.detail(detail)
+                }));
                 return out;
             }
-            // Folders under what has been typed; the folder itself first.
+            // Folders under what has been typed (relative paths count from home); the folder
+            // itself first.
+            let input = &home_relative(input);
             let path = crate::expand_home(input);
             let (dir, _) = match input.rfind('/') {
                 Some(i) => (crate::expand_home(&input[..=i]), &input[i + 1..]),
@@ -112,17 +120,7 @@ impl Editor {
             if dir.is_dir() {
                 out.push(Candidate::new("Use this folder").detail(tilde(&dir)).value(dir.to_string_lossy().into_owned()));
             }
-            let mut subs: Vec<Candidate> = std::fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| !n.starts_with('.') || input.rsplit('/').next().is_some_and(|q| q.starts_with('.')))
-                .map(|n| Candidate::new(format!("{n}/")).value(dir.join(&n).to_string_lossy().into_owned()))
-                .collect();
-            subs.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
-            out.extend(subs);
+            out.extend(subfolders(&dir, input.rsplit('/').next().is_some_and(|q| q.starts_with('.'))));
             out
         };
         self.completing_read_dynamic(prompt, "", source, move |ed, c, input| {
@@ -131,7 +129,7 @@ impl Editor {
                 browse_folder(ed, f);
                 return;
             }
-            let dir = crate::expand_home(choice.trim());
+            let dir = crate::expand_home(&home_relative(choice.trim()));
             if dir.is_dir() {
                 f(ed, dir.canonicalize().unwrap_or(dir));
             } else {
@@ -143,6 +141,31 @@ impl Editor {
             mb.keep_order = true;
         }
     }
+}
+
+/// A typed path as the picker reads it: `/`, `~` and `.` paths as they are, anything else
+/// relative to the home folder.
+fn home_relative(input: &str) -> String {
+    if input.starts_with('/') || input.starts_with('~') || input.starts_with('.') || input.is_empty() {
+        input.to_string()
+    } else {
+        format!("~/{input}")
+    }
+}
+
+/// The folders in `dir` as candidates (`name/`, valued by full path), hidden ones on request.
+fn subfolders(dir: &Path, hidden: bool) -> Vec<Candidate> {
+    let mut subs: Vec<Candidate> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| hidden || !n.starts_with('.'))
+        .map(|n| Candidate::new(format!("{n}/")).value(dir.join(&n).to_string_lossy().into_owned()))
+        .collect();
+    subs.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    subs
 }
 
 /// The system's folder chooser (Finder on macOS, zenity or kdialog elsewhere), in the
@@ -218,7 +241,9 @@ pub fn install(ed: &mut Editor) {
             open_project(ed, crate::expand_home(d));
             return Ok(());
         }
-        crate::session_ui::scan_then(ed, false, |ed| ed.read_directory("Open project: ", open_project));
+        // Open at once with the projects known now; session history refreshes in the background.
+        ed.read_directory("Open project: ", open_project);
+        crate::session_ui::scan_then(ed, false, |_| {});
         Ok(())
     });
     ed.define_command("browse-folder", "Choose a folder in the system dialog and start a chat in it.", o, |ed, _| {
@@ -227,13 +252,12 @@ pub fn install(ed: &mut Editor) {
     });
     for kind in ["chat", "terminal"] {
         ed.define_command(&format!("new-{kind}-in-folder"), &format!("Open a new {kind} in a folder you pick (a known project, a typed path, or Browse…)."), o, move |ed, _| {
-            crate::session_ui::scan_then(ed, false, move |ed| {
-                ed.read_directory(&format!("New {kind} in: "), move |ed, dir| {
-                    if let Err(e) = ed.new_buffer_in(kind, &dir) {
-                        ed.error(format!("{e:#}"));
-                    }
-                });
+            ed.read_directory(&format!("New {kind} in: "), move |ed, dir| {
+                if let Err(e) = ed.new_buffer_in(kind, &dir) {
+                    ed.error(format!("{e:#}"));
+                }
             });
+            crate::session_ui::scan_then(ed, false, |_| {});
             Ok(())
         });
     }

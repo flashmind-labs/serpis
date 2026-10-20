@@ -110,8 +110,9 @@ as stable identifiers for scripts.
 Commands that need a folder take it as a parameter when scripted (`serpis.command.run("new-chat",
 "~/src/app")`) and ask when run by hand: `project-open` (`s-O`, also the folder button in the
 sidebar), `new-chat-in-folder`, `new-terminal-in-folder`, `project-add`, or `C-u` before `new-chat`
-/ `new-terminal` in the emacs and vim schemes. The folder picker lists projects you have worked in,
-completes typed paths, and has Browse… for the system's folder dialog.
+/ `new-terminal` in the emacs and vim schemes. The folder picker lists projects you have worked in and
+the folders in your home folder; typed paths start from home (`src/app`, no `~/` needed) unless they
+begin with `/`, `~` or `.`; and Browse… opens the system's folder dialog.
 
 ## Sessions
 

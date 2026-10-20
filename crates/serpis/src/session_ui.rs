@@ -81,12 +81,21 @@ pub fn scan_then(ed: &mut Editor, force: bool, f: impl FnOnce(&mut Editor) + 'st
         // A bad file must not leave the scan pending forever.
         let scanned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut list = session::list(&roots, &mut cache);
-            let mut projects: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+            // Each distinct directory is looked at once.
+            let mut projects: HashMap<PathBuf, (Option<PathBuf>, bool)> = HashMap::new();
             for i in &mut list {
-                i.project = projects
+                let (project, exists) = projects
                     .entry(i.cwd.clone())
-                    .or_insert_with(|| crate::git::repo(&i.cwd).map(|r| r.main).or_else(|| crate::project::root(&i.cwd)))
+                    .or_insert_with(|| {
+                        if !i.cwd.is_dir() {
+                            return (None, false);
+                        }
+                        let project = crate::git::repo(&i.cwd).map(|r| r.main).or_else(|| crate::project::root(&i.cwd));
+                        (project, true)
+                    })
                     .clone();
+                i.project = project;
+                i.exists = exists;
             }
             (list, cache)
         }));

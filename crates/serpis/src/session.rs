@@ -279,6 +279,10 @@ pub struct Info {
     pub size: u64,
     /// The project the session ran in (filled in by the scanner).
     pub project: Option<PathBuf>,
+    /// Whether that project (or the session's directory) still exists, checked by the
+    /// scanner: a lookup can block for a while (automounted `/home`, network volumes), so the
+    /// UI never stats session paths itself.
+    pub exists: bool,
 }
 
 impl Info {
