@@ -477,6 +477,47 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
         }
     }))?)?;
     win.set("count", lua.create_function(|_, ()| ed(|e| e.layout.leaves().len()))?)?;
+    // Windows of the current workspace: {id, buffer, focused, visible, rect = {x, y, w, h}}.
+    win.set("list", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let visible = e.layout.visible_leaves();
+            e.layout
+                .leaves()
+                .into_iter()
+                .map(|w| {
+                    let r = e.windows[w].rect;
+                    json!({
+                        "id": crate::editor::window_id_to_u64(w),
+                        "buffer": buffer_id_to_u64(e.windows[w].buffer),
+                        "focused": w == e.focused,
+                        "visible": visible.contains(&w),
+                        "rect": if r.is_positive() { json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}) } else { Value::Null },
+                    })
+                })
+                .collect::<Vec<_>>()
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    // serpis.window.place(win, target, zone): what a mouse drop does. zone is "left", "right",
+    // "up", "down" (split there) or "center" (tab them together).
+    win.set("place", lua.create_function(|_, (w, target, zone): (u64, u64, String)| {
+        let z = crate::layout::Zone::parse(&zone).ok_or_else(|| mlua::Error::runtime(format!("bad zone {zone}")))?;
+        ed(|e| {
+            let (w, t) = (crate::editor::window_id_from_u64(w), crate::editor::window_id_from_u64(target));
+            e.drop_node(crate::layout::NodeRef::Window(w), crate::layout::NodeRef::Window(t), z)
+        })
+    })?)?;
+    // serpis.window.place_tab(win, tab_of, index): into the tab group holding window `tab_of`.
+    win.set("place_tab", lua.create_function(|_, (w, of, index): (u64, u64, usize)| {
+        ed(|e| {
+            let w = crate::layout::NodeRef::Window(crate::editor::window_id_from_u64(w));
+            match e.layout.parent_of(crate::layout::NodeRef::Window(crate::editor::window_id_from_u64(of))) {
+                Some(cid) => e.drop_into(w, cid, index.saturating_sub(1)),
+                None => false,
+            }
+        })
+    })?)?;
+    win.set("focus_id", lua.create_function(|_, w: u64| ed(|e| e.focus_window(crate::editor::window_id_from_u64(w))))?)?;
     win.set("configuration", lua.create_function(|lua, ()| {
         let c = ed(|e| e.window_configuration())?;
         lua.to_value(&c)
@@ -867,6 +908,51 @@ fn api(lua: &Lua) -> mlua::Result<Table> {
             })
         })?,
     )?;
+    // Raw pointer input for tests: mouse_move(x, y), mouse_button(x, y, "left"|"right"|"middle", pressed, mods).
+    debug.set("mouse_move", lua.create_function(|_, (x, y): (f32, f32)| ed(|e| {
+        e.injected_events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+        e.ctx.request_repaint();
+    }))?)?;
+    debug.set("mouse_button", lua.create_function(|_, (x, y, button, pressed, mods): (f32, f32, String, bool, Option<Vec<String>>)| {
+        let button = match button.as_str() {
+            "right" => egui::PointerButton::Secondary,
+            "middle" => egui::PointerButton::Middle,
+            _ => egui::PointerButton::Primary,
+        };
+        let mut m = egui::Modifiers::NONE;
+        for x in mods.unwrap_or_default() {
+            match x.as_str() {
+                "alt" => m.alt = true,
+                "shift" => m.shift = true,
+                "ctrl" => m.ctrl = true,
+                "cmd" => {
+                    m.mac_cmd = cfg!(target_os = "macos");
+                    m.command = true;
+                }
+                _ => {}
+            }
+        }
+        ed(|e| {
+            e.injected_events.push(egui::Event::PointerButton { pos: egui::pos2(x, y), button, pressed, modifiers: m });
+            e.ctx.request_repaint();
+        })
+    })?)?;
+    // Drop targets drawn last frame: {kind = "window"|"tabs"|"workspace", name?, x, y, w, h, tabs?}.
+    debug.set("drop_targets", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let rect = |r: &egui::Rect| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()});
+            e.drop_targets
+                .iter()
+                .map(|t| match t {
+                    crate::mouse::DropTarget::Window(w, r) => json!({"kind": "window", "id": crate::editor::window_id_to_u64(*w), "rect": rect(r)}),
+                    crate::mouse::DropTarget::Tabs { rect: r, tabs, .. } => json!({"kind": "tabs", "rect": rect(r), "tabs": tabs.iter().map(rect).collect::<Vec<_>>()}),
+                    crate::mouse::DropTarget::Workspace(n, r) => json!({"kind": "workspace", "name": n, "rect": rect(r)}),
+                })
+                .collect::<Vec<_>>()
+        })?;
+        lua.to_value(&v)
+    })?)?;
+    debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;
     debug.set("quit", lua.create_function(|_, ()| ed(|e| e.quit_requested = true))?)?;
     debug.set("messages", lua.create_function(|_, ()| ed(|e| e.messages.clone()))?)?;
     s.set("debug", debug)?;

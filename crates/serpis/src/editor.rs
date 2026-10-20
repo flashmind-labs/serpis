@@ -172,6 +172,10 @@ pub struct Editor {
     /// A container selected with `focus-parent`; window commands act on it instead of the
     /// focused window.
     pub selected: Option<NodeRef>,
+    /// A window, tab or group being dragged with the mouse.
+    pub drag: Option<crate::mouse::Drag>,
+    /// Drop targets registered while drawing this frame.
+    pub drop_targets: Vec<crate::mouse::DropTarget>,
     pub keymaps: Keymaps,
     pub commands: HashMap<String, Command>,
     pub hooks: HashMap<String, Vec<Hook>>,
@@ -247,6 +251,8 @@ impl Editor {
             workspace: "1".into(),
             prev_workspace: None,
             selected: None,
+            drag: None,
+            drop_targets: Vec::new(),
             keymaps: Keymaps::default(),
             commands: HashMap::new(),
             hooks: HashMap::new(),
@@ -1047,6 +1053,16 @@ impl Editor {
 pub fn buffer_id_to_u64(id: BufferId) -> u64 {
     use slotmap::Key;
     id.data().as_ffi()
+}
+
+/// Stable numeric form of a window id for Lua and JSON payloads.
+pub fn window_id_to_u64(id: WindowId) -> u64 {
+    use slotmap::Key;
+    id.data().as_ffi()
+}
+
+pub fn window_id_from_u64(v: u64) -> WindowId {
+    slotmap::KeyData::from_ffi(v).into()
 }
 
 pub fn buffer_id_from_u64(v: u64) -> BufferId {

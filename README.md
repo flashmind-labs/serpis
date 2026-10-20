@@ -65,7 +65,16 @@ Each workspace is a tree of containers holding any number of windows, laid out `
   `workspace-display-names`, `workspace-auto-back-and-forth`, `workspace-move-follows`,
   `workspace-keep-empty`, `workspace-initial-buffer`.
 
+With the mouse: drag a window header, a tab or a group's grip (`Alt`-drag a header for its whole
+container) onto a window's edge to split there, onto its middle to group as tabs, onto a tab bar to
+insert or reorder, or onto a workspace chip in the status bar (`+` makes a new one); `ESC` cancels.
+Middle-click closes a header or tab, double-click a header for fullscreen, the wheel over a tab bar
+switches tabs, and dividers drag. Right-click menus come from `window-menu` and `workspace-menu`,
+lists of `{label, command, args}` entries you can change (`mouse-middle-click-closes`,
+`mouse-double-click-fullscreen` and `mouse-drop-edge` tune the rest).
+
 From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configuration`,
+`serpis.window.list/place/place_tab` (what a drop does),
 `serpis.workspace.switch/move_window/list/rename`, and the hooks `workspace-switched` and
 `window-layout-changed`.
 

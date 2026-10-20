@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use serde_json::Value;
+
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::buffer::WindowId;
@@ -22,6 +24,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, ed.theme.bg);
     let body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - ECHO_H - GAP));
+    ed.drop_targets.clear();
     draw_layout(ui, ed, body);
     let echo = Rect::from_min_max(egui::pos2(full.left() + GAP, full.bottom() - ECHO_H), egui::pos2(full.right() - GAP, full.bottom()));
     draw_echo(ui, ed, echo);
@@ -36,6 +39,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
             }
         }
     }
+    crate::mouse::update_drag(ui, ed);
     for o in &ed.overlays {
         let p = ui.painter();
         p.rect_filled(o.rect, 3.0, o.color);
@@ -89,60 +93,175 @@ fn draw_child(ui: &mut egui::Ui, ed: &mut Editor, n: &Node, rect: Rect, rects: &
     }
 }
 
+/// Something a tab bar asked for this frame (applied after drawing it).
+enum TabAct {
+    Focus(usize),
+    Close(usize),
+    Drag(usize),
+    Menu(usize, crate::mouse::MenuAction),
+    SelectGroup,
+    DragGroup,
+}
+
+/// Tabs side by side (tabbed) or one title bar per child (stacked), then the focused child.
+/// Tabs click to focus, drag to move, close with × or the middle button, right-click for
+/// `window-menu`; the grip at the end drags (or, clicked, selects) the whole group; the wheel
+/// over the bar switches tabs.
+fn draw_tabs(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rects: &mut Vec<(u64, Rect)>) {
+    let n = c.children.len();
+    let tabbed = c.kind == Kind::Tabbed;
+    let bar_h = TAB_H * if tabbed { 1.0 } else { n as f32 };
+    let bar = Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_h));
+    let grip_w = 20.0;
+    let theme = ed.theme.clone();
+    let focused_child = c.focus.min(n - 1);
+    let holds_focus = |ch: &Node| {
+        let mut ws = Vec::new();
+        ch.leaves(&mut ws);
+        ws.contains(&ed.focused)
+    };
+    let items = ed.var("window-menu").cloned().unwrap_or(Value::Null);
+    let mut acts = Vec::new();
+    let mut tab_rects = Vec::new();
+    let font = FontId::proportional(theme.font_size - 1.5);
+    for (i, ch) in c.children.iter().enumerate() {
+        let r = if tabbed {
+            let w = (rect.width() - grip_w) / n as f32;
+            Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, TAB_H - 2.0))
+        } else {
+            Rect::from_min_size(egui::pos2(rect.left(), rect.top() + TAB_H * i as f32), egui::vec2(rect.width() - grip_w - 2.0, TAB_H - 2.0))
+        };
+        tab_rects.push(r);
+        let active = i == focused_child;
+        let resp = ui.interact(r, ui.scope_id().with(("tab", c.id, i)), Sense::click_and_drag());
+        let bg = if active && holds_focus(ch) {
+            theme.accent.gamma_multiply(0.35)
+        } else if active {
+            theme.bg_elevated
+        } else if resp.hovered() {
+            theme.border
+        } else {
+            theme.bg_alt
+        };
+        let p = ui.painter();
+        p.rect_filled(r, 4, bg);
+        let show_x = active || resp.hovered();
+        let text_clip = Rect::from_min_max(r.min + egui::vec2(2.0, 2.0), egui::pos2(r.right() - if show_x { 20.0 } else { 4.0 }, r.bottom() - 2.0));
+        let g = p.layout_no_wrap(node_title(ed, ch), font.clone(), if active { theme.fg } else { theme.fg_dim });
+        p.with_clip_rect(text_clip).galley(egui::pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, theme.fg);
+        if show_x {
+            let xr = Rect::from_center_size(egui::pos2(r.right() - 10.0, r.center().y), Vec2::splat(14.0));
+            let xresp = ui.interact(xr, ui.scope_id().with(("tab-x", c.id, i)), Sense::click());
+            let col = if xresp.hovered() { theme.fg } else { theme.fg_faint };
+            let k = xr.shrink(3.5);
+            ui.painter().line_segment([k.left_top(), k.right_bottom()], Stroke::new(1.2, col));
+            ui.painter().line_segment([k.right_top(), k.left_bottom()], Stroke::new(1.2, col));
+            if xresp.clicked() {
+                acts.push(TabAct::Close(i));
+                continue;
+            }
+        }
+        if resp.drag_started() {
+            acts.push(TabAct::Drag(i));
+        } else if resp.middle_clicked() && ed.var_bool("mouse-middle-click-closes") {
+            acts.push(TabAct::Close(i));
+        } else if resp.clicked() {
+            acts.push(TabAct::Focus(i));
+        }
+        let mut chosen = None;
+        resp.context_menu(|ui| crate::mouse::menu_ui(ui, ed, &items, &mut chosen));
+        if let Some(a) = chosen {
+            acts.push(TabAct::Menu(i, a));
+        }
+    }
+    // The group grip.
+    let grip = Rect::from_min_size(egui::pos2(rect.right() - grip_w, rect.top()), egui::vec2(grip_w, TAB_H - 2.0));
+    let gresp = ui.interact(grip, ui.scope_id().with(("tab-grip", c.id)), Sense::click_and_drag()).on_hover_text("Drag to move this group; click to select it");
+    let selected = ed.selected == Some(NodeRef::Container(c.id));
+    crate::mouse::paint_grip(ui.painter(), grip, if gresp.hovered() || selected { theme.accent } else { theme.fg_faint });
+    if gresp.drag_started() {
+        acts.push(TabAct::DragGroup);
+    } else if gresp.clicked() {
+        acts.push(TabAct::SelectGroup);
+    }
+    if gresp.hovered() && ed.drag.is_none() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    // The wheel over the bar steps through tabs.
+    if ui.rect_contains_pointer(bar) && ed.drag.is_none() {
+        // One tab per wheel event, so a trackpad fling doesn't race through them.
+        let step = ui.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::MouseWheel { delta, .. } => Some(if delta.y.abs() > delta.x.abs() { delta.y } else { delta.x }),
+                _ => None,
+            })
+        }).unwrap_or(0.0);
+        if step.abs() > 0.5 {
+            let next = if step < 0.0 { (focused_child + 1).min(n - 1) } else { focused_child.saturating_sub(1) };
+            if next != focused_child {
+                acts.push(TabAct::Focus(next));
+            }
+        }
+    }
+    ed.drop_targets.push(crate::mouse::DropTarget::Tabs { cid: c.id, rect: bar, tabs: tab_rects, horizontal: tabbed });
+
+    let body = Rect::from_min_max(egui::pos2(rect.left(), rect.top() + bar_h), rect.max);
+    if let Some(ch) = c.children.get(focused_child) {
+        draw_child(ui, ed, ch, body, rects);
+    }
+
+    for act in acts {
+        match act {
+            TabAct::Focus(i) | TabAct::Close(i) | TabAct::Drag(i) | TabAct::Menu(i, _) if i >= c.children.len() => {}
+            TabAct::Focus(i) => {
+                if let Some(w) = c.children[i].focus_leaf() {
+                    ed.focus_window(w);
+                }
+            }
+            TabAct::Close(i) => match c.children[i].as_ref() {
+                NodeRef::Window(w) => {
+                    ed.focus_window(w);
+                    ed.close_window();
+                }
+                r => {
+                    ed.delete_node(r);
+                }
+            },
+            TabAct::Drag(i) => {
+                let node = c.children[i].as_ref();
+                ed.drag = Some(crate::mouse::Drag { node, label: ed.node_label(node) });
+            }
+            TabAct::Menu(i, a) => {
+                let ch = &c.children[i];
+                if let Some(w) = ch.focus_leaf() {
+                    ed.focus_window(w);
+                }
+                if let NodeRef::Container(_) = ch.as_ref() {
+                    ed.selected = Some(ch.as_ref());
+                }
+                crate::mouse::run_action(ed, a);
+            }
+            TabAct::SelectGroup => {
+                if let Some(w) = c.children[focused_child].focus_leaf() {
+                    ed.focus_window(w);
+                }
+                ed.selected = Some(NodeRef::Container(c.id));
+            }
+            TabAct::DragGroup => {
+                let node = NodeRef::Container(c.id);
+                ed.drag = Some(crate::mouse::Drag { node, label: ed.node_label(node) });
+            }
+        }
+    }
+}
+
 fn draw_container(ui: &mut egui::Ui, ed: &mut Editor, c: &Container, rect: Rect, rects: &mut Vec<(u64, Rect)>) {
     rects.push((c.id, rect));
     if c.children.is_empty() {
         return;
     }
     if c.kind.single() {
-        // Tabs side by side, or one title bar per child stacked on top.
-        let n = c.children.len();
-        let bars = if c.kind == Kind::Tabbed { 1 } else { n };
-        let bar_h = TAB_H * bars as f32;
-        let theme = ed.theme.clone();
-        let focused_child = c.focus.min(n - 1);
-        let holds_focus = |ch: &Node| {
-            let mut ws = Vec::new();
-            ch.leaves(&mut ws);
-            ws.contains(&ed.focused)
-        };
-        let mut clicked = None;
-        for (i, ch) in c.children.iter().enumerate() {
-            let r = if c.kind == Kind::Tabbed {
-                let w = rect.width() / n as f32;
-                Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), egui::vec2(w - 2.0, TAB_H - 2.0))
-            } else {
-                Rect::from_min_size(egui::pos2(rect.left(), rect.top() + TAB_H * i as f32), egui::vec2(rect.width(), TAB_H - 2.0))
-            };
-            let active = i == focused_child;
-            let resp = ui.interact(r, ui.scope_id().with(("tab", c.id, i)), Sense::click());
-            let bg = if active && holds_focus(ch) {
-                theme.accent.gamma_multiply(0.35)
-            } else if active {
-                theme.bg_elevated
-            } else if resp.hovered() {
-                theme.border
-            } else {
-                theme.bg_alt
-            };
-            let p = ui.painter();
-            p.rect_filled(r, 4, bg);
-            let title = node_title(ed, ch);
-            let font = FontId::proportional(theme.font_size - 1.5);
-            let g = p.layout_no_wrap(title, font, if active { theme.fg } else { theme.fg_dim });
-            let clip = p.with_clip_rect(r.shrink(2.0));
-            clip.galley(egui::pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, theme.fg);
-            if resp.clicked() {
-                clicked = ch.focus_leaf();
-            }
-        }
-        if let Some(w) = clicked {
-            ed.focus_window(w);
-        }
-        let body = Rect::from_min_max(egui::pos2(rect.left(), rect.top() + bar_h), rect.max);
-        if let Some(ch) = c.children.get(focused_child) {
-            draw_child(ui, ed, ch, body, rects);
-        }
+        draw_tabs(ui, ed, c, rect, rects);
         return;
     }
     let horizontal = c.kind.horizontal();
@@ -206,6 +325,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         return;
     }
     ed.windows[w].rect = rect;
+    ed.drop_targets.push(crate::mouse::DropTarget::Window(w, rect));
     let focused = ed.focused == w && ed.minibuffer.is_none();
     let is_focus_win = ed.focused == w;
     let id = ed.windows[w].buffer;
@@ -274,6 +394,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         p.line_segment([r.center_top(), r.center_bottom()], s);
     })
     .on_hover_text("Split right");
+    let buttons_left = bx - 2.0;
     bx -= 10.0;
     let p = ui.painter();
     if let Some(st) = vim::state_of(ed, id) {
@@ -299,14 +420,46 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         bx -= 14.0;
     }
 
-    // Header interactions: name opens the buffer switcher, double-click maximizes.
-    let head_resp = ui.interact(Rect::from_min_max(header.min, egui::pos2(name_rect.right() + 8.0, header.bottom())), wid.with("head"), Sense::click());
-    if head_resp.clicked() {
-        ed.focus_window(w);
-        ed.call("switch-to-buffer");
+    // Header interactions: click the name for the buffer switcher, drag to move the window
+    // (Alt: its container), double-click for fullscreen, middle-click to close, right-click
+    // for `window-menu`.
+    let head_resp = ui.interact(Rect::from_min_max(header.min, egui::pos2(buttons_left, header.bottom())), wid.with("head"), Sense::click_and_drag());
+    let on_name = head_resp.interact_pointer_pos().or(head_resp.hover_pos()).is_some_and(|p| p.x <= name_rect.right() + 8.0);
+    if head_resp.drag_started() {
+        let alt = ui.input(|i| i.modifiers.alt);
+        let node = match ed.selected {
+            Some(sel) if ed.layout.within(NodeRef::Window(w), sel) => sel,
+            _ if alt => ed.layout.parent_of(NodeRef::Window(w)).map(NodeRef::Container).filter(|c| ed.layout.path(*c).is_some_and(|p| !p.is_empty())).unwrap_or(NodeRef::Window(w)),
+            _ => NodeRef::Window(w),
+        };
+        ed.drag = Some(crate::mouse::Drag { node, label: ed.node_label(node) });
     }
-    if head_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if head_resp.double_clicked() && ed.var_bool("mouse-double-click-fullscreen") {
+        ed.focus_window(w);
+        ed.call("window-fullscreen-toggle");
+    } else if head_resp.clicked() {
+        ed.focus_window(w);
+        if on_name {
+            ed.call("switch-to-buffer");
+        }
+    }
+    if head_resp.middle_clicked() && ed.var_bool("mouse-middle-click-closes") {
+        ed.focus_window(w);
+        ed.close_window();
+        return;
+    }
+    if head_resp.hovered() && ed.drag.is_none() {
+        ui.ctx().set_cursor_icon(if on_name { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Grab });
+    }
+    let items = ed.var("window-menu").cloned().unwrap_or(Value::Null);
+    let mut chosen = None;
+    head_resp.context_menu(|ui| crate::mouse::menu_ui(ui, ed, &items, &mut chosen));
+    if let Some(a) = chosen {
+        if !(ed.selected.is_some_and(|sel| ed.layout.within(NodeRef::Window(w), sel))) {
+            ed.focus_window(w);
+        }
+        crate::mouse::run_action(ed, a);
+        return;
     }
     if close.clicked() {
         ed.focus_window(w);
@@ -422,7 +575,8 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         right.push_str("   ");
     }
     right.push_str(&ed.var_str("keybinding-scheme").unwrap_or_else(|| "regular".into()));
-    p.text(rect.right_center() - egui::vec2(8.0, 0.0), Align2::RIGHT_CENTER, right, FontId::proportional(theme.font_size - 2.0), theme.fg_faint);
+    let r = p.text(rect.right_center() - egui::vec2(8.0, 0.0), Align2::RIGHT_CENTER, right, FontId::proportional(theme.font_size - 2.0), theme.fg_faint);
+    crate::mouse::workspace_chips(ui, ed, r.left() - 12.0, rect.center().y);
 }
 
 fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {

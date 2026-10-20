@@ -77,6 +77,24 @@ impl Dir {
     }
 }
 
+/// Where a dropped node lands relative to a target window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    /// Split the target, putting the node on that side.
+    Edge(Dir),
+    /// Group with the target as tabs.
+    Center,
+}
+
+impl Zone {
+    pub fn parse(s: &str) -> Option<Zone> {
+        match s {
+            "center" | "tab" => Some(Zone::Center),
+            d => Dir::parse(d).map(Zone::Edge),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Node {
     Window(WindowId),
@@ -395,6 +413,105 @@ impl LayoutTree {
         self.note_focus(new);
     }
 
+    /// Whether `inner` is `outer` or lies inside it.
+    pub fn within(&self, inner: NodeRef, outer: NodeRef) -> bool {
+        match (self.path(inner), self.path(outer)) {
+            (Some(i), Some(o)) => i.starts_with(&o),
+            _ => false,
+        }
+    }
+
+    /// Drop `r` on window/container `target`: beside it on an edge (wrapping the target when
+    /// its container runs the other way), or into a tab group with it at the center.
+    pub fn place(&mut self, r: NodeRef, target: NodeRef, zone: Zone) -> bool {
+        if self.within(target, r) || self.path(target).is_none_or(|p| p.is_empty()) {
+            return false;
+        }
+        let Some(node) = self.remove(r) else { return false };
+        let Some(path) = self.path(target) else { return false };
+        let (idx, parent) = match path.split_last() {
+            Some((i, p)) => (*i, p.to_vec()),
+            // The target became the root (removing `r` collapsed everything into it).
+            None => {
+                let kind = match zone {
+                    Zone::Edge(d) if d.horizontal() => Kind::SplitH,
+                    Zone::Edge(_) => Kind::SplitV,
+                    Zone::Center => Kind::Tabbed,
+                };
+                let first = matches!(zone, Zone::Edge(Dir::Left | Dir::Up));
+                let old = std::mem::replace(&mut self.root, Container::new(kind, Vec::new()));
+                let mut kids = vec![Node::Container(old), node];
+                if first {
+                    kids.reverse();
+                }
+                self.root = Container::new(kind, kids);
+                self.root.focus = if first { 0 } else { 1 };
+                self.normalize();
+                return true;
+            }
+        };
+        let c = self.container_mut(&parent).unwrap();
+        let (kind, fwd) = match zone {
+            Zone::Edge(d) => (if d.horizontal() { Kind::SplitH } else { Kind::SplitV }, d.forward()),
+            Zone::Center => (Kind::Tabbed, true),
+        };
+        let joins = match zone {
+            Zone::Edge(_) => c.kind == kind,
+            Zone::Center => c.kind.single(),
+        };
+        if joins {
+            let at = if fwd { idx + 1 } else { idx };
+            c.insert(at, node);
+            c.focus = at;
+        } else {
+            let t = std::mem::replace(&mut c.children[idx], Node::Window(WindowId::default()));
+            let mut kids = vec![t, node];
+            if !fwd {
+                kids.reverse();
+            }
+            let mut wrap = Container::new(kind, kids);
+            wrap.focus = if fwd { 1 } else { 0 };
+            c.children[idx] = Node::Container(wrap);
+            c.focus = idx;
+        }
+        self.normalize();
+        true
+    }
+
+    /// Put `r` at `index` among container `cid`'s children (tab bars: insert or reorder).
+    pub fn place_in(&mut self, r: NodeRef, cid: u64, index: usize) -> bool {
+        let target = NodeRef::Container(cid);
+        if self.within(target, r) {
+            return false;
+        }
+        if self.parent_of(r) == Some(cid) {
+            // Reorder in place: removing first could collapse a two-child group.
+            let path = self.path(target).unwrap();
+            let c = self.container_mut(&path).unwrap();
+            let Some(from) = c.children.iter().position(|n| n.is(r)) else { return false };
+            let to = if index > from { index - 1 } else { index }.min(c.children.len() - 1);
+            let n = c.children.remove(from);
+            let sz = c.sizes.remove(from);
+            c.children.insert(to, n);
+            c.sizes.insert(to, sz);
+            c.focus = to;
+            return true;
+        }
+        let Some(node) = self.remove(r) else { return false };
+        let Some(path) = self.path(target) else {
+            // Shouldn't happen (cid didn't hold r); put the node back at the root.
+            self.root.insert(self.root.children.len(), node);
+            self.normalize();
+            return false;
+        };
+        let c = self.container_mut(&path).unwrap();
+        let at = index.min(c.children.len());
+        c.insert(at, node);
+        c.focus = at;
+        self.normalize();
+        true
+    }
+
     /// Directional focus, i3-style: climb to the nearest container laid out along `dir` that
     /// has a neighbor that way, then enter the neighbor at its last-focused window.
     pub fn focus_dir(&self, from: WindowId, dir: Dir) -> Option<WindowId> {
@@ -700,6 +817,39 @@ mod tests {
         // H[a d V[b c]]: c moves right out of the column, which collapses to b.
         assert!(t.move_node(NodeRef::Window(w[2]), Dir::Right));
         assert_eq!(shape(&t, &w), "H[a d b c]");
+    }
+
+    #[test]
+    fn place_edges_center_and_tabs() {
+        let w = windows(4);
+        let mut t = LayoutTree::new(w[0]);
+        t.split(w[0], w[1], Kind::SplitH);
+        t.split(w[1], w[2], Kind::SplitH);
+        assert_eq!(shape(&t, &w), "H[a b c]");
+        // Edge along the container: beside the target.
+        assert!(t.place(NodeRef::Window(w[2]), NodeRef::Window(w[0]), Zone::Edge(Dir::Left)));
+        assert_eq!(shape(&t, &w), "H[c a b]");
+        // Edge across it: wrap the target.
+        assert!(t.place(NodeRef::Window(w[2]), NodeRef::Window(w[1]), Zone::Edge(Dir::Down)));
+        assert_eq!(shape(&t, &w), "H[a V[b c]]");
+        // Center: a tab group, then joining it.
+        assert!(t.place(NodeRef::Window(w[0]), NodeRef::Window(w[1]), Zone::Center));
+        assert_eq!(shape(&t, &w), "V[T[b a] c]");
+        // Never into itself.
+        let tab = t.parent_of(NodeRef::Window(w[0])).unwrap();
+        assert!(!t.place(NodeRef::Container(tab), NodeRef::Window(w[0]), Zone::Center));
+    }
+
+    #[test]
+    fn place_in_reorders_two_tabs() {
+        let w = windows(2);
+        let mut t = LayoutTree::new(w[0]);
+        t.split(w[0], w[1], Kind::SplitH);
+        t.root.kind = Kind::Tabbed;
+        let root = t.root.id;
+        assert!(t.place_in(NodeRef::Window(w[1]), root, 0));
+        assert_eq!(shape(&t, &w), "T[b a]");
+        assert_eq!(t.root.focus, 0);
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub mod keys;
 pub mod lua;
 pub mod minibuffer;
 pub mod motion;
+pub mod mouse;
 pub mod packages;
 pub mod plugins;
 pub mod project;
@@ -92,6 +93,7 @@ pub fn bootstrap(ed: &mut Editor) {
     commands::install(ed);
     wm::install(ed);
     workspace::install(ed);
+    mouse::install(ed);
     ed.define_buffer_kind("chat", o, |ed, _| Ok(Box::new(buffers::chat::ChatBuffer::new(ed))));
     ed.define_buffer_kind("terminal", o, |ed, _| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed)?)));
     ed.define_buffer_kind("text", o, |_, p| {

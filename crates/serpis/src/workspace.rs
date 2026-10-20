@@ -256,13 +256,6 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("workspace-display-names", json!({}), "Labels for workspaces, by name: {\"1\": \"一\", ...}.");
     ed.defvar("workspace-show-in-status", json!(true), "Show the current workspace in the status bar.");
 
-    ed.add_segment(false, "workspace", o, |ed, _| {
-        if !ed.var("workspace-show-in-status").and_then(Value::as_bool).unwrap_or(true) {
-            return None;
-        }
-        Some(format!("[{}]", ed.workspace_display(&ed.workspace.clone())))
-    });
-
     ed.define_command("workspace", "Switch to a workspace (name as parameter, else pick one with live preview).", o, |ed, a| {
         if let Some(name) = a.str(0).map(str::to_string).or_else(|| a.params.first().and_then(Value::as_u64).map(|n| n.to_string())) {
             ed.switch_workspace(&name);

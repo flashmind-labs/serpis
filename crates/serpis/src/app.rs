@@ -28,7 +28,9 @@ fn command_chord(c: char) -> KeyChord {
 }
 
 impl eframe::App for App {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // Context menus are egui popups: let them see ESC so it closes them.
+        let popup_open = egui::Popup::is_any_open(ctx);
         let ed = &mut self.ed;
         let mut keep = Vec::with_capacity(raw.events.len());
         let mut events = std::mem::take(&mut raw.events);
@@ -40,6 +42,11 @@ impl eframe::App for App {
                 tracing::debug!(target: "serpis::input", "{ev:?}");
             }
             match ev {
+                // ESC drops a window drag without moving anything.
+                Event::Key { key: egui::Key::Escape, pressed: true, .. } if ed.drag.is_some() => {
+                    ed.drag = None;
+                }
+                ev @ Event::Key { key: egui::Key::Escape, .. } if popup_open => keep.push(ev),
                 Event::Key { key, pressed: true, modifiers, .. } => {
                     let Some(chord) = chord_from_egui(key, modifiers) else { continue };
                     // Option+letter types characters on macOS unless the chord is bound
