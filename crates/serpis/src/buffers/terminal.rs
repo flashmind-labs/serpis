@@ -11,6 +11,7 @@
 
 use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -31,6 +32,7 @@ use crate::text::{Pos, TextSurface, char_len, ordered};
 
 const TERM: &str = "xterm-256color";
 const PAD: f32 = 6.0;
+const SCROLLBACK_LINES: usize = 20_000;
 /// How long to wait for the program to echo an editing key before giving up on it.
 const ECHO_TIMEOUT: Duration = Duration::from_millis(400);
 /// Fallback prompt detection when the shell doesn't mark prompts with OSC 133.
@@ -60,7 +62,12 @@ pub struct TerminalBuffer {
     pub copy_mode: bool,
     cursor: Pos,
     anchor: Option<Pos>,
-    text_cache: Option<Vec<String>>,
+    /// Row text, filled on demand. Rows that scrolled off stay valid as output arrives.
+    row_cache: RefCell<Vec<Option<String>>>,
+    /// Scrollback length when `row_cache` was last invalidated.
+    cached_scrollback: usize,
+    /// Bumped on every chunk of output.
+    output_gen: u64,
     origin: Pos2,
     out: Vec<u8>,
     title: String,
@@ -177,7 +184,7 @@ impl TerminalBuffer {
 
         let grid = Arc::new(AtomicU32::new(((cols as u32) << 16) | rows as u32));
         let mut term = Terminal::new(cols, rows).map_err(|e| anyhow::anyhow!("libghostty: {e:?}"))?;
-        term.set_scrollback_max_lines(Some(20_000)).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        term.set_scrollback_max_lines(Some(SCROLLBACK_LINES)).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let _ = term.set_terminfo_name(TERM);
         {
             let w = master.clone();
@@ -217,7 +224,9 @@ impl TerminalBuffer {
             copy_mode: false,
             cursor: Pos::ZERO,
             anchor: None,
-            text_cache: None,
+            row_cache: RefCell::new(Vec::new()),
+            cached_scrollback: 0,
+            output_gen: 0,
             origin: Pos2::ZERO,
             out: Vec::new(),
             title: String::new(),
@@ -304,6 +313,8 @@ impl TerminalBuffer {
             .set_unshifted_codepoint(ucp)
             .set_utf8(utf8);
         let before = self.out.len();
+        // libghostty's retry on a full buffer under-reserves and drops the key; leave room.
+        self.out.reserve(64);
         let _ = self.key_enc.set_options_from_terminal(&self.term).encode_to_vec(&self.key_ev, &mut self.out);
         if self.out.len() == before {
             if let Some(t) = utf8 {
@@ -338,13 +349,23 @@ impl TerminalBuffer {
         }
     }
 
-    fn lines(&mut self) -> &Vec<String> {
-        if self.text_cache.is_none() {
-            let total = self.term.total_rows().unwrap_or(0);
-            let out = (0..total).map(|y| self.row_text(y).trim_end().to_string()).collect();
-            self.text_cache = Some(out);
-        }
-        self.text_cache.as_ref().unwrap()
+    fn feed(&mut self, data: &[u8]) {
+        self.term.vt_write(data);
+        self.output_gen += 1;
+        self.invalidate_rows(false);
+    }
+
+    /// Drop cached rows that output may have changed: the active screen, or everything after a
+    /// resize, a cleared scrollback, or once the scrollback is full and old rows shift out.
+    fn invalidate_rows(&mut self, all: bool) {
+        let sb = self.term.scrollback_rows().unwrap_or(0);
+        let total = self.term.total_rows().unwrap_or(0);
+        let full = sb + self.rows as usize >= SCROLLBACK_LINES;
+        let keep = if all || full || sb < self.cached_scrollback { 0 } else { self.cached_scrollback };
+        let rows = self.row_cache.get_mut();
+        rows.truncate(keep);
+        rows.resize(total, None);
+        self.cached_scrollback = sb;
     }
 
     /// One screen row as text, one char per cell (blank and spacer cells are spaces).
@@ -379,10 +400,7 @@ impl TerminalBuffer {
         while !done(self) {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
             match self.rx.recv_timeout(left) {
-                Ok(PtyMsg::Data(d)) => {
-                    self.term.vt_write(&d);
-                    self.text_cache = None;
-                }
+                Ok(PtyMsg::Data(d)) => self.feed(&d),
                 Ok(PtyMsg::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.exit_seen = true;
                     return false;
@@ -462,7 +480,7 @@ impl TerminalBuffer {
             Some(p) if p.col + 1 >= self.cols as usize => Pos::new(p.line + 1, 0),
             Some(p) => Pos::new(p.line, p.col + 1),
             None => {
-                let text = self.row_text(first);
+                let text = self.line(first);
                 let m = self.prompt_re.as_ref().and_then(|re| re.find(&text)).map(|m| char_len(&text[..m.end()]));
                 if alt && m.is_none() {
                     return None;
@@ -471,8 +489,7 @@ impl TerminalBuffer {
             }
         };
         let start = start.min(cur);
-        let last_text = self.row_text(last);
-        let mut end = Pos::new(last, char_len(last_text.trim_end())).max(cur);
+        let mut end = Pos::new(last, self.line_len(last)).max(cur);
         if end > cur && self.is_suggestion(cur, end) {
             end = cur;
         }
@@ -650,7 +667,7 @@ impl Buffer for TerminalBuffer {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 PtyMsg::Data(d) => {
-                    self.term.vt_write(&d);
+                    self.feed(&d);
                     got = true;
                 }
                 PtyMsg::Exit => self.exit_seen = true,
@@ -665,7 +682,6 @@ impl Buffer for TerminalBuffer {
             ed.run_hook("terminal-exited", &serde_json::Value::Null);
         }
         if got {
-            self.text_cache = None;
             if let Ok(t) = self.term.title() {
                 self.title = t.to_string();
             }
@@ -694,7 +710,7 @@ impl Buffer for TerminalBuffer {
             unsafe {
                 nix::libc::ioctl(self.master.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws);
             }
-            self.text_cache = None;
+            self.invalidate_rows(true);
         }
 
         // Mouse wheel scrolls the scrollback (or is sent to apps that track the mouse).
@@ -933,11 +949,12 @@ impl Buffer for TerminalBuffer {
 
 impl TextSurface for TerminalBuffer {
     fn line_count(&self) -> usize {
-        self.text_cache.as_ref().map(Vec::len).unwrap_or_else(|| self.term.total_rows().unwrap_or(0)).max(1)
+        self.term.total_rows().unwrap_or(0).max(1)
     }
     fn line(&self, i: usize) -> String {
-        match &self.text_cache {
-            Some(c) => c.get(i).cloned().unwrap_or_default(),
+        let mut rows = self.row_cache.borrow_mut();
+        match rows.get_mut(i) {
+            Some(r) => r.get_or_insert_with(|| self.row_text(i).trim_end().to_string()).clone(),
             None => self.row_text(i).trim_end().to_string(),
         }
     }
@@ -946,11 +963,7 @@ impl TextSurface for TerminalBuffer {
     }
     fn set_cursor(&mut self, p: Pos) {
         self.enter_copy_mode();
-        let lines = self.lines();
-        let n = lines.len().max(1);
-        let line = p.line.min(n - 1);
-        let col = p.col.min(lines.get(line).map(|l| char_len(l)).unwrap_or(0));
-        self.cursor = Pos::new(line, col);
+        self.cursor = self.clamp(p);
         self.scroll_cursor_into_view();
     }
     fn anchor(&self) -> Option<Pos> {
@@ -1008,14 +1021,12 @@ impl TextSurface for TerminalBuffer {
             self.wait_until(ECHO_TIMEOUT, |t| expect.map_or(t.term_cursor() != before, |e| t.term_cursor() == e));
         }
         self.cursor = self.term_cursor();
-        let _ = self.lines();
         self.cursor
     }
     fn delete(&mut self, from: Pos, to: Pos) -> String {
         let Some(inp) = self.input() else { return String::new() };
         let (a, b) = ordered(from, to);
         let (a, b) = (a.clamp(inp.start, inp.end), b.clamp(inp.start, inp.end));
-        let _ = self.lines();
         let text = if a < b { self.text_range(a, b) } else { String::new() };
         if a < b && self.drive_to(b) {
             // Backspace from the end, stopping on the echoed cursor rather than a key count:
@@ -1034,7 +1045,6 @@ impl TextSurface for TerminalBuffer {
             }
         }
         self.cursor = self.term_cursor();
-        let _ = self.lines();
         text
     }
     /// Line editors' undo (readline, zle, Claude Code) is C-_.
@@ -1042,19 +1052,12 @@ impl TextSurface for TerminalBuffer {
         if self.input().is_none() {
             return false;
         }
-        let _ = self.lines();
         self.write(b"\x1f");
-        if self.wait_until(ECHO_TIMEOUT, |t| t.text_cache.is_none()) {
+        let seen = self.output_gen;
+        if self.wait_until(ECHO_TIMEOUT, |t| t.output_gen != seen) {
             self.wait_until(Duration::from_millis(30), |_| false);
         }
         self.cursor = self.term_cursor();
-        let _ = self.lines();
         true
-    }
-    fn undo_boundary(&mut self) {
-        // Prime the text cache so read-only queries see fresh scrollback.
-        if self.copy_mode || self.text_cache.is_none() {
-            let _ = self.lines();
-        }
     }
 }
