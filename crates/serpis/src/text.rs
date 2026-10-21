@@ -90,6 +90,12 @@ pub trait TextSurface {
     fn visible_lines(&self) -> Range<usize>;
     /// Screen rectangle of the character at `p`, if visible. Used by overlays such as jump labels.
     fn screen_rect(&self, p: Pos) -> Option<Rect>;
+    /// `p` moved by `rows` screen rows (a wrapped line has several) at screen x `goal_x` (the
+    /// cursor's when None), with the x used: vim's gj/gk. None when the surface doesn't wrap or
+    /// the row isn't on screen; callers fall back to whole lines.
+    fn display_move(&self, _p: Pos, _rows: isize, _goal_x: Option<f32>) -> Option<(Pos, f32)> {
+        None
+    }
     /// Ask the view to scroll the cursor into view on the next frame.
     fn reveal_cursor(&mut self);
     /// Lines per page, for paging motions.
@@ -694,6 +700,37 @@ impl DocView {
         Some(Rect::from_min_size(pl.origin + r.min.to_vec2(), egui::vec2(w.max(6.0), r.height())))
     }
 
+    /// `p` moved by `rows` screen rows over the lines laid out last frame (see
+    /// `TextSurface::display_move`).
+    pub fn display_move(&self, p: Pos, rows: isize, goal_x: Option<f32>) -> Option<(Pos, f32)> {
+        // Every row on screen: (placed line, row, its first char, last row of its line).
+        let mut vis: Vec<(usize, usize, usize, bool)> = Vec::new();
+        for (pi, pl) in self.placed.iter().enumerate() {
+            let n = pl.galley.rows.len();
+            let mut start = 0;
+            for (ri, row) in pl.galley.rows.iter().enumerate() {
+                vis.push((pi, ri, start, ri + 1 == n));
+                start += row.char_count_including_newline().0;
+            }
+        }
+        let cur = vis.iter().position(|&(pi, ri, s, last)| {
+            let pl = &self.placed[pi];
+            let n = pl.galley.rows[ri].char_count_excluding_newline().0;
+            pl.line == p.line && p.col >= s && (p.col < s + n || last)
+        })?;
+        let (pi, ri, s, _) = vis[cur];
+        let (pl, row) = (&self.placed[pi], &self.placed[pi].galley.rows[ri]);
+        let x = goal_x.unwrap_or_else(|| pl.origin.x + row.pos.x + row.x_offset(egui::epaint::text::CharIndex(p.col - s)));
+        let target = usize::try_from(cur as isize + rows).ok().filter(|t| *t < vis.len())?;
+        let (tpi, tri, ts, tlast) = vis[target];
+        let (tpl, trow) = (&self.placed[tpi], &self.placed[tpi].galley.rows[tri]);
+        let n = trow.char_count_excluding_newline().0;
+        let c = trow.char_at(x - tpl.origin.x - trow.pos.x).0;
+        // A wrapped row ends where the next begins: stay on this row's last character.
+        let c = if tlast { c.min(n) } else { c.min(n.saturating_sub(1)) };
+        Some((Pos::new(tpl.line, ts + c), x))
+    }
+
     /// Text position under a screen point, if over the text.
     pub fn pos_at(&self, pt: Pos2) -> Option<Pos> {
         let pl = self
@@ -1151,6 +1188,9 @@ impl TextSurface for TextArea {
     }
     fn screen_rect(&self, p: Pos) -> Option<Rect> {
         self.view.screen_rect(p)
+    }
+    fn display_move(&self, p: Pos, rows: isize, goal_x: Option<f32>) -> Option<(Pos, f32)> {
+        self.view.display_move(p, rows, goal_x)
     }
     fn reveal_cursor(&mut self) {
         self.view.reveal_cursor();

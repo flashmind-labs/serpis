@@ -73,6 +73,8 @@ struct Vim {
     /// The column `j`/`k` aim for (vim's curswant): set by vertical motions and `$` (the line
     /// end), forgotten by anything else.
     goal: Option<usize>,
+    /// The screen x gj/gk aim for (kept like `goal`).
+    goal_x: Option<f32>,
     kept_goal: bool,
 }
 
@@ -134,6 +136,7 @@ fn initial_state(ed: &Editor, major: &str) -> State {
 }
 
 pub fn enable(ed: &mut Editor) {
+    ed.defvar("vim-display-lines", json!(false), "j/k move by screen rows (wrapped lines count as several) and gj/gk by whole lines, like `nnoremap j gj` and `nnoremap gj j` in vim. Operators (dj, yk) stay linewise.");
     ed.defvar("vim-g-commands", json!({"w": "jump-word"}), "Commands for g-prefixed keys vim doesn't define itself, e.g. {w = \"jump-word\"} for gw.");
     VIM.with(|v| {
         *v.borrow_mut() = Some(Rc::new(RefCell::new(Vim {
@@ -143,6 +146,7 @@ pub fn enable(ed: &mut Editor) {
             replaying: false,
             yank_linewise: false,
             goal: None,
+            goal_x: None,
             kept_goal: false,
         })))
     });
@@ -508,6 +512,7 @@ fn intercept(ed: &mut Editor, chord: &KeyChord) -> KeyResult {
             vm.pending = Pending::default();
             if !vm.kept_goal {
                 vm.goal = None;
+                vm.goal_x = None;
             }
             // Normal state never rests past the last character (after undo, a visual delete, ...).
             if state_of(ed, id) == Some(State::Normal) {
@@ -853,6 +858,8 @@ fn handle(ed: &mut Editor, vm: &mut Vim, st: State, chord: &KeyChord) -> Step {
             }
             'g' => {
                 return match c {
+                    // gj/gk: by screen rows (by whole lines when vim-display-lines swaps them).
+                    'j' | 'k' => vertical(ed, vm, st, c, count, count_given, !ed.var_bool("vim-display-lines")),
                     'g' => {
                         let line = if count_given { count - 1 } else { 0 };
                         let target = ed.with_surface(|s, _| motion::line_first_nonblank(s, line.min(s.line_count().saturating_sub(1))));
@@ -1041,6 +1048,7 @@ fn handle(ed: &mut Editor, vm: &mut Vim, st: State, chord: &KeyChord) -> Step {
     }
 
     match c {
+        'j' | 'k' if ed.var_bool("vim-display-lines") => return vertical(ed, vm, st, c, count, count_given, true),
         _ if is_motion_key(c) => return do_motion(ed, vm, st, c, count, count_given),
         'f' | 'F' | 't' | 'T' | 'r' | 'g' | 'z' => {
             vm.pending.prefix = Some(c);
@@ -1295,6 +1303,32 @@ fn cross_part(ed: &mut Editor, vm: &mut Vim, st: State, c: char, count: usize) -
     vm.goal = Some(goal);
     vm.kept_goal = true;
     true
+}
+
+/// j/k (`c`), by screen rows when `display` (gj/gk: a wrapped line counts as several rows),
+/// keeping the screen x. Where the surface doesn't wrap, or the row is off screen, they move by
+/// whole lines (which also crosses between a chat's prompt and transcript).
+fn vertical(ed: &mut Editor, vm: &mut Vim, st: State, c: char, count: usize, has_count: bool, display: bool) -> Step {
+    let start = ed.with_surface(|s, _| s.cursor()).unwrap_or_default();
+    if display {
+        let rows = if c == 'j' { count as isize } else { -(count as isize) };
+        let goal_x = vm.goal_x;
+        if let Some((t, x)) = ed.with_surface(|s, _| s.display_move(start, rows, goal_x)).flatten() {
+            vm.goal_x = Some(x);
+            vm.kept_goal = true;
+            return match vm.pending.op {
+                Some(op) => Step::Done { change: apply_operator(ed, vm, op, start, t, Kind::Exclusive) },
+                None => finish_motion(ed, vm, st, t, Kind::Exclusive),
+            };
+        }
+    }
+    match vm.pending.op {
+        Some(op) => {
+            let Some((t, kind)) = motion_target(ed, vm, c, count, has_count) else { return Step::Invalid };
+            Step::Done { change: apply_operator(ed, vm, op, start, t, kind) }
+        }
+        None => do_motion(ed, vm, st, c, count, has_count),
+    }
 }
 
 fn do_motion(ed: &mut Editor, vm: &mut Vim, st: State, c: char, count: usize, has_count: bool) -> Step {

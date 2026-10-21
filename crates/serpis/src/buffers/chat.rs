@@ -2101,6 +2101,12 @@ impl TextSurface for ChatBuffer {
             Focus::Prompt => self.prompt.screen_rect(p),
         }
     }
+    fn display_move(&self, p: Pos, rows: isize, goal_x: Option<f32>) -> Option<(Pos, f32)> {
+        match self.focus {
+            Focus::Transcript => self.view.display_move(p, rows, goal_x),
+            Focus::Prompt => self.prompt.display_move(p, rows, goal_x),
+        }
+    }
     fn reveal_cursor(&mut self) {
         match self.focus {
             Focus::Transcript => self.view.reveal_cursor(),
