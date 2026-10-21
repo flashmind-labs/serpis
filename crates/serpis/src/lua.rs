@@ -1363,6 +1363,17 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // Record views' scroll positions as they are drawn: trace_scroll(true) starts, then
+    // trace_scroll() returns {{t, y}} and stops.
+    debug.set("trace_scroll", lua.create_function(|lua, on: Option<bool>| {
+        let mut t = crate::text::SCROLL_TRACE.lock().unwrap();
+        if on == Some(true) {
+            *t = Some(Vec::new());
+            return Ok(LuaValue::Nil);
+        }
+        let v: Vec<Value> = t.take().unwrap_or_default().into_iter().map(|(time, y)| json!([time, y])).collect();
+        lua_of(lua, &v)
+    })?)?;
     // Where text position (line, col) (1-based) of the focused buffer is on screen: {x, y, w, h}.
     debug.set("cell_rect", lua.create_function(|lua, (line, col): (usize, usize)| {
         let v = ed(|e| e.with_surface(|s, _| s.screen_rect(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1)))).flatten())?;

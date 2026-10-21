@@ -55,7 +55,7 @@ steps({
     T.check("and settles with the cursor in view", l >= first and l <= last, true)
     -- A line taller than its view: a long prompt in a chat's composer (it scrolls past 40% of
     -- the window). Walking down its rows with gj keeps the cursor's row inside the composer.
-    serpis.var.set("scroll-animation-speed", 0)
+    serpis.var.set("scroll-animation-time", 0)
     serpis.command.run("new-chat")
   end,
   function()

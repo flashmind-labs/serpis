@@ -624,20 +624,38 @@ pub struct DocView {
     /// Where the scrollbar thumb was grabbed (offset from its top) during a drag.
     bar_grab: Option<f32>,
     drag_anchor: Option<Pos>,
-    /// Where keyboard scrolling is heading; `scroll_y` eases toward it.
+    /// Where keyboard scrolling is heading; `scroll_y` follows on a spring.
     scroll_target: Option<f32>,
+    /// The spring's velocity (points per second). Kept when the target moves again, so a held
+    /// key glides at a steady speed instead of surging on every repeat.
+    scroll_vel: f32,
 }
 
-/// How fast keyboard scrolling eases toward its target (per second; 0: jump). Set from the
-/// `scroll-animation-speed` setting.
-static SCROLL_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x41a0_0000); // 20.0
+/// How long keyboard scrolling takes to settle, in seconds (0: jump). Set from the
+/// `scroll-animation-time` setting.
+static SCROLL_TIME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3e4c_cccd); // 0.2
 
-pub fn set_scroll_speed(v: f32) {
-    SCROLL_SPEED.store(v.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+/// Debug: when on, every view records (time, scroll) each time it is drawn (scroll tests).
+pub static SCROLL_TRACE: std::sync::Mutex<Option<Vec<(f64, f32)>>> = std::sync::Mutex::new(None);
+
+pub fn set_scroll_time(v: f32) {
+    SCROLL_TIME.store(v.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
-fn scroll_speed() -> f32 {
-    f32::from_bits(SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed))
+fn scroll_time() -> f32 {
+    f32::from_bits(SCROLL_TIME.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// One step of a critically damped spring from `pos` (velocity `vel`) toward `target`: smooth
+/// even when the target keeps moving ("SmoothCD", Game Programming Gems 4).
+fn spring(pos: f32, vel: f32, target: f32, settle: f32, dt: f32) -> (f32, f32) {
+    // Settled (within ~1%) after `settle` seconds.
+    let omega = 6.6 / settle.max(0.001);
+    let x = omega * dt;
+    let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+    let delta = pos - target;
+    let temp = (vel + omega * delta) * dt;
+    (target + (delta + temp) * exp, (vel - omega * temp) * exp)
 }
 
 impl Default for DocView {
@@ -660,6 +678,7 @@ impl Default for DocView {
             bar_grab: None,
             drag_anchor: None,
             scroll_target: None,
+            scroll_vel: 0.0,
         }
     }
 }
@@ -847,6 +866,7 @@ impl DocView {
                     let t = ((p.y - grab - rect.top()) / (view_h - bar_h).max(1.0)).clamp(0.0, 1.0);
                     self.scroll_y = t * max_scroll;
                     self.scroll_target = None;
+                    self.scroll_vel = 0.0;
                     self.follow_tail = t >= 0.999;
                     resp.scrolled = true;
                 }
@@ -867,6 +887,7 @@ impl DocView {
             if dy != 0.0 {
                 // The wheel is smoothed already; it takes over from keyboard scrolling.
                 self.scroll_y = self.scroll_target.take().unwrap_or(self.scroll_y) - dy;
+                self.scroll_vel = 0.0;
                 if dy > 0.0 {
                     self.follow_tail = false;
                     resp.scrolled = true;
@@ -898,7 +919,7 @@ impl DocView {
             };
             if let Some(goal) = goal {
                 let goal = goal.clamp(0.0, max_scroll);
-                if scroll_speed() <= 0.0 {
+                if scroll_time() <= 0.0 {
                     self.scroll_y = goal;
                 } else {
                     // Long jumps (gg, G) skip most of the way, so they don't take long.
@@ -913,19 +934,24 @@ impl DocView {
         if self.follow_tail {
             self.scroll_y = max_scroll;
             self.scroll_target = None;
+            self.scroll_vel = 0.0;
         }
         if let Some(t) = self.scroll_target {
             let t = t.clamp(0.0, max_scroll);
             let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
-            self.scroll_y += (t - self.scroll_y) * (1.0 - (-dt * scroll_speed()).exp());
-            if (t - self.scroll_y).abs() < 0.5 {
+            (self.scroll_y, self.scroll_vel) = spring(self.scroll_y, self.scroll_vel, t, scroll_time(), dt);
+            if (t - self.scroll_y).abs() < 0.3 && self.scroll_vel.abs() < 5.0 {
                 self.scroll_y = t;
                 self.scroll_target = None;
+                self.scroll_vel = 0.0;
             } else {
                 ui.ctx().request_repaint();
             }
         }
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
+        if let Some(t) = SCROLL_TRACE.lock().unwrap().as_mut() {
+            t.push((ui.input(|i| i.time), self.scroll_y));
+        }
         if self.scroll_y >= max_scroll - 1.0 && resp.scrolled {
             // Scrolling back to the end re-enables following.
         }

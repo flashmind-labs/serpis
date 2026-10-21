@@ -6,6 +6,7 @@ models.json). What it says depends on the last user message:
   THINK ...       think six lines, then reply "ok"
   TOOL ...        call bash `echo hi`
   CODE ...        reply with a fenced Rust code block
+  LONG ...        reply with a long answer (paragraphs, lists, code, a table)
   READ:<path>     call read on that path
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
@@ -59,6 +60,15 @@ class Handler(BaseHTTPRequestHandler):
             call = None
             if prompt.startswith("THINK"):
                 delta["reasoning_content"] = "\n".join(f"step {i}" for i in range(1, 7))
+            if prompt.startswith("LONG"):
+                parts = []
+                for i in range(1, 41):
+                    parts.append(f"## Section {i}\n\nThis paragraph is long enough to wrap across several rows in the chat's reading column, " * 3)
+                    parts.append("- first point\n- second point with `code`\n- third point")
+                    parts.append("```rust\nfn f(x: u32) -> u32 {\n    x * 2\n}\n```")
+                    if i % 5 == 0:
+                        parts.append("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |")
+                delta["content"] = "\n\n".join(parts)
             if prompt.startswith("CODE"):
                 delta["content"] = "Here:\n\n```rust\n// add two numbers\nfn add(a: i32, b: i32) -> i32 {\n    a + b // \"sum\"\n}\n```\n"
             if prompt.startswith("READ:"):

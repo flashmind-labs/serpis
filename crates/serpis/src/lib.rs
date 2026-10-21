@@ -106,10 +106,10 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("minibuffer-style", json!("palette"), "Where prompts appear: \"palette\" (a floating card near the top, like a command palette) or \"bottom\" (the echo area, Emacs style).");
     ed.defvar("chat-show-thinking", json!(true), "Show the model's thinking in chats; when false only its header (\"Thought · 12 lines\") is shown. chat-toggle-thinking flips it.");
     ed.defvar("chat-show-usage", json!(true), "Show the session's usage in the chat's composer, like pi's footer: ↑input ↓output Rcache-read Wcache-write $cost context%/window.");
-    ed.defvar("scroll-animation-speed", json!(20.0), "How quickly views ease to where keyboard motions scroll them (j/k past the edge, page keys); higher is snappier, 0 jumps.");
+    ed.defvar("scroll-animation-time", json!(0.2), "Seconds views take to glide where keyboard motions scroll them (j/k past the edge, page keys). Holding a key glides at a steady speed; 0 jumps.");
     ed.add_hook("variable-changed", editor::BUILTIN, |ed, p| {
-        if p.get("name").and_then(Value::as_str) == Some("scroll-animation-speed") {
-            text::set_scroll_speed(ed.var("scroll-animation-speed").and_then(Value::as_f64).unwrap_or(20.0) as f32);
+        if p.get("name").and_then(Value::as_str) == Some("scroll-animation-time") {
+            text::set_scroll_time(ed.var("scroll-animation-time").and_then(Value::as_f64).unwrap_or(0.2) as f32);
         }
         None
     });
