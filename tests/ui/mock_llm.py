@@ -5,6 +5,8 @@ models.json). What it says depends on the last user message:
 
   THINK ...       think six lines, then reply "ok"
   TOOL ...        call bash `echo hi`
+  CODE ...        reply with a fenced Rust code block
+  READ:<path>     call read on that path
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
   anything else   reply "ok"
@@ -55,7 +57,11 @@ class Handler(BaseHTTPRequestHandler):
             call = None
             if prompt.startswith("THINK"):
                 delta["reasoning_content"] = "\n".join(f"step {i}" for i in range(1, 7))
-            if prompt.startswith("TOOL"):
+            if prompt.startswith("CODE"):
+                delta["content"] = "Here:\n\n```rust\n// add two numbers\nfn add(a: i32, b: i32) -> i32 {\n    a + b // \"sum\"\n}\n```\n"
+            if prompt.startswith("READ:"):
+                call = ("read", {"path": prompt[5:]})
+            elif prompt.startswith("TOOL"):
                 call = ("bash", {"command": "echo hi"})
             elif prompt.startswith("LUA:"):
                 call = ("serpis_lua", {"code": prompt[4:]})

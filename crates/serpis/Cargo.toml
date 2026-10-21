@@ -36,6 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arboard = "3"
 url = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Syntax highlighting: syntect with bat's grammars (two-face), pure-Rust regexes.
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Same winit as eframe; used to drop the default app menu (Cmd-H/Cmd-Q would never reach keymaps).

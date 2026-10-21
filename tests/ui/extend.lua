@@ -310,5 +310,37 @@ steps({
   function()
     local t = serpis.chat.transcript(other)
     T.check("C-t twice resets folds by hand", t:find("step 6", 1, true) ~= nil and t:find("step 1", 1, true) == nil, true)
+    -- Code in answers and in read output (highlighting itself is unit-tested in highlight.rs).
+    local f = io.open(tmp .. "/lib.rs", "w")
+    f:write("/// Doubles it.\npub fn double(x: u32) -> u32 {\n    x * 2\n}\n")
+    f:close()
+    serpis.chat.prompt(other, "CODE please")
+  end,
+  function(go)
+    settled(other, go, 17)
+    return false
+  end,
+  function()
+    T.check("code blocks render", serpis.chat.transcript(other):find("fn add(a: i32, b: i32) -> i32 {", 1, true) ~= nil, true)
+    serpis.chat.prompt(other, "READ:" .. tmp .. "/lib.rs")
+  end,
+  function(go)
+    settled(other, go, 19)
+    return false
+  end,
+  function()
+    -- Read output starts folded: TAB on its card opens it.
+    serpis.command.run("chat-focus-transcript")
+    local n, at = 0, nil
+    for l in (serpis.chat.transcript(other) .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if l:find("lib.rs", 1, true) then at = n end
+    end
+    serpis.buffer.set_cursor(at or 1, 1)
+    d.key("Tab")
+  end,
+  function()
+    T.check("read output renders", serpis.chat.transcript(other):find("pub fn double", 1, true) ~= nil, true)
+    if os.getenv("SERPIS_TEST_SHOTS") then serpis.debug.screenshot(os.getenv("SERPIS_TEST_SHOTS") .. "/highlight.png") end
   end,
 })

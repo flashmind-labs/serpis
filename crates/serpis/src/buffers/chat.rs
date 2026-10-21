@@ -1244,9 +1244,10 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
             i += 1;
             let mut lines: Vec<StyledLine> = Vec::new();
             if !lang.is_empty() {
-                lines.push(StyledLine::new(lang, Face::Meta).pad(8.0 * k, 0.0));
+                lines.push(StyledLine::new(lang.clone(), Face::Meta).pad(8.0 * k, 0.0));
             }
-            lines.extend(code.iter().map(|l| StyledLine::new(*l, Face::Code)));
+            let hl = crate::highlight::highlight(&lang, &code, Face::Code).unwrap_or_default();
+            lines.extend(code.iter().enumerate().map(|(j, l)| StyledLine::new(*l, Face::Code).spans(hl.get(j).cloned().unwrap_or_default())));
             if lines.is_empty() {
                 lines.push(StyledLine::new("", Face::Code));
             }
@@ -1319,6 +1320,28 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
         prev_list = false;
     }
     out
+}
+
+/// Highlight spans moved right by `by` bytes (past a prefix the code didn't have).
+fn shift(spans: Option<&crate::highlight::Spans>, by: usize) -> crate::highlight::Spans {
+    spans.map(|s| s.iter().map(|(r, f)| (r.start + by..r.end + by, *f)).collect()).unwrap_or_default()
+}
+
+/// Where the code starts in an edit diff line (`+12 code`, `-3 code`, ` 7 code`).
+fn diff_code_start(l: &str) -> Option<usize> {
+    let b = l.as_bytes();
+    if !matches!(b.first(), Some(b'+' | b'-' | b' ')) {
+        return None;
+    }
+    let mut i = 1;
+    while b.get(i) == Some(&b' ') {
+        i += 1;
+    }
+    let digits = i;
+    while b.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    (i > digits && b.get(i) == Some(&b' ')).then_some(i + 1)
 }
 
 fn default_expanded(name: &str, result: Option<&ToolResultMessage>) -> bool {
@@ -1417,24 +1440,32 @@ fn tool_lines(
     let diff = result.and_then(|r| r.details.get("diff")).and_then(Value::as_str);
     if let (Some(d), Some(r)) = (diff, result) {
         if !r.is_error {
-            for l in d.lines() {
+            // Lines are `+12 code`: highlight the code after the sign and line number.
+            let lines: Vec<&str> = d.lines().collect();
+            let starts: Vec<Option<usize>> = lines.iter().map(|l| diff_code_start(l)).collect();
+            let code: Vec<&str> = lines.iter().zip(&starts).map(|(l, s)| s.map_or("", |s| &l[s..])).collect();
+            let hl = crate::highlight::highlight(arg(args, "path"), &code, Face::Code).unwrap_or_default();
+            for (i, l) in lines.iter().enumerate() {
                 let (face, tint) = match l.chars().next() {
                     Some('+') => (Face::DiffAdd, Some(t.diff_add_bg)),
                     Some('-') => (Face::DiffDel, Some(t.diff_del_bg)),
                     _ => (Face::DiffContext, None),
                 };
-                body.push((StyledLine::new(l, face), tint));
+                let spans = starts[i].map(|s| shift(hl.get(i), s)).unwrap_or_default();
+                body.push((StyledLine::new(*l, face).spans(spans), tint));
             }
         }
     }
     if body.is_empty() {
         if name == "write" && result.is_none_or(|r| !r.is_error) {
             let content = arg(args, "content");
-            let n = content.lines().count();
-            if n > 0 {
-                body.push((StyledLine::new(format!("{n} lines"), Face::Meta), None));
-                for l in content.lines() {
-                    body.push((StyledLine::new(format!("+ {l}"), Face::DiffAdd), Some(t.diff_add_bg)));
+            let lines: Vec<&str> = content.lines().collect();
+            if !lines.is_empty() {
+                body.push((StyledLine::new(format!("{} lines", lines.len()), Face::Meta), None));
+                let hl = crate::highlight::highlight(arg(args, "path"), &lines, Face::DiffAdd).unwrap_or_default();
+                for (i, l) in lines.iter().enumerate() {
+                    let spans = shift(hl.get(i), 2);
+                    body.push((StyledLine::new(format!("+ {l}"), Face::DiffAdd).spans(spans), Some(t.diff_add_bg)));
                 }
             }
         } else if name == "bash" {
@@ -1449,8 +1480,11 @@ fn tool_lines(
             }
         } else if let Some(r) = result {
             let face = if r.is_error { Face::ToolError } else { Face::ToolOutput };
-            for l in tool_text(r).lines() {
-                body.push((StyledLine::new(l, face), None));
+            let text = tool_text(r);
+            let lines: Vec<&str> = text.lines().collect();
+            let hl = if name == "read" && !r.is_error { crate::highlight::highlight(arg(args, "path"), &lines, face) } else { None }.unwrap_or_default();
+            for (i, l) in lines.iter().enumerate() {
+                body.push((StyledLine::new(*l, face).spans(hl.get(i).cloned().unwrap_or_default()), None));
             }
         }
     }
@@ -1964,6 +1998,15 @@ impl TextSurface for ChatBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_lines_find_their_code() {
+        assert_eq!(diff_code_start("+12 let x = 1;"), Some(4));
+        assert_eq!(diff_code_start("- 3 }"), Some(4));
+        assert_eq!(diff_code_start("  7 fn f()"), Some(4));
+        assert_eq!(diff_code_start("   ..."), None);
+        assert_eq!(diff_code_start("@@ hunk"), None);
+    }
 
     #[test]
     fn durations_read_at_a_glance() {

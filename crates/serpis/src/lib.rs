@@ -12,6 +12,7 @@ pub mod buffer;
 pub mod buffers;
 pub mod chat_api;
 pub mod extend;
+pub mod highlight;
 pub mod chrome;
 pub mod clipboard;
 pub mod commands;
@@ -117,6 +118,7 @@ pub fn bootstrap(ed: &mut Editor) {
     pickers::install(ed);
     jump::install(ed);
     extend::install(ed);
+    highlight::preload();
     ed.define_buffer_kind("chat", o, |ed, p| Ok(Box::new(buffers::chat::ChatBuffer::new(ed, p))));
     ed.define_buffer_kind("terminal", o, |ed, p| Ok(Box::new(buffers::terminal::TerminalBuffer::new(ed, p)?)));
     ed.define_buffer_kind("text", o, |_, p| {
