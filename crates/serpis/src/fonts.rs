@@ -169,6 +169,20 @@ pub fn apply(ed: &mut Editor) {
             defs.families.entry(family).or_default().insert(0, key.into());
         }
     }
+    // Fallbacks come right after the chosen fonts, before egui's own: its icon font puts
+    // unrelated icons where Nerd Fonts have theirs (yazi's file icons and separators).
+    let fallbacks: Vec<String> = ed.var("font-fallbacks").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let mut at = 1;
+    for (i, spec) in fallbacks.iter().enumerate() {
+        let Some(data) = resolve(spec) else { continue };
+        let key = format!("serpis-fallback-{i}");
+        defs.font_data.insert(key.clone(), Arc::new(data));
+        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+            let list = defs.families.entry(family).or_default();
+            list.insert(at.min(list.len()), key.clone());
+        }
+        at += 1;
+    }
     ed.ctx.set_fonts(defs);
     ed.theme.tracking = match ed.var("font-tracking") {
         Some(Value::Number(n)) => vec![(0.0, n.as_f64().unwrap_or(0.0) as f32)],
@@ -205,6 +219,7 @@ pub fn scale(ed: &mut Editor, delta: f32) {
 pub fn install(ed: &mut Editor) {
     ed.defvar("font-mono", Value::Null, "Monospace font: an installed family name or a font file path.");
     ed.defvar("font-sans", Value::Null, "UI font: an installed family name or a font file path.");
+    ed.defvar("font-fallbacks", json!(["Symbols Nerd Font Mono"]), "Fonts for characters the chosen ones lack, in order (family names or files): icons programs print, such as yazi's Nerd Font icons. Missing ones are skipped.");
     ed.defvar("font-size", Value::Null, "Base UI font size (text-scale-reset returns to it).");
     ed.defvar("font-mono-size", Value::Null, "Base monospace font size (text-scale-reset returns to it).");
     ed.defvar("font-sans-weight", json!(400.0), "Weight of a variable UI font (wght axis; SF's default instance is 400).");
@@ -220,7 +235,7 @@ pub fn install(ed: &mut Editor) {
     }
     ed.add_hook("variable-changed", BUILTIN, |ed, p| {
         match p.get("name").and_then(Value::as_str) {
-            Some("font-mono" | "font-sans" | "font-sans-weight" | "font-mono-weight" | "font-bold-weight" | "font-optical-size" | "font-tracking") => apply(ed),
+            Some("font-mono" | "font-sans" | "font-fallbacks" | "font-sans-weight" | "font-mono-weight" | "font-bold-weight" | "font-optical-size" | "font-tracking") => apply(ed),
             Some("font-size" | "font-mono-size") => reset_sizes(ed),
             _ => {}
         }
