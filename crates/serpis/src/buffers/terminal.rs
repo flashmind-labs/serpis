@@ -886,17 +886,25 @@ impl Buffer for TerminalBuffer {
         let mut line = top;
         let mut placeholders = Vec::new();
         let mut row_cells = Vec::new();
+        // Text is painted after every cell background, so glyphs that overhang their cell
+        // (icons, italics) aren't cut by the next cell's background.
+        let mut glyphs: Vec<egui::Shape> = Vec::new();
+        // Nerd Font icons wait for the end of their row: they may spread into a blank next cell.
+        let mut icons: Vec<(usize, f32, char, Color32)> = Vec::new();
+        let mut blank: Vec<bool> = Vec::new();
         while let Some(row) = row_iter.next() {
             row_cells.clear();
+            icons.clear();
+            blank.clear();
             let Ok(mut cell_iter) = self.cells_it.update(row) else { break };
             let mut x = origin.x;
             let mut col = 0;
             let mut job = LayoutJob::default();
             let mut run_start_x = x;
-            let flush = |job: &mut LayoutJob, run_x: f32| {
+            let flush = |job: &mut LayoutJob, run_x: f32, glyphs: &mut Vec<egui::Shape>| {
                 if !job.text.is_empty() {
                     let g = painter.layout_job(std::mem::take(job));
-                    painter.galley(egui::pos2(run_x, y), g, default_fg);
+                    glyphs.push(egui::Shape::galley(egui::pos2(run_x, y), g, default_fg));
                 }
             };
             while let Some(cell) = cell_iter.next() {
@@ -930,6 +938,9 @@ impl Buffer for TerminalBuffer {
                 }
                 if n > 0 {
                     let _ = cell.graphemes_utf8(&mut text);
+                }
+                blank.push(n == 0 || text.trim().is_empty());
+                if n > 0 {
                     // Kitty image placeholders show part of an image instead of a glyph.
                     if text.starts_with(super::term_images::PLACEHOLDER) {
                         if let Ok(s) = cell.style()
@@ -937,10 +948,28 @@ impl Buffer for TerminalBuffer {
                         {
                             row_cells.push(c);
                         }
-                        flush(&mut job, run_start_x);
+                        flush(&mut job, run_start_x, &mut glyphs);
                         x += self.cell.x;
                         col += 1;
                         continue;
+                    }
+                    // Powerline separators are shapes filling the cell; icons are fitted later.
+                    let mut chars = text.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        let cell_rect = Rect::from_min_size(egui::pos2(x, y), self.cell);
+                        if super::term_glyphs::powerline(ch, cell_rect, fg, &mut glyphs) {
+                            flush(&mut job, run_start_x, &mut glyphs);
+                            x += self.cell.x;
+                            col += 1;
+                            continue;
+                        }
+                        if super::term_glyphs::is_icon(ch) {
+                            flush(&mut job, run_start_x, &mut glyphs);
+                            icons.push((col, x, ch, fg));
+                            x += self.cell.x;
+                            col += 1;
+                            continue;
+                        }
                     }
                     let fmt = TextFormat {
                         font_id: font.clone(),
@@ -956,26 +985,34 @@ impl Buffer for TerminalBuffer {
                         job.append(&text, 0.0, fmt);
                     } else {
                         // Wide or complex graphemes are placed at their exact cell.
-                        flush(&mut job, run_start_x);
+                        flush(&mut job, run_start_x, &mut glyphs);
                         let mut single = LayoutJob::default();
                         single.append(&text, 0.0, fmt);
-                        painter.galley(egui::pos2(x, y), painter.layout_job(single), fg);
+                        glyphs.push(egui::Shape::galley(egui::pos2(x, y), painter.layout_job(single), fg));
                     }
                     if bold {
                         // Fake bold: a second pass offset by a fraction of a pixel.
                     }
                 } else {
-                    flush(&mut job, run_start_x);
+                    flush(&mut job, run_start_x, &mut glyphs);
                 }
                 x += self.cell.x;
                 col += 1;
             }
-            flush(&mut job, run_start_x);
+            flush(&mut job, run_start_x, &mut glyphs);
+            for &(c, ix, ch, color) in &icons {
+                let cells = if blank.get(c + 1).copied().unwrap_or(false) { 2 } else { 1 };
+                if !super::term_glyphs::icon(ui.ctx(), ch, egui::pos2(ix, y), self.cell, cells, color, &mut glyphs) {
+                    let g = painter.layout_no_wrap(ch.to_string(), font.clone(), color);
+                    glyphs.push(egui::Shape::galley(egui::pos2(ix, y), g, color));
+                }
+            }
             placeholders.extend(super::term_images::runs(&row_cells));
             y += self.cell.y;
             line += 1;
         }
 
+        painter.extend(glyphs);
         self.images.paint_virtual(&self.term, &placeholders, &painter, &image_grid);
         self.images.paint(&self.term, libghostty_vt::kitty::graphics::Layer::AboveText, &painter, &image_grid);
 
