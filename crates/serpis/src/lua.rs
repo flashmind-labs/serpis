@@ -1075,6 +1075,12 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             c.submit(e, text, false);
         }))
     })?)?;
+    // serpis.chat.transcript(buf?): the transcript's text as shown.
+    chat.set("transcript", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.transcript_text()))?
+            .ok_or_else(|| mlua::Error::runtime("the chat is busy"))
+    })?)?;
     // serpis.chat.append(buf?, type, data): add a custom entry to the chat's session (pi's
     // `custom` entries); it is restored when the session is resumed.
     chat.set("append", lua.create_function(move |lua, (id, kind, data): (Option<u64>, String, LuaValue)| {

@@ -3,6 +3,7 @@
 Every response reports 1000 prompt tokens and 10 completion tokens (tests price them in
 models.json). What it says depends on the last user message:
 
+  THINK ...       think six lines, then reply "ok"
   TOOL ...        call bash `echo hi`
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
@@ -52,6 +53,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             prompt = text_of(last.get("content"))
             call = None
+            if prompt.startswith("THINK"):
+                delta["reasoning_content"] = "\n".join(f"step {i}" for i in range(1, 7))
             if prompt.startswith("TOOL"):
                 call = ("bash", {"command": "echo hi"})
             elif prompt.startswith("LUA:"):

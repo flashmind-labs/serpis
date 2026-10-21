@@ -663,6 +663,12 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("chat-clear", "Start a fresh conversation in this chat.", o, |ed, _| with_chat(ed, |c, _| c.clear()));
+    ed.define_command("chat-toggle-thinking", "Show or hide the model's thinking in chats (chat-show-thinking).", o, |ed, _| {
+        let show = !ed.var_bool("chat-show-thinking");
+        ed.set_var("chat-show-thinking", serde_json::json!(show));
+        ed.message(if show { "Showing thinking" } else { "Hiding thinking" });
+        Ok(())
+    });
     ed.define_command("chat-cycle-thinking", "Cycle the thinking level.", o, |ed, _| {
         let lvl = with_chat(ed, |c, _| {
             c.cycle_thinking();

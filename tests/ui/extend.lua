@@ -149,6 +149,10 @@ steps({
   end,
   function(go)
     T.check("a response costs $1.00", cost(chat), "1.00")
+    local ctx = serpis.chat.info(chat).context
+    T.check("context used is the last response's tokens", ctx.used, 1010)
+    T.check("of the model's window", ctx.window > 0 and string.format("%.4f", ctx.percent) == string.format("%.4f", 1010 * 100 / ctx.window), true)
+    if os.getenv("SERPIS_TEST_SHOTS") then serpis.debug.screenshot(os.getenv("SERPIS_TEST_SHOTS") .. "/usage.png") end
     serpis.chat.prompt(chat, "again")
     settled(chat, go, 2)
     return false
@@ -258,5 +262,27 @@ steps({
     local r = requests()
     T.check("a new extension works at once", r[15]:find("hello from an extension", 1, true) ~= nil, true)
     T.check("and is a command", commands()["hello-ext"], true)
+    -- Thinking can be hidden (to its header) and shown again; C-t as in the user's config.
+    serpis.keymap.set("chat", "C-t", "chat-toggle-thinking")
+    serpis.chat.prompt(other, "THINK hard")
+  end,
+  function(go)
+    settled(other, go, 16)
+    return false
+  end,
+  function()
+    local t = serpis.chat.transcript(other)
+    T.check("thinking shown by default", t:find("step 6", 1, true) ~= nil, true)
+    d.key("T", { "ctrl" })
+  end,
+  function()
+    local t = serpis.chat.transcript(other)
+    T.check("C-t hides thinking", serpis.var.get("chat-show-thinking"), false)
+    T.check("hidden thinking keeps its header", t:find("Thought · 6 lines", 1, true) ~= nil, true)
+    T.check("but not its text", t:find("step 6", 1, true), nil)
+    d.key("T", { "ctrl" })
+  end,
+  function()
+    T.check("C-t shows it again", serpis.chat.transcript(other):find("step 6", 1, true) ~= nil, true)
   end,
 })

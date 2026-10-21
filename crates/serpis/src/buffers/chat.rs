@@ -294,6 +294,42 @@ impl ChatBuffer {
         true
     }
 
+    /// Context the conversation fills: the last response's tokens (what the next request sends,
+    /// roughly), and the model's window. None before any response.
+    pub fn context(&self) -> (Option<u64>, u64) {
+        let used = self.history.iter().rev().find_map(|m| match m {
+            Message::Assistant(a) if !matches!(a.stop_reason, StopReason::Aborted | StopReason::Error) => {
+                Some(a.usage.input + a.usage.cache_read + a.usage.cache_write + a.usage.output)
+            }
+            _ => None,
+        });
+        (used, self.model.as_ref().map(|m| m.context_window).unwrap_or(0))
+    }
+
+    /// `↑12k ↓3.4k R1.2M W40k $1.234 45.2%/200k`, as pi's footer: the session's input, output,
+    /// cache reads and writes, cost, then context used of the window.
+    pub fn usage_label(&self) -> String {
+        let u = &self.totals;
+        let mut parts = vec![format!("↑{}", fmt_tokens(u.input)), format!("↓{}", fmt_tokens(u.output))];
+        if u.cache_read > 0 {
+            parts.push(format!("R{}", fmt_tokens(u.cache_read)));
+        }
+        if u.cache_write > 0 {
+            parts.push(format!("W{}", fmt_tokens(u.cache_write)));
+        }
+        parts.push(format!("${:.3}", u.cost.total));
+        let (used, window) = self.context();
+        if window > 0 {
+            parts.push(format!("{:.1}%/{}", used.unwrap_or(0) as f64 * 100.0 / window as f64, fmt_tokens(window)));
+        }
+        parts.join(" ")
+    }
+
+    /// The transcript as shown (as of the last frame that drew it).
+    pub fn transcript_text(&self) -> String {
+        self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
     /// This chat as seen from outside (`Editor::chats`, `serpis.chat`).
     pub fn info(&self) -> crate::chat_api::ChatInfo {
         crate::chat_api::ChatInfo {
@@ -307,6 +343,7 @@ impl ChatBuffer {
             session_id: self.session_id.clone(),
             entries: self.custom_entries.clone(),
             agent: self.agent.clone(),
+            context: self.context(),
         }
     }
 
@@ -528,6 +565,7 @@ impl ChatBuffer {
 
     fn rebuild(&mut self, ed: &Editor) {
         let t = &ed.theme;
+        let show_thinking = ed.var_bool("chat-show-thinking");
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
         let mut out: Vec<StyledLine> = Vec::new();
@@ -582,9 +620,10 @@ impl ChatBuffer {
                                 if body.is_empty() && !*redacted {
                                     continue;
                                 }
-                                let shown: &[&str] = if *streaming || body.len() <= 4 { &body } else { &body[body.len() - 3..] };
+                                // Hidden thinking keeps its header, so you still see that the model thought.
+                                let shown: &[&str] = if !show_thinking { &[] } else if *streaming || body.len() <= 4 { &body } else { &body[body.len() - 3..] };
                                 let blk = Block::new(Color32::TRANSPARENT).bar(t.border);
-                                let head = if *streaming { "Thinking…".to_string() } else if body.len() > shown.len() { format!("Thought · {} lines", body.len()) } else { "Thought".to_string() };
+                                let head = if *streaming { "Thinking…".to_string() } else if body.len() > shown.len() && body.len() > 1 { format!("Thought · {} lines", body.len()) } else { "Thought".to_string() };
                                 let n = shown.len() + 1;
                                 push(&mut out, &mut owner, StyledLine::new(head, Face::Meta).block(blk.nth(0, n)).indent(14.0 * k).gap(10.0 * k).pad(2.0 * k, 2.0 * k), Some(ei));
                                 for (i, l) in shown.iter().enumerate() {
@@ -1538,7 +1577,8 @@ impl Buffer for ChatBuffer {
             self.text_w = text_w;
             self.dirty = true;
         }
-        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32);
+        let show_thinking = ed.var_bool("chat-show-thinking") as u64;
+        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if style_key != self.style_key {
             self.style_key = style_key;
             self.dirty = true;
@@ -1669,6 +1709,7 @@ impl Buffer for ChatBuffer {
 
         // Activity or usage between the pills and the send button.
         let right = send.left() - 12.0 * k;
+        let mut right = right;
         if self.running() {
             let secs = self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
             let label = format!("Working {secs}s");
@@ -1676,23 +1717,13 @@ impl Buffer for ChatBuffer {
             if right - w - 18.0 * k > tr.right() {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.accent, w + 1.0);
                 crate::chrome::spinner(&painter, egui::pos2(right - w - 11.0 * k, cy), 5.0 * k, ui.input(|i| i.time), theme.accent);
+                right -= w + 30.0 * k;
             }
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        } else {
-            let mut usage = vec![format!("{} tok", fmt_tokens(self.totals.total_tokens))];
-            if self.totals.cost.total > 0.0 {
-                usage.push(format!("${:.2}", self.totals.cost.total));
-            }
-            if let Some(m) = self.model.as_ref().filter(|m| m.context_window > 0) {
-                let last = self.history.iter().rev().find_map(|m| match m {
-                    Message::Assistant(a) => Some(a.usage.input + a.usage.cache_read + a.usage.cache_write + a.usage.output),
-                    _ => None,
-                });
-                if let Some(used) = last {
-                    usage.push(format!("{:.0}% context", used as f64 * 100.0 / m.context_window as f64));
-                }
-            }
-            let label = usage.join("  ·  ");
+        }
+        // Session usage and context, like pi's footer.
+        if ed.var("chat-show-usage").and_then(Value::as_bool).unwrap_or(true) {
+            let label = self.usage_label();
             let w = crate::chrome::text_width(&painter, &label, small.clone());
             if right - w > tr.right() + 8.0 * k {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);

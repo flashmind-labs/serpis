@@ -28,6 +28,8 @@ pub struct ChatInfo {
     pub session_id: String,
     /// Custom session entries (`serpis.chat.append`), oldest first: (type, data).
     pub entries: Vec<(String, Value)>,
+    /// Tokens the conversation fills (None before any response) and the model's window.
+    pub context: (Option<u64>, u64),
     /// The running agent, so an abort takes effect at once (even from the chat's own hooks).
     pub agent: Option<serpis_agent::AgentHandle>,
 }
@@ -54,6 +56,11 @@ impl ChatInfo {
             "title": self.title,
             "cwd": self.cwd,
             "session": self.session,
+            "context": {
+                "used": self.context.0.unwrap_or(0),
+                "window": self.context.1,
+                "percent": if self.context.1 > 0 { self.context.0.unwrap_or(0) as f64 * 100.0 / self.context.1 as f64 } else { 0.0 },
+            },
         })
     }
 }
