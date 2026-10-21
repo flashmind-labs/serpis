@@ -1,8 +1,27 @@
-# Serpis
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/serpis-logo-dark.svg">
+    <img alt="serpis" src="assets/serpis-logo-light.svg" width="380">
+  </picture>
+</p>
+
+<p align="center"><em>Named after the Serpis, the river that winds from Alcoi down to the Mediterranean at Gandia.</em></p>
 
 An agent harness for power users: pi's agent and tools inside an Emacs-shaped GUI (Rust, egui).
 Everything is a buffer (chats, terminals, text), every key goes through keymaps, and the whole
 core is open to extension from Lua or Rust plugins that link the same library.
+
+## Install (macOS)
+
+```sh
+scripts/install-macos.sh      # builds Serpis.app into ~/Applications, and `serpis [dir]` into ~/.local/bin
+```
+
+Run it again to update. The bundle carries serpis' core library and Rust's standard library, so
+it survives `cargo clean` and toolchain updates. Started from the Dock or Finder, serpis reads your
+login shell's environment once (PATH, exported API keys), like VS Code; from a terminal it keeps
+the terminal's (`SERPIS_NO_SHELL_ENV=1` turns the import off). Rust plugins must be rebuilt
+against the installed version. The icon is drawn by `scripts/make-icon.py`.
 
 ## Run
 

@@ -15,6 +15,7 @@ pub mod extend;
 pub mod frecency;
 pub mod highlight;
 pub mod images;
+pub mod launch;
 pub mod chrome;
 pub mod clipboard;
 pub mod commands;
@@ -201,6 +202,8 @@ pub fn bootstrap(ed: &mut Editor) {
 
 /// Run serpis.
 pub fn run() -> anyhow::Result<()> {
+    // Before any thread starts or anything reads the environment.
+    launch::prepare();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,serpis=info".into()))
         .init();
