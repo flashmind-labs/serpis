@@ -144,6 +144,8 @@ pub fn install(ed: &mut Editor) {
                 }
             }
         });
+        // The commands you use most come first, even before typing.
+        ed.minibuffer_frecency("command", true);
         Ok(())
     });
     ed.define_command("keyboard-quit", "Cancel the current prompt, selection or key sequence.", o, |ed, _| {
@@ -285,6 +287,9 @@ pub fn install(ed: &mut Editor) {
             }
             None => {}
         });
+        // Typing ranks buffers you go to often higher; with nothing typed the most recent
+        // stays first (RET returns to it).
+        ed.minibuffer_frecency("buffer", false);
         Ok(())
     });
     ed.define_command("next-buffer", "Cycle to the next buffer.", o, |ed, _| {

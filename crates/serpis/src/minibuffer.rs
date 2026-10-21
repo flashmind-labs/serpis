@@ -61,6 +61,13 @@ pub struct Minibuffer {
     /// With a dynamic source, typed text wins over an unselected first candidate (file
     /// paths); pickers that offer named choices turn this off.
     pub prefer_input: bool,
+    /// Frecency category: picks are remembered and rank higher next time (see `frecency`).
+    pub frecency: Option<String>,
+    /// Ranking bonus per candidate (from frecency), parallel to `candidates`.
+    boost: Vec<i64>,
+    /// With an empty input, order by frecency too (not for lists whose order means something,
+    /// such as recent buffers).
+    pub frecency_empty: bool,
 }
 
 /// Subsequence fuzzy match; returns a score (higher is better) and matched char positions.
@@ -118,13 +125,14 @@ impl Minibuffer {
             self.candidates = f(&q);
         }
         let query = if self.dynamic.is_some() { q.rsplit('/').next().unwrap_or("").to_string() } else { q.clone() };
+        let boost = |i: usize| self.boost.get(i).copied().unwrap_or(0);
         let mut scored: Vec<(i64, usize, Vec<usize>)> = self
             .candidates
             .iter()
             .enumerate()
-            .filter_map(|(i, c)| fuzzy(&query, &c.label).map(|(s, p)| (s, i, p)))
+            .filter_map(|(i, c)| fuzzy(&query, &c.label).map(|(s, p)| (s + boost(i), i, p)))
             .collect();
-        if !query.is_empty() && !self.keep_order {
+        if !self.keep_order && (!query.is_empty() || (self.frecency_empty && !self.boost.is_empty())) {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
         self.filtered = scored.into_iter().map(|(_, i, p)| (i, p)).collect();
@@ -134,6 +142,25 @@ impl Minibuffer {
 
     pub fn current(&self) -> Option<&Candidate> {
         self.filtered.get(self.selected).map(|(i, _)| &self.candidates[*i])
+    }
+}
+
+impl Editor {
+    /// Rank the open prompt's candidates by frecency in `category`, and remember what is
+    /// picked. `empty`: also order them so with nothing typed. Off with `minibuffer-frecency`.
+    pub fn minibuffer_frecency(&mut self, category: &str, empty: bool) {
+        if !self.var("minibuffer-frecency").and_then(serde_json::Value::as_bool).unwrap_or(true) {
+            return;
+        }
+        let Some(mut mb) = self.minibuffer.take() else { return };
+        let keys: Vec<&str> = mb.candidates.iter().map(|c| c.value.as_str()).collect();
+        let scores = crate::frecency::scores(self, category, &keys);
+        mb.boost = if scores.iter().any(|s| *s > 0.0) { scores.into_iter().map(crate::frecency::boost).collect() } else { Vec::new() };
+        mb.frecency = Some(category.to_string());
+        mb.frecency_empty = empty;
+        mb.last_query = None;
+        mb.refilter();
+        self.minibuffer = Some(mb);
     }
 }
 
@@ -162,6 +189,9 @@ impl Editor {
             previewed: None,
             instant: false,
             prefer_input: true,
+            frecency: None,
+            boost: Vec::new(),
+            frecency_empty: false,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -193,6 +223,9 @@ impl Editor {
             previewed: None,
             instant: false,
             prefer_input: true,
+            frecency: None,
+            boost: Vec::new(),
+            frecency_empty: false,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -224,6 +257,9 @@ pub fn accept(ed: &mut Editor) {
     } else {
         cand
     };
+    if let (Some(cat), Some(c)) = (&mb.frecency, &cand) {
+        crate::frecency::bump(ed, cat, &c.value);
+    }
     if let Some(f) = mb.on_accept.take() {
         f(ed, cand, input);
     }

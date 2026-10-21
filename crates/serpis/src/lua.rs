@@ -902,6 +902,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let on_accept: Option<Function> = spec.get("on_accept").ok();
         let on_select: Option<Function> = spec.get("on_select").ok();
         let on_cancel: Option<Function> = spec.get("on_cancel").ok();
+        let frecency: Option<String> = spec.get("frecency").ok();
         let l = lua.clone();
         ed(|e| {
             let la = l.clone();
@@ -927,6 +928,9 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                 })
             });
             e.minibuffer_preview(select, cancel, keep_order);
+            if let Some(cat) = &frecency {
+                e.minibuffer_frecency(cat, !keep_order);
+            }
         })
     })?)?;
     // serpis.minibuffer.y_or_n(prompt, function(yes) ... end): one-key yes/no question.

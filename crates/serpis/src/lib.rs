@@ -12,6 +12,7 @@ pub mod buffer;
 pub mod buffers;
 pub mod chat_api;
 pub mod extend;
+pub mod frecency;
 pub mod highlight;
 pub mod images;
 pub mod chrome;
@@ -113,6 +114,8 @@ pub fn bootstrap(ed: &mut Editor) {
         }
         None
     });
+    ed.defvar("minibuffer-frecency", json!(true), "Rank prompt choices (M-x, buffers, Lua pickers with `frecency`) by how often and how recently you picked them.");
+    ed.defvar("minibuffer-frecency-half-life", json!(7.0), "Days after which a pick counts half as much for frecency.");
     ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");

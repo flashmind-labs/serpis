@@ -97,7 +97,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     // UI.
     ("serpis.ui.status", "(name, fn(buf) -> string | nil): a segment in the status bar (buf: the focused buffer)."),
     ("serpis.ui.header", "(name, fn(buf) -> string | nil): a segment in every window's header (buf: that window's buffer)."),
-    ("serpis.minibuffer.read", "({prompt, candidates = {string | {label, value?, detail?}}, initial?, require_match?, sort?, on_accept = fn({value, input}), on_select?, on_cancel?}): ask with completion."),
+    ("serpis.minibuffer.read", "({prompt, candidates = {string | {label, value?, detail?}}, initial?, require_match?, sort?, frecency = category?, on_accept = fn({value, input}), on_select?, on_cancel?}): ask with completion; with `frecency`, picks are remembered and rank higher next time."),
     ("serpis.minibuffer.y_or_n", "(prompt, fn(yes)): a one-key yes/no question."),
     ("serpis.highlight.on_yank", "(payload, {duration = ms}?): flash what was yanked (call from text-yanked)."),
     ("serpis.keys.scheme", "(name?): the keybinding scheme (\"regular\", \"emacs\", \"vim\"); with a name, switch."),
