@@ -27,6 +27,24 @@ pub fn tint(c: Color32, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, (alpha * 255.0) as u8)
 }
 
+/// Text or icon color that reads on `fill` (an accent button, the current workspace chip): the
+/// theme's darkest or lightest end, whichever contrasts more.
+pub fn on(fill: Color32, t: &Theme) -> Color32 {
+    fn lum(c: Color32) -> f32 {
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+    }
+    let contrast = |a: Color32, b: Color32| {
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    };
+    let (dark, light) = if t.dark { (t.bg_alt, t.fg) } else { (t.fg, t.bg_alt) };
+    if contrast(fill, dark) >= contrast(fill, light) { dark } else { light }
+}
+
 /// Hover/selection washes that work on any background.
 pub fn hover_bg(t: &Theme) -> Color32 {
     tint(t.fg, if t.dark { 0.06 } else { 0.05 })

@@ -1890,7 +1890,7 @@ impl Buffer for ChatBuffer {
         } else {
             let bg = if has_text { if sresp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent } } else { theme.chip() };
             painter.circle_filled(send.center(), d / 2.0, bg);
-            let fg = if has_text { if theme.dark { theme.bg } else { Color32::WHITE } } else { theme.fg_faint };
+            let fg = if has_text { crate::chrome::on(theme.accent, &theme) } else { theme.fg_faint };
             crate::chrome::arrow_up(&painter, Rect::from_center_size(send.center(), Vec2::splat(11.0 * k)), fg);
             if sresp.clicked() && has_text {
                 run = Some("chat-send");

@@ -525,6 +525,24 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));
     child.set_clip_rect(body);
     ed.with_buffer(id, |b, ed| b.ui(&mut child, body, focused, ed));
+    // The body is clipped square, so content backgrounds (a terminal's, a chat's) fill the
+    // window's bottom corners: round them off again with what is behind the windows, and draw
+    // the outline over the content.
+    let p = ui.painter();
+    let rr = r as f32;
+    for (corner, dx) in [(rect.left_bottom(), 1.0f32), (rect.right_bottom(), -1.0)] {
+        let c = egui::pos2(corner.x + dx * rr, corner.y - rr);
+        let arc: Vec<Pos2> = (0..=10)
+            .map(|i| {
+                let a = i as f32 / 10.0 * std::f32::consts::FRAC_PI_2;
+                egui::pos2(c.x - dx * rr * a.cos(), c.y + rr * a.sin())
+            })
+            .collect();
+        for pair in arc.windows(2) {
+            p.add(egui::Shape::convex_polygon(vec![corner, pair[0], pair[1]], theme.bg, Stroke::NONE));
+        }
+    }
+    p.rect_stroke(rect, r, Stroke::new(1.0, outline), StrokeKind::Inside);
     draw_flashes(ui, ed, id, body);
 }
 

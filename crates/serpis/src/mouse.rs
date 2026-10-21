@@ -320,7 +320,8 @@ pub fn workspace_chips(ui: &mut egui::Ui, ed: &mut Editor, right: f32, cy: f32) 
     for (i, n) in names.iter().enumerate().rev() {
         let is_new = dragging && i == names.len() - 1;
         let label = if is_new { "+".to_string() } else { ed.workspace_display(n) };
-        let g = ui.painter().layout_no_wrap(label, font.clone(), theme.fg);
+        // Laid out with a placeholder color, so painting picks it (dark on a light accent).
+        let g = ui.painter().layout_no_wrap(label, font.clone(), Color32::PLACEHOLDER);
         let w = g.size().x + 14.0;
         let r = Rect::from_min_size(egui::pos2(x - w, cy - 10.0), egui::vec2(w, 20.0));
         x -= w + 4.0;
@@ -332,7 +333,7 @@ pub fn workspace_chips(ui: &mut egui::Ui, ed: &mut Editor, right: f32, cy: f32) 
         let current = n == ed.workspace;
         let resp = ui.interact(r, ui.scope_id().with(("ws-chip", n.clone())), egui::Sense::click());
         let bg = if current { theme.accent } else if resp.hovered() { theme.border } else { theme.bg_elevated };
-        let fg = if current { theme.bg } else { theme.fg_dim };
+        let fg = if current { crate::chrome::on(theme.accent, &theme) } else { theme.fg_dim };
         ui.painter().rect_filled(r, 10, bg);
         ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
         if resp.clicked() {
