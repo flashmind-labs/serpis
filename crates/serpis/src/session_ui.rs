@@ -177,23 +177,54 @@ fn source(ed: &Editor, i: &Info) -> &'static str {
     if i.path.starts_with(session_root(ed)) { "serpis" } else if i.path.to_string_lossy().contains("/.pi/") { "pi" } else { "other" }
 }
 
-fn pick(ed: &mut Editor, all: bool) {
-    let project = current_project(ed);
-    let mut list: Vec<Info> = ed.sessions.list.clone();
-    let mut scope = "all projects".to_string();
-    if let (Some(root), false) = (&project, all) {
-        let mine: Vec<Info> = list.iter().filter(|i| in_project(i, root)).cloned().collect();
-        if mine.is_empty() {
-            ed.message(format!("No sessions in {}; showing all", root.display()));
-        } else {
-            list = mine;
-            scope = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+/// Which sessions chat-resume lists; TAB cycles through the ones that apply.
+#[derive(Debug, Clone, PartialEq)]
+enum Scope {
+    /// The current project, all its worktrees.
+    Project(PathBuf),
+    All,
+    /// The current folder (a worktree or a subdirectory of the project).
+    Folder(PathBuf),
+}
+
+impl Scope {
+    fn label(&self) -> String {
+        let name = |p: &Path| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+        match self {
+            Scope::Project(p) => format!("project {}", name(p)),
+            Scope::All => "all projects".into(),
+            Scope::Folder(p) => format!("folder {}", name(p)),
         }
     }
-    if list.is_empty() {
-        ed.message("No saved sessions yet");
-        return;
+    fn holds(&self, i: &Info) -> bool {
+        match self {
+            Scope::Project(root) => in_project(i, root),
+            Scope::All => true,
+            Scope::Folder(dir) => i.cwd.starts_with(dir),
+        }
     }
+}
+
+/// The scopes to cycle through, in order: this project, all projects, this folder (when it
+/// isn't the project itself).
+fn scopes(ed: &mut Editor) -> Vec<Scope> {
+    let dir = ed.buffer_directory(ed.current_buffer()).unwrap_or_else(|| ed.cwd.clone());
+    let project = current_project(ed);
+    let mut out = Vec::new();
+    if let Some(p) = &project {
+        out.push(Scope::Project(p.clone()));
+    }
+    out.push(Scope::All);
+    if project.as_deref() != Some(dir.as_path()) && dir.is_dir() {
+        out.push(Scope::Folder(dir));
+    }
+    out
+}
+
+/// The prompt and candidates for `scope` (with what TAB switches to).
+fn listing(ed: &mut Editor, scopes: &[Scope], at: usize) -> (String, Vec<Candidate>) {
+    let scope = &scopes[at];
+    let list: Vec<Info> = ed.sessions.list.iter().filter(|i| scope.holds(i)).cloned().collect();
     let open: Vec<PathBuf> = ed.buffers.keys().collect::<Vec<_>>().into_iter().filter_map(|id| session_of(ed, id)).collect();
     let cands = list
         .iter()
@@ -203,7 +234,7 @@ fn pick(ed: &mut Editor, all: bool) {
             if title.chars().count() > 70 {
                 title = title.chars().take(69).collect::<String>() + "…";
             }
-            let label = if all || project.is_none() { format!("{title}  ·  {proj}") } else { title };
+            let label = if *scope == Scope::All { format!("{title}  ·  {proj}") } else { title };
             let mut detail = format!("{} · {} msgs", age(i), i.messages);
             if let Some(m) = &i.model {
                 detail.push_str(&format!(" · {}", m.rsplit('/').next().unwrap_or(m)));
@@ -214,16 +245,51 @@ fn pick(ed: &mut Editor, all: bool) {
             }
             Candidate::new(label).detail(detail).value(i.path.to_string_lossy().into_owned())
         })
-        .collect();
-    ed.completing_read(&format!("Resume ({scope}): "), cands, true, |ed, c, _| {
+        .collect::<Vec<_>>();
+    let next = if scopes.len() > 1 { format!(" · TAB: {}", scopes[(at + 1) % scopes.len()].label()) } else { String::new() };
+    let empty = if cands.is_empty() { " · none here" } else { "" };
+    (format!("Resume ({}{empty}{next}): ", scope.label()), cands)
+}
+
+fn pick(ed: &mut Editor, all: bool) {
+    if ed.sessions.list.is_empty() {
+        ed.message("No saved sessions yet");
+        return;
+    }
+    let scopes = scopes(ed);
+    let wanted = if all { "all".to_string() } else { ed.var_str("chat-resume-scope").unwrap_or_else(|| "project".into()) };
+    let mut at = scopes
+        .iter()
+        .position(|s| matches!((s, wanted.as_str()), (Scope::All, "all") | (Scope::Project(_), "project") | (Scope::Folder(_), "folder")))
+        .unwrap_or(0);
+    // A scope with nothing in it opens on the next one that has something.
+    for _ in 0..scopes.len() {
+        if ed.sessions.list.iter().any(|i| scopes[at].holds(i)) {
+            break;
+        }
+        at = (at + 1) % scopes.len();
+    }
+    let (prompt, cands) = listing(ed, &scopes, at);
+    ed.completing_read(&prompt, cands, true, |ed, c, _| {
         if let Some(c) = c {
             if let Err(e) = resume(ed, Path::new(&c.value)) {
                 ed.error(format!("{e:#}"));
             }
         }
     });
+    let current = std::rc::Rc::new(std::cell::Cell::new(at));
+    let cycle: crate::minibuffer::CycleFn = std::rc::Rc::new(move |ed: &mut Editor, dir: i32| {
+        let n = scopes.len();
+        let at = ((current.get() as i32 + dir).rem_euclid(n as i32)) as usize;
+        current.set(at);
+        let (prompt, cands) = listing(ed, &scopes, at);
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.replace_candidates(prompt, cands);
+        }
+    });
     if let Some(mb) = &mut ed.minibuffer {
         mb.keep_order = true;
+        mb.cycle = Some(cycle);
     }
 }
 
@@ -258,9 +324,10 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("session-restore-on-start", json!(true), "Reopen the chats that were open when serpis quit.");
     ed.defvar("session-scan-interval", json!(30.0), "Seconds a read session list stays fresh.");
     ed.defvar("project-remember", json!(true), "Pin a project to the sidebar (the projects variable) when a chat in it saves its first session.");
+    ed.defvar("chat-resume-scope", json!("project"), "Sessions chat-resume starts with: \"project\" (this project, all its worktrees), \"all\" or \"folder\" (the current folder). TAB / S-TAB in the picker cycle through them.");
     ed.defvar("sidebar-recent-sessions", json!(3), "Closed sessions listed under each sidebar project (0 hides them).");
 
-    ed.define_command("chat-resume", "Resume a saved chat session of this project (all projects with C-u or param \"all\").", o, |ed, a| {
+    ed.define_command("chat-resume", "Resume a saved chat session: this project's first (chat-resume-scope); TAB / S-TAB cycle to all projects and this folder. C-u or param \"all\" starts with all.", o, |ed, a| {
         let all = a.prefix.is_some() || a.str(0) == Some("all");
         if ed.sessions.scanned.is_none() {
             ed.message("Reading sessions…");

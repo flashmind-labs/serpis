@@ -68,6 +68,22 @@ pub struct Minibuffer {
     /// With an empty input, order by frecency too (not for lists whose order means something,
     /// such as recent buffers).
     pub frecency_empty: bool,
+    /// Switch the candidates to another set (TAB forward, S-TAB back): chat-resume's scopes.
+    pub cycle: Option<CycleFn>,
+}
+
+/// Replaces the open prompt's candidates for the next (+1) or previous (-1) set.
+pub type CycleFn = std::rc::Rc<dyn Fn(&mut Editor, i32)>;
+
+impl Minibuffer {
+    /// Show other candidates under another prompt, keeping what was typed.
+    pub fn replace_candidates(&mut self, prompt: String, candidates: Vec<Candidate>) {
+        self.prompt = prompt;
+        self.candidates = candidates;
+        self.boost.clear();
+        self.last_query = None;
+        self.refilter();
+    }
 }
 
 /// Subsequence fuzzy match; returns a score (higher is better) and matched char positions.
@@ -192,6 +208,7 @@ impl Editor {
             frecency: None,
             boost: Vec::new(),
             frecency_empty: false,
+            cycle: None,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -226,6 +243,7 @@ impl Editor {
             frecency: None,
             boost: Vec::new(),
             frecency_empty: false,
+            cycle: None,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -379,7 +397,24 @@ pub fn install(ed: &mut Editor) {
         move_sel(ed, -(a.count() as isize));
         Ok(())
     });
-    ed.define_command("minibuffer-complete", "Complete the input to the selected candidate.", o, |ed, _| {
+    ed.define_command("minibuffer-cycle", "Switch the prompt to its next set of candidates (param: -1 for the previous), if it has several (chat-resume's scopes).", o, |ed, a| {
+        let dir = a.params.first().and_then(serde_json::Value::as_i64).unwrap_or(1) as i32;
+        if let Some(f) = ed.minibuffer.as_ref().and_then(|m| m.cycle.clone()) {
+            f(ed, if dir < 0 { -1 } else { 1 });
+        }
+        Ok(())
+    });
+    ed.define_command("minibuffer-cycle-back", "Switch the prompt to its previous set of candidates.", o, |ed, _| {
+        if let Some(f) = ed.minibuffer.as_ref().and_then(|m| m.cycle.clone()) {
+            f(ed, -1);
+        }
+        Ok(())
+    });
+    ed.define_command("minibuffer-complete", "Complete the input to the selected candidate (in prompts with several candidate sets, switch set).", o, |ed, _| {
+        if let Some(f) = ed.minibuffer.as_ref().and_then(|m| m.cycle.clone()) {
+            f(ed, 1);
+            return Ok(());
+        }
         edit(ed, |_| {});
         if let Some(mb) = &mut ed.minibuffer {
             if let Some(c) = mb.current().cloned() {
@@ -449,6 +484,7 @@ pub fn install(ed: &mut Editor) {
         ("<up>", "minibuffer-previous"),
         ("C-k", "minibuffer-previous"),
         ("TAB", "minibuffer-complete"),
+        ("S-TAB", "minibuffer-cycle-back"),
         ("DEL", "minibuffer-delete-backward"),
         ("C-h", "minibuffer-delete-backward"),
         ("C-w", "minibuffer-kill-word"),
