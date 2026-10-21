@@ -2101,6 +2101,11 @@ impl TextSurface for ChatBuffer {
             Focus::Prompt => self.prompt.screen_rect(p),
         }
     }
+    fn code_spans(&self, i: usize) -> Vec<(usize, usize)> {
+        let Some(l) = self.lines.get(i).filter(|_| self.focus == Focus::Transcript) else { return Vec::new() };
+        let col = |b: usize| l.text[..b.min(l.text.len())].chars().count();
+        l.spans.iter().filter(|(_, f)| *f == Face::InlineCode).map(|(r, _)| (col(r.start), col(r.end))).filter(|(a, b)| b > a).collect()
+    }
     fn display_move(&self, p: Pos, rows: isize, goal_x: Option<f32>) -> Option<(Pos, f32)> {
         match self.focus {
             Focus::Transcript => self.view.display_move(p, rows, goal_x),

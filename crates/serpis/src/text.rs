@@ -90,6 +90,11 @@ pub trait TextSurface {
     fn visible_lines(&self) -> Range<usize>;
     /// Screen rectangle of the character at `p`, if visible. Used by overlays such as jump labels.
     fn screen_rect(&self, p: Pos) -> Option<Rect>;
+    /// Inline code on line `i` shown without its backticks (a chat's rendered markdown), as
+    /// (start, end) character columns. Text that keeps its backticks returns none.
+    fn code_spans(&self, _i: usize) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
     /// `p` moved by `rows` screen rows (a wrapped line has several) at screen x `goal_x` (the
     /// cursor's when None), with the x used: vim's gj/gk. None when the surface doesn't wrap or
     /// the row isn't on screen; callers fall back to whole lines.

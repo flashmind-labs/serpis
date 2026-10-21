@@ -789,6 +789,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         };
         s.highlight = spec.get::<Option<bool>>("highlight")?.unwrap_or(false);
         s.all_windows = spec.get::<Option<bool>>("all_windows")?;
+        s.inline_code = spec.get::<Option<bool>>("inline_code")?.unwrap_or(false);
         ed(|e| crate::jump::run(e, s))
     })?)?;
     // serpis.jump.labels(): the labels on screen, {label, buffer, line, col, text} (for tests).
@@ -800,7 +801,19 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                 .iter()
                 .zip(labels)
                 .filter(|(_, l)| l.starts_with(&typed))
-                .map(|(t, l)| json!({"label": l, "buffer": buffer_id_to_u64(t.buffer), "line": t.start.line + 1, "col": t.start.col + 1, "part": t.part}))
+                .map(|(t, l)| {
+                    // The target's text, read from its buffer part.
+                    let text = e
+                        .with_buffer(t.buffer, |b, _| {
+                            let original = b.part();
+                            b.set_part(t.part);
+                            let text = b.surface().map(|s| s.text_range(t.start, t.end));
+                            b.set_part(original);
+                            text
+                        })
+                        .flatten();
+                    json!({"label": l, "buffer": buffer_id_to_u64(t.buffer), "line": t.start.line + 1, "col": t.start.col + 1, "part": t.part, "text": text})
+                })
                 .collect::<Vec<_>>()
         })?;
         lua_of(lua, &v)

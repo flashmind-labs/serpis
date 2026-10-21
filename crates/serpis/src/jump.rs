@@ -70,11 +70,13 @@ pub struct Spec {
     pub highlight: bool,
     /// Look in every visible window (else only the focused one); `None` follows `jump-all-windows`.
     pub all_windows: Option<bool>,
+    /// Also target inline code shown without its backticks (a chat's markdown), as quotes.
+    pub inline_code: bool,
 }
 
 impl Spec {
     pub fn new(regex: Regex, action: Action) -> Self {
-        Spec { regex, group: Group::Whole, filter: None, action, highlight: false, all_windows: None }
+        Spec { regex, group: Group::Whole, filter: None, action, highlight: false, all_windows: None, inline_code: false }
     }
 }
 
@@ -183,6 +185,7 @@ pub fn collect(ed: &mut Editor, spec: &Spec) -> (Vec<Target>, Vec<Rect>) {
                         break;
                     }
                     let text = s.line(line);
+                    let mut found: Vec<(Pos, Pos)> = Vec::new();
                     for caps in spec.regex.captures_iter(&text) {
                         let m = match spec.group {
                             Group::Whole => caps.get(0),
@@ -196,8 +199,12 @@ pub fn collect(ed: &mut Editor, spec: &Spec) -> (Vec<Target>, Vec<Rect>) {
                         if spec.filter.as_ref().is_some_and(|f| !f(m.as_str())) {
                             continue;
                         }
-                        let start = Pos::new(line, char_col(&text, m.start()));
-                        let end = Pos::new(line, char_col(&text, m.end()));
+                        found.push((Pos::new(line, char_col(&text, m.start())), Pos::new(line, char_col(&text, m.end()))));
+                    }
+                    if spec.inline_code {
+                        found.extend(s.code_spans(line).into_iter().map(|(a, b)| (Pos::new(line, a), Pos::new(line, b))));
+                    }
+                    for (start, end) in found {
                         let Some(anchor) = s.screen_rect(start) else { continue };
                         // Only what is actually on screen in this window.
                         if !wrect.contains(anchor.center()) {
@@ -418,7 +425,7 @@ pub const LINE_REGEX: &str = r"^[ \t]*([^ \t].*?)[ \t]*$";
 pub const WORD_REGEX: &str = r"[\p{L}\p{N}_]+(?:[-.][\p{L}\p{N}_]+)*";
 pub const HASH_REGEX: &str = r"\b[0-9a-fA-F]{7,128}\b";
 pub const URL_REGEX: &str = r#"(?:https?|ftp|file)://[^\]\[ \t\n"'<>(){}`]*[^\]\[ \t\n"'<>(){}`.,;:!?]"#;
-pub const QUOTE_REGEX: &str = r#""((?:[^"\\\n]|\\.)+)"|'((?:[^'\\\n]|\\.)+)'"#;
+pub const QUOTE_REGEX: &str = r#""((?:[^"\\\n]|\\.)+)"|'((?:[^'\\\n]|\\.)+)'|`((?:[^`\\\n]|\\.)+)`"#;
 
 /// A hash has at least one hex letter and one digit (not a plain number or word).
 fn is_hash(s: &str) -> bool {
@@ -477,6 +484,8 @@ pub fn install(ed: &mut Editor) {
         spec.group = group;
         spec.filter = filter;
         spec.highlight = true;
+        // Backtick quotes in a chat are rendered as code, without the backticks.
+        spec.inline_code = regex == QUOTE_REGEX;
         run(ed, spec);
     };
     ed.define_command("ninja-copy-line", "Copy a visible line (without surrounding whitespace).", o, move |ed, _| {
@@ -495,7 +504,7 @@ pub fn install(ed: &mut Editor) {
         copy(ed, URL_REGEX, Group::Whole, None);
         Ok(())
     });
-    ed.define_command("ninja-copy-quoted", "Copy the contents of a visible double- or single-quoted string.", o, move |ed, _| {
+    ed.define_command("ninja-copy-quoted", "Copy the contents of a visible quoted string: \"double\", 'single' or `backtick`.", o, move |ed, _| {
         copy(ed, QUOTE_REGEX, Group::FirstMatched, None);
         Ok(())
     });
@@ -566,6 +575,7 @@ mod tests {
         let hashes: Vec<String> = caps(HASH_REGEX, "commit 4c898c3 and 1234567 and deadbeef00", Group::Whole).into_iter().filter(|s| is_hash(s)).collect();
         assert_eq!(hashes, ["4c898c3", "deadbeef00"]);
         assert_eq!(caps(QUOTE_REGEX, r#"a "one \"two\"" b 'three'"#, Group::FirstMatched), [r#"one \"two\""#, "three"]);
+        assert_eq!(caps(QUOTE_REGEX, "run `cargo test` or `make`", Group::FirstMatched), ["cargo test", "make"]);
         assert_eq!(caps(WORD_REGEX, "foo-bar baz_qux v1.2.3 x", Group::Whole), ["foo-bar", "baz_qux", "v1.2.3", "x"]);
     }
 }

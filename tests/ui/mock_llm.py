@@ -6,6 +6,7 @@ models.json). What it says depends on the last user message:
   THINK ...       think six lines, then reply "ok"
   TOOL ...        call bash `echo hi`
   CODE ...        reply with a fenced Rust code block
+  INLINE ...      reply with inline code (Run `cargo test` now.)
   LONG ...        reply with a long answer (paragraphs, lists, code, a table)
   READ:<path>     call read on that path
   LUA:<code>      call serpis_lua with that code
@@ -69,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
                     if i % 5 == 0:
                         parts.append("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |")
                 delta["content"] = "\n\n".join(parts)
+            if prompt.startswith("INLINE"):
+                delta["content"] = "Run `cargo test` now."
             if prompt.startswith("CODE"):
                 delta["content"] = "Here:\n\n```rust\n// add two numbers\nfn add(a: i32, b: i32) -> i32 {\n    a + b // \"sum\"\n}\n```\n"
             if prompt.startswith("READ:"):

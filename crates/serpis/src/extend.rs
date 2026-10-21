@@ -150,7 +150,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.sidebar.selected", "(): the selected row as {kind = \"buffer\" | \"project\" | \"worktree\", id | path}."),
     ("serpis.sidebar.open", "(buf): open a buffer as clicking its row does."),
     // Jumps.
-    ("serpis.jump.run", "({regex, group = n | \"first\", action = \"goto\" | \"copy\" | fn({buffer, line, col, end_col, text}), highlight?, all_windows?}): avy/hop labels on the matches."),
+    ("serpis.jump.run", "({regex, group = n | \"first\", action = \"goto\" | \"copy\" | fn({buffer, line, col, end_col, text}), highlight?, all_windows?, inline_code?}): avy/hop labels on the matches; inline_code also targets code a chat shows without its backticks."),
     ("serpis.jump.labels", "(): the labels on screen {label, buffer, line, col, text}."),
     ("serpis.jump.cancel", "(): remove them."),
     // Looks.
