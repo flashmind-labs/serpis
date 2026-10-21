@@ -159,6 +159,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.font.list", "(): installed families."),
     ("serpis.theme.current", "(): the theme's name."),
     ("serpis.theme.list", "(): theme names."),
+    ("serpis.theme.colors", "(): the current colors as \"#rrggbb\": {accent, bg, fg, fg_dim, border, selection, blue, purple, cyan, green, yellow, orange, red}."),
     ("serpis.theme.load", "(name): switch theme."),
     ("serpis.theme.toggle", "(): light/dark."),
     ("serpis.theme.define", "(name, {light, bg, fg, bg_dim, fg_dim, border, blue, selection, cursor, red, green, yellow, purple, cyan, ...}): a new theme."),

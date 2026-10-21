@@ -224,6 +224,53 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
+    ed.define_command("select-accent", "Choose the accent color with live preview: the theme's own, one of its palette colors, or a typed #rrggbb (remembered across restarts).", o, |ed, a| {
+        let choose = |ed: &mut Editor, v: &str| {
+            ed.set_var("theme-accent", serde_json::json!(v));
+            ed.persist_state("theme-accent", serde_json::json!(v));
+        };
+        if let Some(v) = a.str(0) {
+            choose(ed, v);
+            return Ok(());
+        }
+        let original = ed.var_str("theme-accent").unwrap_or_else(|| "theme".into());
+        // The theme as it is without an override, to show what each choice looks like.
+        ed.set_var("theme-accent", serde_json::json!("theme"));
+        let own = crate::themes::hex(ed.theme.accent);
+        let mut cands = vec![Candidate::new("theme").detail(format!("{own}   the theme's own"))];
+        for role in crate::themes::ACCENT_ROLES {
+            if let Some(c) = crate::themes::accent_color(&ed.theme, role) {
+                cands.push(Candidate::new(role).detail(crate::themes::hex(c)));
+            }
+        }
+        ed.set_var("theme-accent", serde_json::json!(original.clone()));
+        ed.completing_read("Accent (or #rrggbb): ", cands, false, move |ed, c, input| {
+            let v = c.map(|c| c.value).unwrap_or(input);
+            if v.is_empty() {
+                return;
+            }
+            choose(ed, &v);
+            ed.message(format!("Accent: {v}"));
+        });
+        let restore = original.clone();
+        ed.minibuffer_preview(
+            Some(std::rc::Rc::new(|ed: &mut Editor, c: Option<&Candidate>| {
+                if let Some(c) = c {
+                    ed.set_var("theme-accent", serde_json::json!(c.value));
+                }
+            })),
+            Some(Box::new(move |ed: &mut Editor| {
+                ed.set_var("theme-accent", serde_json::json!(restore));
+            })),
+            true,
+        );
+        if let Some(mb) = &mut ed.minibuffer
+            && let Some(i) = mb.filtered.iter().position(|(ci, _)| mb.candidates[*ci].value == original)
+        {
+            mb.selected = i;
+        }
+        Ok(())
+    });
     ed.define_command("text-scale-increase", "Increase font size.", o, |ed, _| {
         crate::fonts::scale(ed, 1.0);
         Ok(())

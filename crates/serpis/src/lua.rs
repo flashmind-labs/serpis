@@ -1159,6 +1159,19 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     theme.set("list", lua.create_function(|_, ()| ed(|e| e.theme_names()))?)?;
     theme.set("current", lua.create_function(|_, ()| ed(|e| e.theme.name.clone()))?)?;
+    // serpis.theme.colors(): the current colors as "#rrggbb": {accent, bg, fg, blue, ...}.
+    theme.set("colors", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let t = &e.theme;
+            let h = crate::themes::hex;
+            json!({
+                "accent": h(t.accent), "bg": h(t.bg_alt), "fg": h(t.fg), "fg_dim": h(t.fg_dim), "border": h(t.border),
+                "selection": h(t.selection), "blue": h(t.blue), "purple": h(t.purple), "cyan": h(t.cyan),
+                "green": h(t.green), "yellow": h(t.yellow), "orange": h(t.accent2), "red": h(t.red),
+            })
+        })?;
+        lua_of(lua, &v)
+    })?)?;
     // Define a palette: {light=bool, bg=, fg=, bg_dim=, bg_inactive=, fg_dim=, border=, blue=,
     // selection=, cursor=, red=, green=, yellow=, purple=, cyan=, diff_add=, diff_del=, ansi={16 colors}}.
     theme.set("define", lua.create_function(|lua, (name, spec): (String, LuaValue)| {

@@ -116,6 +116,16 @@ pub fn bootstrap(ed: &mut Editor) {
     });
     ed.defvar("minibuffer-frecency", json!(true), "Rank prompt choices (M-x, buffers, Lua pickers with `frecency`) by how often and how recently you picked them.");
     ed.defvar("minibuffer-frecency-half-life", json!(7.0), "Days after which a pick counts half as much for frecency.");
+    ed.defvar("theme-accent", json!("theme"), "Accent color: \"theme\" (the theme's own), one of its palette colors (blue, purple, cyan, green, yellow, orange, red), so it suits any theme, or \"#rrggbb\". select-accent picks one with a live preview.");
+    ed.add_hook("variable-changed", editor::BUILTIN, |ed, p| {
+        if p.get("name").and_then(Value::as_str) == Some("theme-accent") {
+            let name = ed.theme.name.clone();
+            if let Err(e) = ed.load_theme(&name) {
+                ed.warn(format!("{e:#}"));
+            }
+        }
+        None
+    });
     ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
@@ -148,7 +158,10 @@ pub fn bootstrap(ed: &mut Editor) {
     packages::install_base(ed);
     packages::set_scheme(ed, "regular");
     fonts::install(ed);
-    // Last interactively chosen theme; init.lua may override it.
+    // Last interactively chosen theme and accent; init.lua may override them.
+    if let Some(a) = Editor::persisted_state("theme-accent") {
+        ed.set_var("theme-accent", a);
+    }
     if let Some(t) = Editor::persisted_theme() {
         if let Err(e) = ed.load_theme(&t) {
             ed.warn(format!("{e:#}"));

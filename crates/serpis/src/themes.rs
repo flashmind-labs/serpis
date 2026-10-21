@@ -73,7 +73,8 @@ impl ThemeSpec {
         let fg_dim = opt(&self.fg_dim).unwrap_or_else(|| mix(fg, body, 0.35));
         let fg_faint = opt(&self.fg_faint).unwrap_or_else(|| mix(fg_dim, body, 0.35));
         let blue = opt(&self.blue).or(opt(&self.accent)).unwrap_or(fg);
-        let accent = blue;
+        // The theme's own accent when it has one (Modus' tinted variants are red or purple).
+        let accent = opt(&self.accent).unwrap_or(blue);
         let red = opt(&self.red).unwrap_or(base.red);
         let green = opt(&self.green).unwrap_or(base.green);
         let yellow = opt(&self.yellow).unwrap_or(base.yellow);
@@ -164,6 +165,36 @@ pub fn counterpart(name: &str) -> String {
         .unwrap_or_else(|| "serpis-light".into())
 }
 
+/// Accent choices besides the theme's own: its palette colors, so they suit any theme.
+pub const ACCENT_ROLES: [&str; 7] = ["blue", "purple", "cyan", "green", "yellow", "orange", "red"];
+
+/// The color `spec` names in theme `t`: a palette role ("purple") or "#rrggbb"; None for
+/// "theme" (its own accent) and anything unknown.
+pub fn accent_color(t: &Theme, spec: &str) -> Option<Color32> {
+    match spec.trim() {
+        "blue" => Some(t.blue),
+        "purple" => Some(t.purple),
+        "cyan" => Some(t.cyan),
+        "green" => Some(t.green),
+        "yellow" => Some(t.yellow),
+        "orange" => Some(t.accent2),
+        "red" => Some(t.red),
+        s if s.starts_with('#') => parse_hex(s),
+        _ => None,
+    }
+}
+
+/// Use `c` as the accent, with what is derived from it (focus borders, your message bubbles).
+pub fn set_accent(t: &mut Theme, c: Color32) {
+    t.accent = c;
+    t.border_focused = c;
+    t.user_bg = mix(t.bg_alt, c, if t.dark { 0.16 } else { 0.12 });
+}
+
+pub fn hex(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
 fn state_path() -> std::path::PathBuf {
     crate::config_dir().join("state.json")
 }
@@ -208,6 +239,13 @@ impl Editor {
         t.tracking = base.tracking.clone();
         t.bold_weight = base.bold_weight;
         t.font_epoch = base.font_epoch;
+        if let Some(spec) = self.var_str("theme-accent") {
+            if let Some(c) = accent_color(&t, &spec) {
+                set_accent(&mut t, c);
+            } else if spec != "theme" && !spec.is_empty() {
+                anyhow::bail!("theme-accent: not a palette color or #rrggbb: {spec}");
+            }
+        }
         Ok(t)
     }
 
@@ -259,6 +297,12 @@ mod tests {
             let t = spec.to_theme(name, &base).unwrap();
             assert_eq!(t.dark, !spec.light, "{name}");
         }
+        // Themes keep their own accents (Modus Operandi Tinted's is red, not the palette's blue).
+        let tinted = bundled()["modus-operandi-tinted"].to_theme("modus-operandi-tinted", &base).unwrap();
+        assert_eq!(hex(tinted.accent), "#a60000");
+        assert_eq!(accent_color(&tinted, "purple"), Some(tinted.purple));
+        assert_eq!(accent_color(&tinted, "#ff8800"), Some(Color32::from_rgb(0xff, 0x88, 0x00)));
+        assert_eq!(accent_color(&tinted, "theme"), None);
         let v = bundled()["modus-vivendi"].to_theme("modus-vivendi", &base).unwrap();
         assert_eq!(v.bg_alt, Color32::BLACK);
         assert_eq!(counterpart("modus-vivendi-tinted"), "modus-operandi-tinted");
