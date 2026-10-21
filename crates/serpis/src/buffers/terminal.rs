@@ -65,6 +65,12 @@ pub struct TerminalBuffer {
     pub copy_mode: bool,
     cursor: Pos,
     anchor: Option<Pos>,
+    /// A selection made with the mouse (cleared by typing).
+    mouse_sel: Cell<Option<MouseSel>>,
+    /// Recent presses, for double and triple clicks: (time, cell, count).
+    last_press: Option<(Instant, Pos, u8)>,
+    /// Whether the pointer press that is down started a selection here.
+    selecting: bool,
     /// Row text, filled on demand. Rows that scrolled off stay valid as output arrives.
     row_cache: RefCell<Vec<Option<String>>>,
     /// Scrollback length when `row_cache` was last invalidated.
@@ -101,6 +107,36 @@ struct Input {
     end: Pos,
     first_line: usize,
     last_line: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SelUnit {
+    Char,
+    Word,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MouseSel {
+    anchor: Pos,
+    head: Pos,
+    unit: SelUnit,
+}
+
+/// The word around column `col` of `line` as (start, end exclusive) columns: a run of
+/// characters other than spaces and brackets/quotes, so paths and URLs select whole.
+fn word_at(line: &str, col: usize) -> (usize, usize) {
+    let cs: Vec<char> = line.chars().collect();
+    if col >= cs.len() {
+        return (col, col);
+    }
+    let sep = |c: char| c.is_whitespace() || "\"'`()[]{}<>|│,;".contains(c);
+    if sep(cs[col]) {
+        return (col, col + 1);
+    }
+    let start = (0..col).rev().take_while(|&i| !sep(cs[i])).last().unwrap_or(col);
+    let end = (col..cs.len()).take_while(|&i| !sep(cs[i])).last().map_or(col, |i| i + 1);
+    (start, end)
 }
 
 fn rgb(c: RgbColor) -> Color32 {
@@ -252,6 +288,9 @@ impl TerminalBuffer {
             rows,
             exited: false,
             copy_mode: false,
+            mouse_sel: Cell::new(None),
+            last_press: None,
+            selecting: false,
             cursor: Pos::ZERO,
             anchor: None,
             row_cache: RefCell::new(Vec::new()),
@@ -281,6 +320,7 @@ impl TerminalBuffer {
 
     pub fn write(&self, data: &[u8]) {
         if !self.exited {
+            self.mouse_sel.set(None);
             self.last_input.set(Some(Instant::now()));
             let _ = nix::unistd::write(self.master.as_ref(), data);
         }
@@ -386,6 +426,64 @@ impl TerminalBuffer {
     /// Whether a full-screen program (vim, less, htop, Claude Code) has the alternate screen.
     pub fn alt_screen(&self) -> bool {
         self.term.active_screen().is_ok_and(|s| s == Screen::Alternate)
+    }
+
+    /// The mouse selection as (start, end exclusive) over the scrollback, words and lines
+    /// expanded; None when empty.
+    pub fn mouse_selection(&self) -> Option<(Pos, Pos)> {
+        let m = self.mouse_sel.get()?;
+        let (a, b) = ordered(m.anchor, m.head);
+        match m.unit {
+            SelUnit::Char if a == b => None,
+            SelUnit::Char => Some((a, Pos::new(b.line, b.col + 1))),
+            SelUnit::Word => {
+                let (s, _) = word_at(&self.line(a.line), a.col);
+                let (_, e) = word_at(&self.line(b.line), b.col);
+                Some((Pos::new(a.line, s), Pos::new(b.line, e)))
+            }
+            SelUnit::Line => Some((Pos::new(a.line, 0), Pos::new(b.line, char_len(&self.line(b.line))))),
+        }
+    }
+
+    /// The cell under `p` (screen), clamped to the grid, as a scrollback position.
+    fn cell_at(&self, p: Pos2) -> Pos {
+        let col = ((p.x - self.origin.x) / self.cell.x).floor().clamp(0.0, self.cols.saturating_sub(1) as f32) as usize;
+        let row = ((p.y - self.origin.y) / self.cell.y).floor().clamp(0.0, self.rows.saturating_sub(1) as f32) as usize;
+        Pos::new(self.viewport_top() + row, col)
+    }
+
+    /// Select with the mouse: press (double: words, triple: lines), drag, release. Dragging past
+    /// the top or bottom edge scrolls.
+    fn mouse_select(&mut self, ui: &egui::Ui, resp: &egui::Response, rect: Rect) {
+        let (pressed, down, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos()));
+        let Some(pos) = pos else { return };
+        if pressed && resp.hovered() {
+            let at = self.cell_at(pos);
+            let count = match self.last_press {
+                Some((t, p, n)) if t.elapsed() < Duration::from_millis(400) && p.line == at.line && p.col.abs_diff(at.col) <= 1 => n % 3 + 1,
+                _ => 1,
+            };
+            self.last_press = Some((Instant::now(), at, count));
+            let unit = [SelUnit::Char, SelUnit::Word, SelUnit::Line][count as usize - 1];
+            self.mouse_sel.set(Some(MouseSel { anchor: at, head: at, unit }));
+            self.selecting = true;
+        } else if self.selecting && down {
+            if pos.y < rect.top() {
+                self.term.scroll_viewport(ScrollViewport::Delta(-1));
+            } else if pos.y > rect.bottom() {
+                self.term.scroll_viewport(ScrollViewport::Delta(1));
+            }
+            if let Some(mut m) = self.mouse_sel.get() {
+                m.head = self.cell_at(pos);
+                self.mouse_sel.set(Some(m));
+            }
+            ui.ctx().request_repaint();
+        } else if self.selecting && !down {
+            self.selecting = false;
+            if self.mouse_selection().is_none() {
+                self.mouse_sel.set(None);
+            }
+        }
     }
 
     pub fn exit_copy_mode(&mut self) {
@@ -824,7 +922,9 @@ impl Buffer for TerminalBuffer {
         }
 
         // Mouse wheel scrolls the scrollback (or is sent to apps that track the mouse).
-        let resp = ui.interact(rect, ui.scope_id().with(("term", rect.min.x as i32, rect.min.y as i32)), egui::Sense::click());
+        let resp = ui.interact(rect, ui.scope_id().with(("term", rect.min.x as i32, rect.min.y as i32)), egui::Sense::click_and_drag());
+        self.origin = rect.min + Vec2::splat(PAD);
+        self.mouse_select(ui, &resp, rect);
         if resp.hovered() {
             let dy = ui.input(|i| i.smooth_scroll_delta.y);
             if dy.abs() > 0.5 {
@@ -863,6 +963,11 @@ impl Buffer for TerminalBuffer {
         let vim_shape = if focused { ed.cursor_shape(ed.current_buffer()) } else { None };
         let alt = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
         let top = self.viewport_top();
+        // A mouse selection, inclusive for painting (whole lines reach the right edge).
+        let mouse_lines = self.mouse_sel.get().is_some_and(|m| m.unit == SelUnit::Line);
+        let mouse_paint = self
+            .mouse_selection()
+            .map(|(a, b)| if mouse_lines { (a, Pos::new(b.line, usize::MAX)) } else { (a, Pos::new(b.line, b.col.saturating_sub(1))) });
         let Ok(snapshot) = self.render.update(&self.term) else { return };
         let colors = snapshot.colors().ok();
         let default_bg = colors.as_ref().map(|c| rgb(c.background)).unwrap_or(theme.bg);
@@ -880,6 +985,7 @@ impl Buffer for TerminalBuffer {
         let sel = if self.copy_mode { self.anchor.map(|a| ordered(a, self.cursor)) } else { None };
         // Visual-line selects whole rows.
         let sel = sel.map(|(a, b)| if lines { (Pos::new(a.line, 0), Pos::new(b.line, usize::MAX)) } else { (a, b) });
+        let sel = sel.or(mouse_paint);
         let Ok(mut row_iter) = self.rows_it.update(&snapshot) else { return };
         let mut y = origin.y;
         let mut text = String::new();
@@ -1189,6 +1295,10 @@ impl TextSurface for TerminalBuffer {
     fn anchor(&self) -> Option<Pos> {
         self.anchor
     }
+    /// The mouse selection when there is one, else copy mode's.
+    fn selection(&self) -> Option<(Pos, Pos)> {
+        self.mouse_selection().or_else(|| self.anchor.map(|a| ordered(a, self.cursor())))
+    }
     fn set_anchor(&mut self, a: Option<Pos>) {
         if a.is_some() {
             self.enter_copy_mode();
@@ -1279,5 +1389,19 @@ impl TextSurface for TerminalBuffer {
         }
         self.cursor = self.term_cursor();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_include_paths_and_urls() {
+        let l = "ls /tmp/x-y.txt (https://a.b/c?d=1) end";
+        assert_eq!(word_at(l, 5), (3, 15));
+        assert_eq!(word_at(l, 20), (17, 34));
+        assert_eq!(word_at(l, 2), (2, 3));
+        assert_eq!(word_at(l, 99), (99, 99));
     }
 }

@@ -1363,6 +1363,15 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // Where text position (line, col) (1-based) of the focused buffer is on screen: {x, y, w, h}.
+    debug.set("cell_rect", lua.create_function(|lua, (line, col): (usize, usize)| {
+        let v = ed(|e| e.with_surface(|s, _| s.screen_rect(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1)))).flatten())?;
+        lua_of(lua, &v.map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})).unwrap_or(Value::Null))
+    })?)?;
+    // The focused buffer's selection as text (what copying takes), or nil.
+    debug.set("selection", lua.create_function(|_, ()| {
+        ed(|e| e.with_surface(|s, _| s.selection().map(|(a, b)| s.text_range(a, b))).flatten())
+    })?)?;
     // Files dropped on the window at (x, y), as from Finder: debug.drop_files({paths}, x?, y?).
     debug.set("drop_files", lua.create_function(|_, (paths, x, y): (Vec<String>, Option<f32>, Option<f32>)| {
         let at = x.zip(y).map(|(x, y)| egui::pos2(x, y));
