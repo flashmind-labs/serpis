@@ -24,7 +24,7 @@ steps({
     serpis.var.set("theme-accent", "#ff8800")
     T.check("or any #rrggbb", c().accent, "#ff8800")
     serpis.var.set("theme-accent", "theme")
-    T.check("theme restores the theme's own", c().accent, "#00bcff")
+    T.check("theme restores the theme's own", c().accent, "#79a8ff")
     serpis.command.run("select-accent")
   end,
   function()
@@ -39,7 +39,7 @@ steps({
     d.key("Escape")
   end,
   function()
-    T.check("Escape restores it", c().accent, "#00bcff")
+    T.check("Escape restores it", c().accent, "#79a8ff")
     serpis.command.run("select-accent")
   end,
   function() d.text("cyan") end,

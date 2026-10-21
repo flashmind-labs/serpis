@@ -54,6 +54,32 @@ pub fn parse_hex(s: &str) -> Option<Color32> {
 }
 
 /// Linear blend from `a` to `b`.
+/// Perceived lightness (OKLab L, 0..1).
+fn ok_l(c: Color32) -> f32 {
+    let lin = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let (r, g, b) = (lin(c.r()), lin(c.g()), lin(c.b()));
+    let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_99 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s
+}
+
+/// `c`, moved toward `body` until their lightness differs by at most `max` (hue kept).
+fn within(body: Color32, c: Color32, max: f32) -> Color32 {
+    if (ok_l(c) - ok_l(body)).abs() <= max {
+        return c;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..20 {
+        let t = (lo + hi) / 2.0;
+        if (ok_l(mix(body, c, t)) - ok_l(body)).abs() > max { hi = t } else { lo = t }
+    }
+    mix(body, c, lo)
+}
+
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
@@ -67,9 +93,12 @@ impl ThemeSpec {
         let body = req(&self.bg, "bg")?;
         let fg = req(&self.fg, "fg")?;
         let dark = !self.light;
-        // Frame and tool cards sit slightly away from the body color.
-        let dim = opt(&self.bg_dim).unwrap_or_else(|| mix(body, if dark { Color32::BLACK } else { fg }, 0.06));
-        let elevated = opt(&self.bg_inactive).unwrap_or_else(|| mix(body, fg, 0.08));
+        // Frame and tool cards sit slightly away from the body color. Palettes made for other
+        // roles (Modus' bg-dim is a distinct region in Emacs) can be far from it: keep surfaces
+        // within a light tint of the body, so the frame doesn't read as grey next to it.
+        let near = |c: Color32, f: f32| within(body, c, (ok_l(mix(body, fg, f)) - ok_l(body)).abs());
+        let dim = near(opt(&self.bg_dim).unwrap_or_else(|| mix(body, if dark { Color32::BLACK } else { fg }, 0.06)), 0.06);
+        let elevated = near(opt(&self.bg_inactive).unwrap_or_else(|| mix(body, fg, 0.08)), 0.11);
         let fg_dim = opt(&self.fg_dim).unwrap_or_else(|| mix(fg, body, 0.35));
         let fg_faint = opt(&self.fg_faint).unwrap_or_else(|| mix(fg_dim, body, 0.35));
         let blue = opt(&self.blue).or(opt(&self.accent)).unwrap_or(fg);
@@ -304,6 +333,12 @@ mod tests {
         assert_eq!(accent_color(&tinted, "#ff8800"), Some(Color32::from_rgb(0xff, 0x88, 0x00)));
         assert_eq!(accent_color(&tinted, "theme"), None);
         let v = bundled()["modus-vivendi"].to_theme("modus-vivendi", &base).unwrap();
+        // Its frame and cards stay near the black body instead of Modus' #1e1e1e / #303030.
+        assert!(ok_l(v.bg) < ok_l(Color32::from_rgb(0x14, 0x14, 0x14)), "{}", hex(v.bg));
+        assert!(ok_l(v.bg_elevated) < ok_l(Color32::from_rgb(0x24, 0x24, 0x24)), "{}", hex(v.bg_elevated));
+        // GitHub's own (subtle) surfaces are kept as they are.
+        let g = bundled()["github-dark-default"].to_theme("github-dark-default", &base).unwrap();
+        assert_eq!(hex(g.bg), "#04070d");
         assert_eq!(v.bg_alt, Color32::BLACK);
         assert_eq!(counterpart("modus-vivendi-tinted"), "modus-operandi-tinted");
         assert_eq!(counterpart("github-light-high-contrast"), "github-dark-high-contrast");
