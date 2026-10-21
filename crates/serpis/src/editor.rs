@@ -1102,6 +1102,44 @@ impl Editor {
         self.with_buffer(id, |b, ed| b.handle_paste(text, ed));
     }
 
+    /// Files dropped or pasted: the minibuffer gets their paths, a buffer decides (a chat
+    /// attaches images, a terminal pastes paths).
+    pub fn handle_files(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.minibuffer.is_some() || self.sidebar.focused {
+            let text = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+            self.handle_paste(&text);
+            return;
+        }
+        let id = self.current_buffer();
+        self.with_buffer(id, |b, ed| b.handle_files(&paths, ed));
+    }
+
+    /// Paste an image (PNG bytes): saved under the temp dir, then handled as a file, so
+    /// terminal programs (Claude Code, pi) get a path and chats an attachment.
+    pub fn paste_image(&mut self, png: &[u8]) {
+        let dir = std::env::temp_dir().join("serpis-pastes");
+        let _ = std::fs::create_dir_all(&dir);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let path = dir.join(format!("pasted-{stamp}.png"));
+        match std::fs::write(&path, png) {
+            Ok(()) => self.handle_files(vec![path]),
+            Err(e) => self.error(format!("Couldn't save the pasted image: {e}")),
+        }
+    }
+
+    /// Files dropped on the window go to the window under the pointer.
+    pub fn drop_files(&mut self, paths: Vec<std::path::PathBuf>, at: Option<egui::Pos2>) {
+        if let Some(p) = at
+            && let Some(w) = self.layout.leaves().into_iter().find(|w| self.windows.get(*w).is_some_and(|win| win.rect.contains(p)))
+        {
+            self.focus_window(w);
+        }
+        self.handle_files(paths);
+    }
+
     pub fn keyboard_quit(&mut self) {
         self.pending_keys.clear();
         self.pending_since = None;

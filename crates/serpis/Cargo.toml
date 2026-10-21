@@ -26,7 +26,7 @@ egui = "0.37"
 fontique = { version = "0.11", default-features = false, features = ["system", "fontconfig-dlopen"] }
 # LuaJIT (Lua 5.1 + extensions), like Neovim: fast, and familiar to plugin authors.
 mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54" }
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", features = ["kitty-graphics", "png"] }
 nix = { version = "0.29", features = ["term", "fs", "signal", "process", "ioctl"] }
 libloading = "0.8"
 notify = "8"
@@ -35,7 +35,8 @@ slotmap = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arboard = "3"
 url = "2"
-image = { version = "0.25", default-features = false, features = ["png"] }
+base64.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # Syntax highlighting: syntect with bat's grammars (two-face), pure-Rust regexes.
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }

@@ -395,6 +395,8 @@ pub struct StyledLine {
     pub pads: Vec<(usize, f32)>,
     /// A marker hanging left of the text (list bullets and numbers).
     pub marker: Option<(String, Face)>,
+    /// An image shown instead of text: store id (`crate::images`) and size in points.
+    pub image: Option<(u64, egui::Vec2)>,
 }
 
 impl StyledLine {
@@ -434,6 +436,11 @@ impl StyledLine {
         self.spans = spans;
         self
     }
+    /// A line that shows image `id` at `size` (points); its text stays for copying.
+    pub fn image(mut self, id: u64, size: egui::Vec2) -> Self {
+        self.image = Some((id, size));
+        self
+    }
 
     /// Hash of everything that affects layout and paint.
     pub fn layout_hash(&self) -> u64 {
@@ -453,6 +460,7 @@ impl StyledLine {
             (*o, w.to_bits()).hash(&mut h);
         }
         self.marker.as_ref().map(|(m, f)| (m, *f as u8)).hash(&mut h);
+        self.image.map(|(id, s)| (id, s.x.to_bits(), s.y.to_bits())).hash(&mut h);
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -738,8 +746,11 @@ impl DocView {
             let h = src.hash(i);
             if self.heights[i].0 != h {
                 let line = src.styled(i);
-                let g = layout_line(painter, &line, theme, self.wrap_width(&line, col_w));
-                self.heights[i] = (h, g.size().y.max(1.0) + line.gap_above + line.pad_top + line.pad_bottom, g.size().x + 2.0 * line.indent, line.block);
+                let size = match line.image {
+                    Some((_, s)) => s,
+                    None => layout_line(painter, &line, theme, self.wrap_width(&line, col_w)).size(),
+                };
+                self.heights[i] = (h, size.y.max(1.0) + line.gap_above + line.pad_top + line.pad_bottom, size.x + 2.0 * line.indent, line.block);
             }
         }
         self.heights.iter().map(|h| h.1).sum::<f32>() + 2.0 * self.padding.y
@@ -927,7 +938,16 @@ impl DocView {
                     paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection);
                 }
             }
-            painter.galley(origin, g.clone(), theme.fg);
+            match line.image {
+                Some((id, size)) => {
+                    let r = Rect::from_min_size(origin, size);
+                    crate::images::paint(&painter, id, r, 6.0, theme.bg_alt);
+                    painter.rect_stroke(r, 6.0, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+                }
+                None => {
+                    painter.galley(origin, g.clone(), theme.fg);
+                }
+            }
             if let Some(b) = block {
                 if b.bottom {
                     if let Some((top, x0, x1, c)) = outline.take() {

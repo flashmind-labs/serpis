@@ -13,6 +13,7 @@ pub mod buffers;
 pub mod chat_api;
 pub mod extend;
 pub mod highlight;
+pub mod images;
 pub mod chrome;
 pub mod clipboard;
 pub mod commands;
@@ -63,6 +64,15 @@ pub fn config_dir() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config").join("serpis"))
 }
 
+/// `s` as one shell word: unchanged when safe, else single-quoted.
+pub fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%=~".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 pub fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
         Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
@@ -105,6 +115,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
     ed.defvar("extensions-disabled", json!([]), "Lua extensions in <config>/extensions not to load, by name (\"max-money\" for max-money.lua).");
+    ed.defvar("terminal-image-storage-mb", json!(320), "Memory for images programs show in a terminal (Kitty graphics protocol: yazi previews, kitten icat...), per terminal; 0 turns terminal images off.");
     ed.defvar("terminal-shell-integration", json!(true), "Load serpis's zsh integration in new terminals (OSC 133 prompt marks).");
     ed.defvar("terminal-prompt-regexp", json!(buffers::terminal::DEFAULT_PROMPT_REGEXP), "Prompt prefix regexp used when the shell doesn't mark prompts (OSC 133).");
 

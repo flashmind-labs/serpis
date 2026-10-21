@@ -54,6 +54,9 @@ pub struct TerminalBuffer {
     child: nix::unistd::Pid,
     rx: mpsc::Receiver<PtyMsg>,
     grid: Arc<AtomicU32>,
+    /// A cell's size in pixels as programs are told (CSI 16 t; image sizes), width << 16 | height.
+    cell_px: Arc<AtomicU32>,
+    pub images: super::term_images::Images,
     cell: Vec2,
     cols: u16,
     rows: u16,
@@ -195,23 +198,36 @@ impl TerminalBuffer {
         })?;
 
         let grid = Arc::new(AtomicU32::new(((cols as u32) << 16) | rows as u32));
+        let cell_px = Arc::new(AtomicU32::new((8 << 16) | 16));
         let mut term = Terminal::new(cols, rows).map_err(|e| anyhow::anyhow!("libghostty: {e:?}"))?;
         term.set_scrollback_max_lines(Some(SCROLLBACK_LINES)).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let _ = term.set_terminfo_name(TERM);
+        // Images (Kitty graphics protocol), sent inline, from files or from shared memory as
+        // local programs do (kitten icat, yazi).
+        let mb = ed.var("terminal-image-storage-mb").and_then(serde_json::Value::as_u64).unwrap_or(320);
+        if mb > 0 {
+            super::term_images::init();
+            let _ = term.set_kitty_image_storage_limit(mb * 1024 * 1024);
+            let _ = term.set_kitty_image_from_file_allowed(true);
+            let _ = term.set_kitty_image_from_shared_mem_allowed(true);
+            let _ = term.set_kitty_image_temp_file_dir(Some(&std::env::temp_dir()));
+        }
         {
             let w = master.clone();
             let g = grid.clone();
+            let px = cell_px.clone();
             term.on_pty_write(move |_t, data| {
                 let _ = nix::unistd::write(w.as_ref(), data);
             })
             .map_err(|e| anyhow::anyhow!("{e:?}"))?
             .on_size(move |_t| {
                 let v = g.load(Ordering::Relaxed);
+                let c = px.load(Ordering::Relaxed);
                 Some(libghostty_vt::terminal::SizeReportSize {
                     rows: (v & 0xffff) as u16,
                     columns: (v >> 16) as u16,
-                    cell_width: 8,
-                    cell_height: 16,
+                    cell_width: c >> 16,
+                    cell_height: c & 0xffff,
                 })
             })
             .map_err(|e| anyhow::anyhow!("{e:?}"))?
@@ -229,6 +245,8 @@ impl TerminalBuffer {
             child,
             rx,
             grid,
+            cell_px,
+            images: Default::default(),
             cell: Vec2::new(8.0, 16.0),
             cols,
             rows,
@@ -254,6 +272,11 @@ impl TerminalBuffer {
             busy_title_re: None,
             quiet_after: 1.5,
         })
+    }
+
+    /// A cell's size in points.
+    pub fn cell_size(&self) -> Vec2 {
+        self.cell
     }
 
     pub fn write(&self, data: &[u8]) {
@@ -779,11 +802,14 @@ impl Buffer for TerminalBuffer {
         self.cell = Vec2::new(cw.max(1.0), ch.max(1.0));
         let cols = (((rect.width() - 2.0 * PAD) / self.cell.x).floor() as u16).max(2);
         let rows = (((rect.height() - 2.0 * PAD) / self.cell.y).floor() as u16).max(2);
-        if (cols, rows) != (self.cols, self.rows) {
+        let ppp = ui.ctx().pixels_per_point();
+        let px = (((self.cell.x * ppp).round() as u32) << 16) | (self.cell.y * ppp).round() as u32;
+        // Font size changes resize cells without changing the grid: images need the new size.
+        if (cols, rows) != (self.cols, self.rows) || px != self.cell_px.load(Ordering::Relaxed) {
             self.cols = cols;
             self.rows = rows;
-            let ppp = ui.ctx().pixels_per_point();
-            let _ = self.term.resize(cols, rows, (self.cell.x * ppp) as u32, (self.cell.y * ppp) as u32);
+            self.cell_px.store(px, Ordering::Relaxed);
+            let _ = self.term.resize(cols, rows, px >> 16, px & 0xffff);
             self.grid.store(((cols as u32) << 16) | rows as u32, Ordering::Relaxed);
             let ws = nix::pty::Winsize {
                 ws_row: rows,
@@ -843,6 +869,12 @@ impl Buffer for TerminalBuffer {
         let default_fg = colors.as_ref().map(|c| rgb(c.foreground)).unwrap_or(theme.fg);
         let bg = default_bg;
         painter.rect_filled(rect, 0.0, bg);
+        let px = self.cell_px.load(Ordering::Relaxed);
+        let image_grid = super::term_images::Grid { origin, cell: self.cell, cell_px: (px >> 16, px & 0xffff), clip: rect };
+        self.images.begin(&self.term);
+        for layer in [libghostty_vt::kitty::graphics::Layer::BelowBg, libghostty_vt::kitty::graphics::Layer::BelowText] {
+            self.images.paint(&self.term, layer, &painter, &image_grid);
+        }
         // The copy-mode (vim visual) selection is a cell background, so its text stays readable.
         let lines = focused && crate::packages::vim::selection_kind(ed, ed.current_buffer()) == crate::text::SelectionKind::Lines;
         let sel = if self.copy_mode { self.anchor.map(|a| ordered(a, self.cursor)) } else { None };
@@ -852,7 +884,10 @@ impl Buffer for TerminalBuffer {
         let mut y = origin.y;
         let mut text = String::new();
         let mut line = top;
+        let mut placeholders = Vec::new();
+        let mut row_cells = Vec::new();
         while let Some(row) = row_iter.next() {
+            row_cells.clear();
             let Ok(mut cell_iter) = self.cells_it.update(row) else { break };
             let mut x = origin.x;
             let mut col = 0;
@@ -895,6 +930,18 @@ impl Buffer for TerminalBuffer {
                 }
                 if n > 0 {
                     let _ = cell.graphemes_utf8(&mut text);
+                    // Kitty image placeholders show part of an image instead of a glyph.
+                    if text.starts_with(super::term_images::PLACEHOLDER) {
+                        if let Ok(s) = cell.style()
+                            && let Some(c) = super::term_images::PlaceholderCell::parse(col as u32, (line - top) as i32, &text, &s.fg_color, &s.underline_color)
+                        {
+                            row_cells.push(c);
+                        }
+                        flush(&mut job, run_start_x);
+                        x += self.cell.x;
+                        col += 1;
+                        continue;
+                    }
                     let fmt = TextFormat {
                         font_id: font.clone(),
                         color: if bold { fg.gamma_multiply(1.0) } else { fg },
@@ -924,9 +971,13 @@ impl Buffer for TerminalBuffer {
                 col += 1;
             }
             flush(&mut job, run_start_x);
+            placeholders.extend(super::term_images::runs(&row_cells));
             y += self.cell.y;
             line += 1;
         }
+
+        self.images.paint_virtual(&self.term, &placeholders, &painter, &image_grid);
+        self.images.paint(&self.term, libghostty_vt::kitty::graphics::Layer::AboveText, &painter, &image_grid);
 
         // Terminal cursor (hidden in copy mode), painted after the snapshot is released.
         let mut live = None;

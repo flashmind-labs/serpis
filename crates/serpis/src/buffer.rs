@@ -67,6 +67,13 @@ pub trait Buffer: Any {
         self.handle_text(text, ed)
     }
 
+    /// Files dropped on the buffer or pasted (a pasted image arrives as a temporary PNG). By
+    /// default their paths are pasted, shell-quoted, as terminals do.
+    fn handle_files(&mut self, paths: &[std::path::PathBuf], ed: &mut Editor) -> bool {
+        let text = paths.iter().map(|p| crate::shell_quote(&p.to_string_lossy())).collect::<Vec<_>>().join(" ");
+        self.handle_paste(&text, ed)
+    }
+
     /// Per-frame work: drain channels, advance state.
     fn poll(&mut self, _ed: &mut Editor) {}
 

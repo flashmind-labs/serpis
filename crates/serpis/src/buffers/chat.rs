@@ -25,6 +25,7 @@ enum Entry {
     User {
         text: String,
         queued: bool,
+        images: Vec<crate::images::ImageRef>,
     },
     Assistant {
         blocks: Vec<AssistantContent>,
@@ -95,6 +96,8 @@ pub struct ChatBuffer {
     pub composer_hits: Vec<(&'static str, Rect)>,
     /// Custom session entries (pi's `custom` entries): (type, data), oldest first.
     pub custom_entries: Vec<(String, Value)>,
+    /// Images waiting in the composer, sent with the next message.
+    pub attachments: Vec<Attachment>,
     /// Where the conversation is recorded (created with the first prompt).
     pub session: Option<crate::session::SessionWriter>,
     session_failed: bool,
@@ -145,6 +148,7 @@ impl ChatBuffer {
             style_key: 0,
             composer_hits: Vec::new(),
             custom_entries: Vec::new(),
+            attachments: Vec::new(),
             session: None,
             session_failed: false,
         };
@@ -200,7 +204,7 @@ impl ChatBuffer {
     /// Send the prompt: start a run, or steer the running one.
     pub fn send(&mut self, ed: &mut Editor, follow_up: bool) {
         let text = self.prompt.text().trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         self.prompt.clear();
@@ -227,17 +231,32 @@ impl ChatBuffer {
             ed.warn(reason);
             return false;
         }
-        if self.title.is_empty() {
-            self.title = title_from(&text);
+        if !self.attachments.is_empty()
+            && let Some(m) = self.model.as_ref().filter(|m| !m.input.iter().any(|i| i == "image"))
+        {
+            ed.error(format!("{} doesn't take images (chat-select-model, or remove the attachments)", m.id));
+            return false;
         }
-        let msg = Message::user_text(text.clone());
+        if self.title.is_empty() {
+            self.title = if text.is_empty() { "Image".into() } else { title_from(&text) };
+        }
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(UserContent::Text { text: text.clone() });
+        }
+        let attachments = std::mem::take(&mut self.attachments);
+        let images: Vec<crate::images::ImageRef> = attachments.iter().map(|a| a.image).collect();
+        for a in attachments {
+            content.push(UserContent::Image { data: a.encoded.data.to_string(), mime_type: a.encoded.mime });
+        }
+        let msg = Message::User { content, timestamp: serpis_ai::now_ms() };
         if let Some(agent) = &self.agent {
             if follow_up {
                 agent.follow_up(msg);
             } else {
                 agent.steer(msg);
             }
-            self.entries.push(Entry::User { text, queued: true });
+            self.entries.push(Entry::User { text, queued: true, images });
             self.dirty = true;
             return true;
         }
@@ -339,6 +358,15 @@ impl ChatBuffer {
         self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 
+    /// Attach an image file to the next message.
+    pub fn attach_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
+        let (image, encoded) = crate::images::load_file(path).ok_or_else(|| anyhow::anyhow!("{} isn't an image serpis can read", path.display()))?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.attachments.push(Attachment { image, encoded, name });
+        self.focus = Focus::Prompt;
+        Ok(())
+    }
+
     /// This chat as seen from outside (`Editor::chats`, `serpis.chat`).
     pub fn info(&self) -> crate::chat_api::ChatInfo {
         crate::chat_api::ChatInfo {
@@ -400,20 +428,13 @@ impl ChatBuffer {
         self.dirty = true;
         match ev {
             AgentEvent::MessageStart(Message::User { content, .. }) => {
-                let text = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        UserContent::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let (text, images) = user_parts(&content);
                 // A queued (steering) message is already shown; un-queue it.
-                if let Some(Entry::User { queued, .. }) = self.entries.iter_mut().find(|e| matches!(e, Entry::User { text: t, queued: true } if *t == text)) {
+                if let Some(Entry::User { queued, .. }) = self.entries.iter_mut().find(|e| matches!(e, Entry::User { text: t, queued: true, .. } if *t == text)) {
                     *queued = false;
                     return;
                 }
-                self.entries.push(Entry::User { text, queued: false });
+                self.entries.push(Entry::User { text, queued: false, images });
             }
             AgentEvent::MessageStart(Message::Assistant(m)) => self.entries.push(Entry::Assistant {
                 blocks: Vec::new(),
@@ -590,12 +611,25 @@ impl ChatBuffer {
         for (ei, e) in self.entries.iter().enumerate() {
             let is_tool = matches!(e, Entry::Tool { .. });
             match e {
-                Entry::User { text, queued } => {
-                    // A bubble on the right, as wide as its text.
+                Entry::User { text, queued, images } => {
+                    // A bubble on the right, as wide as its text (or its images).
                     let blk = Block::new(t.user_bg).shrink(0.82);
                     let mut lines: Vec<StyledLine> = Vec::new();
                     if *queued {
                         lines.push(StyledLine::new("Queued · steers the running agent", Face::Meta));
+                    }
+                    for (i, img) in images.iter().enumerate() {
+                        let mut l = StyledLine::new(format!("[image {}×{}]", img.w, img.h), Face::Meta).image(img.id, img.fit(320.0 * k, 240.0 * k));
+                        if i > 0 {
+                            l.pad_top = 6.0 * k;
+                        }
+                        lines.push(l);
+                    }
+                    if !images.is_empty()
+                        && !text.is_empty()
+                        && let Some(l) = lines.last_mut()
+                    {
+                        l.pad_bottom = 8.0 * k;
                     }
                     lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText)));
                     if lines.is_empty() {
@@ -835,16 +869,9 @@ impl ChatBuffer {
         for m in &l.messages {
             match m {
                 Message::User { content, .. } => {
-                    let text = content
-                        .iter()
-                        .map(|c| match c {
-                            UserContent::Text { text } => text.clone(),
-                            UserContent::Image { mime_type, .. } => format!("[image {mime_type}]"),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    let (text, images) = user_parts(content);
                     self.prompt_history.push(text.clone());
-                    self.entries.push(Entry::User { text, queued: false });
+                    self.entries.push(Entry::User { text, queued: false, images });
                 }
                 Message::Assistant(a) => {
                     add_usage(&mut self.totals, &a.usage);
@@ -1347,6 +1374,8 @@ fn diff_code_start(l: &str) -> Option<usize> {
 fn default_expanded(name: &str, result: Option<&ToolResultMessage>) -> bool {
     match result {
         Some(r) if r.is_error => true,
+        // Images are what you want to see.
+        Some(r) if r.content.iter().any(|c| matches!(c, UserContent::Image { .. })) => true,
         _ => matches!(name, "edit" | "write"),
     }
 }
@@ -1480,6 +1509,14 @@ fn tool_lines(
             }
         } else if let Some(r) = result {
             let face = if r.is_error { Face::ToolError } else { Face::ToolOutput };
+            // Images (read on an image file, screenshots): shown, not described.
+            for c in &r.content {
+                if let UserContent::Image { data, .. } = c
+                    && let Some(img) = crate::images::from_base64(data)
+                {
+                    body.push((StyledLine::new(format!("[image {}×{}]", img.w, img.h), Face::Meta).image(img.id, img.fit(360.0 * k, 260.0 * k)).pad(4.0 * k, 4.0 * k), None));
+                }
+            }
             let text = tool_text(r);
             let lines: Vec<&str> = text.lines().collect();
             let hl = if name == "read" && !r.is_error { crate::highlight::highlight(arg(args, "path"), &lines, face) } else { None }.unwrap_or_default();
@@ -1538,12 +1575,34 @@ fn blend(base: Color32, over: Color32) -> Color32 {
 fn tool_text(r: &ToolResultMessage) -> String {
     r.content
         .iter()
-        .map(|c| match c {
-            UserContent::Text { text } => text.clone(),
-            UserContent::Image { mime_type, .. } => format!("[image {mime_type}]"),
+        .filter_map(|c| match c {
+            UserContent::Text { text } => Some(text.clone()),
+            UserContent::Image { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A user message's text and images (decoded into the image store).
+fn user_parts(content: &[UserContent]) -> (String, Vec<crate::images::ImageRef>) {
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    for c in content {
+        match c {
+            UserContent::Text { text: t } => text.push(t.clone()),
+            UserContent::Image { data, .. } => images.extend(crate::images::from_base64(data)),
+        }
+    }
+    (text.join("\n"), images)
+}
+
+/// An image waiting in the composer.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub image: crate::images::ImageRef,
+    pub encoded: crate::images::Encoded,
+    /// Where it came from (a file name, or "pasted image").
+    pub name: String,
 }
 
 /// `agent-model` var, then pi's settings (`defaultProvider`/`defaultModel`), then any model with credentials.
@@ -1697,8 +1756,11 @@ impl Buffer for ChatBuffer {
         let one_line = ui.fonts_mut(|f| f.row_height(&theme.prop())).max((theme.font_size * 1.55).round()) + 2.0 * self.prompt.view.padding.y;
         let content_h = self.prompt.view.measure(ui, col_w, &src, &theme);
         let text_h = content_h.min((rect.height() * 0.4 - toolbar_h).max(one_line)).max(one_line);
+        // Attached images: a row of thumbnails above the text.
+        let thumb_h = (56.0 * k).round();
+        let att_h = if self.attachments.is_empty() { 0.0 } else { thumb_h + 14.0 * k };
         let left = rect.center().x - col_w / 2.0;
-        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
+        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
         let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k));
 
         // Transcript.
@@ -1734,7 +1796,39 @@ impl Buffer for ChatBuffer {
         let outline = if p_focus { crate::chrome::tint(theme.accent, 0.6) } else { theme.border };
         painter.rect_stroke(card, radius, Stroke::new(1.0, outline), egui::StrokeKind::Inside);
 
-        let text_rect = Rect::from_min_max(card.min, egui::pos2(card.right(), card.bottom() - toolbar_h));
+        let mut hits: Vec<(&'static str, Rect)> = Vec::new();
+        let mut remove = None;
+        let mut x = card.left() + 14.0 * k;
+        for (i, a) in self.attachments.iter().enumerate() {
+            let size = a.image.fit(thumb_h * 2.0, thumb_h);
+            let r = Rect::from_min_size(egui::pos2(x, card.top() + 12.0 * k), size);
+            if r.right() > card.right() - 14.0 * k {
+                break;
+            }
+            crate::images::paint(&painter, a.image.id, r, 6.0 * k, theme.bg_alt);
+            painter.rect_stroke(r, 6.0 * k, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+            // Remove: a small × on the corner.
+            let xr = Rect::from_center_size(egui::pos2(r.right() - 2.0 * k, r.top() + 2.0 * k), egui::vec2(16.0 * k, 16.0 * k));
+            let resp = ui.interact(xr, ui.scope_id().with(("attachment-remove", i)), egui::Sense::click()).on_hover_text(format!("Remove {}", a.name));
+            let tip = ui.interact(r, ui.scope_id().with(("attachment", i)), egui::Sense::hover());
+            let _ = tip.on_hover_text(format!("{} · {}×{}", a.name, a.image.w, a.image.h));
+            painter.circle_filled(xr.center(), 8.0 * k, if resp.hovered() { theme.fg } else { theme.fg_dim });
+            let (c, d) = (xr.center(), 3.0 * k);
+            for (p0, p1) in [(c + egui::vec2(-d, -d), c + egui::vec2(d, d)), (c + egui::vec2(-d, d), c + egui::vec2(d, -d))] {
+                painter.line_segment([p0, p1], Stroke::new(1.5 * k, theme.bg_elevated));
+            }
+            if resp.clicked() {
+                remove = Some(i);
+            }
+            hits.push((["attachment-0", "attachment-1", "attachment-2", "attachment-3"].get(i).copied().unwrap_or("attachment"), r));
+            hits.push((["attachment-0-remove", "attachment-1-remove", "attachment-2-remove", "attachment-3-remove"].get(i).copied().unwrap_or("attachment-remove"), xr));
+            x = r.right() + 10.0 * k;
+        }
+        if let Some(i) = remove {
+            self.attachments.remove(i);
+            self.focus = Focus::Prompt;
+        }
+        let text_rect = Rect::from_min_max(egui::pos2(card.left(), card.top() + att_h), egui::pos2(card.right(), card.bottom() - toolbar_h));
         let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::UserText };
         let presp = self.prompt.view.show(ui, text_rect, &src, &theme, &ViewOptions {
             focused: p_focus,
@@ -1824,11 +1918,31 @@ impl Buffer for ChatBuffer {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
-        self.composer_hits = vec![("model", mr), ("thinking", tr), ("send", send), ("card", card)];
+        hits.extend([("model", mr), ("thinking", tr), ("send", send), ("card", card)]);
+        self.composer_hits = hits;
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;
             ed.main_sender().send(move |ed| ed.call(cmd));
         }
+    }
+
+    /// Images attach to the next message; other files go into the prompt as paths.
+    fn handle_files(&mut self, paths: &[std::path::PathBuf], ed: &mut Editor) -> bool {
+        let mut others = Vec::new();
+        for p in paths {
+            if crate::images::is_image_path(p) {
+                if let Err(e) = self.attach_file(p) {
+                    ed.error(format!("{e:#}"));
+                }
+            } else {
+                others.push(p.to_string_lossy().into_owned());
+            }
+        }
+        if !others.is_empty() {
+            self.handle_text(&others.join(" "), ed);
+        }
+        self.dirty = true;
+        true
     }
 
     fn handle_text(&mut self, text: &str, _ed: &mut Editor) -> bool {

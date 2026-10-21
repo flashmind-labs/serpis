@@ -586,8 +586,14 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("paste", "Paste from the clipboard (alias of yank).", o, |ed, a| ed.run_command("yank", a));
-    ed.define_command("yank", "Paste from the clipboard.", o, |ed, _| {
-        if let Some(t) = ed.clipboard_text() {
+    ed.define_command("yank", "Paste from the clipboard: text, files copied in a file manager, or an image.", o, |ed, _| {
+        if let Some(files) = crate::clipboard::files() {
+            ed.handle_files(files);
+        } else if let Some(t) = crate::clipboard::get() {
+            ed.handle_paste(&t);
+        } else if let Some(png) = crate::clipboard::image_png() {
+            ed.paste_image(&png);
+        } else if let Some(t) = ed.clipboard_text() {
             ed.handle_paste(&t);
         }
         Ok(())

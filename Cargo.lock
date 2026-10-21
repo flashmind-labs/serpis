@@ -1745,6 +1745,7 @@ dependencies = [
  "bitflags 2.13.2",
  "int-enum",
  "libghostty-vt-sys",
+ "png",
 ]
 
 [[package]]
@@ -3201,6 +3202,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64 0.22.1",
  "dirs",
  "eframe",
  "egui",

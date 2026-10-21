@@ -185,6 +185,18 @@ From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configu
 `serpis.workspace.switch/move_window/list/rename`, and the hooks `workspace-switched` and
 `window-layout-changed`.
 
+## Images
+
+- **Chats**: paste an image (Cmd-V with a screenshot on the clipboard) or drop image files on a chat:
+  they wait in the composer as thumbnails (× removes one) and go with the next message, if the model
+  takes images. Images show in your messages, in tool results (`read` on an image) and in resumed
+  sessions. Other dropped files go into the prompt as paths. Lua: `serpis.chat.attach(buf, path)`.
+- **Terminals**: programs can show images with the Kitty graphics protocol (`kitten icat`, yazi's
+  previews, anything using Unicode placeholders), drawn from libghostty's image store. Pasting an
+  image saves it as a PNG under `$TMPDIR/serpis-pastes` and pastes its path, which Claude Code and
+  others attach; dropped files paste their paths. Ctrl-V still reaches the program (Claude Code reads
+  the clipboard itself). `terminal-image-storage-mb` sets the memory per terminal (0 turns it off).
+
 ## Extend
 
 - **Lua** (LuaJIT): `~/.config/serpis/init.lua` (created on first run with examples), plus one file per

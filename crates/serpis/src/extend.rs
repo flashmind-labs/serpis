@@ -76,6 +76,8 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.chat.abort", "(buf?): stop its agent now (also from the chat's own hooks: no further model request or tool runs)."),
     ("serpis.chat.set_model", "(buf?, \"provider/model-id\"): switch its model; raises when unknown or the provider has no credentials."),
     ("serpis.chat.set_thinking", "(buf?, level): off, minimal, low, medium, high, xhigh, max (clamped to the model)."),
+    ("serpis.chat.attach", "(buf?, path): attach an image file (png, jpeg, gif, webp, bmp) to the chat's next message; raises when it isn't an image."),
+    ("serpis.chat.attachments", "(buf?): images waiting for the next message: {name, width, height, mime}."),
     ("serpis.chat.transcript", "(buf?): the transcript's text as shown (as of the last frame that drew it)."),
     ("serpis.chat.prompt", "(buf?, text): send text as if typed (a running agent is steered)."),
     ("serpis.chat.append", "(buf?, type, data): add a custom entry to its session file (pi's `custom` entries); kept when the session is resumed."),

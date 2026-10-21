@@ -1075,6 +1075,24 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             c.submit(e, text, false);
         }))
     })?)?;
+    // serpis.chat.attach(buf?, path): attach an image file to the chat's next message.
+    chat.set("attach", lua.create_function(move |_, (id, path): (Option<u64>, String)| {
+        let id = chat_id(id)?;
+        let path = crate::expand_home(&path);
+        ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.attach_file(&path)))?
+            .ok_or_else(|| mlua::Error::runtime("the chat is busy"))?
+            .map_err(|err| mlua::Error::runtime(format!("{err:#}")))
+    })?)?;
+    // serpis.chat.attachments(buf?): images waiting for the next message: {name, width, height, mime}.
+    chat.set("attachments", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let v = ed(|e| {
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| {
+                c.attachments.iter().map(|a| json!({"name": a.name, "width": a.image.w, "height": a.image.h, "mime": a.encoded.mime})).collect::<Vec<_>>()
+            })
+        })?;
+        lua_of(lua, &v.unwrap_or_default())
+    })?)?;
     // serpis.chat.transcript(buf?): the transcript's text as shown.
     chat.set("transcript", lua.create_function(move |_, id: Option<u64>| {
         let id = chat_id(id)?;
@@ -1345,6 +1363,27 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // Files dropped on the window at (x, y), as from Finder: debug.drop_files({paths}, x?, y?).
+    debug.set("drop_files", lua.create_function(|_, (paths, x, y): (Vec<String>, Option<f32>, Option<f32>)| {
+        let at = x.zip(y).map(|(x, y)| egui::pos2(x, y));
+        ed(|e| e.drop_files(paths.iter().map(|p| crate::expand_home(p)).collect(), at))
+    })?)?;
+    // Paste PNG bytes from a file as if it were an image on the clipboard.
+    debug.set("paste_image", lua.create_function(|_, path: String| {
+        let png = std::fs::read(crate::expand_home(&path)).map_err(|e| mlua::Error::runtime(e.to_string()))?;
+        ed(|e| e.paste_image(&png))
+    })?)?;
+    // Terminal images drawn last frame (Kitty graphics): {cell = {w, h}, images = {{id, x, y, w, h}}}.
+    debug.set("terminal_images", lua.create_function(|lua, id: Option<u64>| {
+        let v = ed(|e| {
+            let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+            e.with_buffer_as::<crate::buffers::terminal::TerminalBuffer, _>(id, |t, _| {
+                let images: Vec<Value> = t.images.drawn.iter().map(|(i, r)| json!({"id": i, "x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})).collect();
+                json!({"cell": {"w": t.cell_size().x, "h": t.cell_size().y}, "images": images})
+            })
+        })?;
+        lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
     // Where a named control was drawn last frame: {x, y, w, h} or nil ("sidebar-toggle").
     debug.set("rect", lua.create_function(|lua, name: String| {
         let v = ed(|e| e.debug_rects.get(name.as_str()).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})))?;

@@ -82,6 +82,13 @@ impl eframe::App for App {
                         ed.handle_paste(&t);
                     }
                 }
+                // Cmd-V with only an image on the clipboard (a screenshot).
+                Event::PasteImage(img) => {
+                    let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+                    if let Some(png) = crate::images::png_from_rgba(img.size[0] as u32, img.size[1] as u32, &rgba) {
+                        ed.paste_image(&png);
+                    }
+                }
                 Event::Copy => ed.handle_chord(command_chord('c')),
                 Event::Cut => ed.handle_chord(command_chord('x')),
                 other => keep.push(other),
@@ -93,6 +100,10 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ed.tick();
+        let (dropped, at) = ctx.input(|i| (i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect::<Vec<_>>(), i.pointer.latest_pos()));
+        if !dropped.is_empty() {
+            self.ed.drop_files(dropped, at);
+        }
         if self.ed.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
