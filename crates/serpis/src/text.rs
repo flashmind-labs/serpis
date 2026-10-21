@@ -624,6 +624,20 @@ pub struct DocView {
     /// Where the scrollbar thumb was grabbed (offset from its top) during a drag.
     bar_grab: Option<f32>,
     drag_anchor: Option<Pos>,
+    /// Where keyboard scrolling is heading; `scroll_y` eases toward it.
+    scroll_target: Option<f32>,
+}
+
+/// How fast keyboard scrolling eases toward its target (per second; 0: jump). Set from the
+/// `scroll-animation-speed` setting.
+static SCROLL_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x41a0_0000); // 20.0
+
+pub fn set_scroll_speed(v: f32) {
+    SCROLL_SPEED.store(v.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn scroll_speed() -> f32 {
+    f32::from_bits(SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 impl Default for DocView {
@@ -645,6 +659,7 @@ impl Default for DocView {
             goal_col: None,
             bar_grab: None,
             drag_anchor: None,
+            scroll_target: None,
         }
     }
 }
@@ -831,6 +846,7 @@ impl DocView {
                 if let Some(grab) = self.bar_grab.filter(|_| bresp.dragged() || bresp.clicked() || bresp.drag_started()) {
                     let t = ((p.y - grab - rect.top()) / (view_h - bar_h).max(1.0)).clamp(0.0, 1.0);
                     self.scroll_y = t * max_scroll;
+                    self.scroll_target = None;
                     self.follow_tail = t >= 0.999;
                     resp.scrolled = true;
                 }
@@ -849,7 +865,8 @@ impl DocView {
         if response.hovered() {
             let dy = ui.input(|i| i.smooth_scroll_delta.y);
             if dy != 0.0 {
-                self.scroll_y -= dy;
+                // The wheel is smoothed already; it takes over from keyboard scrolling.
+                self.scroll_y = self.scroll_target.take().unwrap_or(self.scroll_y) - dy;
                 if dy > 0.0 {
                     self.follow_tail = false;
                     resp.scrolled = true;
@@ -859,17 +876,54 @@ impl DocView {
         if self.reveal {
             self.reveal = false;
             let c = self.cursor.line.min(n.saturating_sub(1));
-            let top: f32 = self.padding.y + self.heights[..c].iter().map(|h| h.1).sum::<f32>();
-            let h = self.heights.get(c).map(|h| h.1).unwrap_or(16.0);
+            let line_top: f32 = self.padding.y + self.heights[..c].iter().map(|h| h.1).sum::<f32>();
+            // Keep the cursor's row in view, not its whole line: a wrapped paragraph can be taller
+            // than the window. Rows come from last frame's layout when the line was on screen.
+            let (top, h) = match self.placed.iter().find(|pl| pl.line == c) {
+                Some(pl) => {
+                    let r = pl.galley.pos_from_cursor(CCursor::new(self.cursor.col));
+                    (line_top + (pl.origin.y - pl.rect.top()) + r.min.y, r.height().max(1.0))
+                }
+                None => (line_top, self.heights.get(c).map(|h| h.1).unwrap_or(16.0).min(view_h / 2.0)),
+            };
             let margin = (view_h * 0.1).min(40.0);
-            if top < self.scroll_y + margin {
-                self.scroll_y = top - margin;
-            } else if top + h > self.scroll_y + view_h - margin {
-                self.scroll_y = top + h - view_h + margin;
+            // Successive moves aim from where the view is heading, not where it is now.
+            let base = self.scroll_target.unwrap_or(self.scroll_y);
+            let goal = if top < base + margin {
+                Some(top - margin)
+            } else if top + h > base + view_h - margin {
+                Some(top + h - view_h + margin)
+            } else {
+                None
+            };
+            if let Some(goal) = goal {
+                let goal = goal.clamp(0.0, max_scroll);
+                if scroll_speed() <= 0.0 {
+                    self.scroll_y = goal;
+                } else {
+                    // Long jumps (gg, G) skip most of the way, so they don't take long.
+                    let far = view_h * 1.5;
+                    if (goal - self.scroll_y).abs() > far {
+                        self.scroll_y = goal - far.copysign(goal - self.scroll_y);
+                    }
+                    self.scroll_target = Some(goal);
+                }
             }
         }
         if self.follow_tail {
             self.scroll_y = max_scroll;
+            self.scroll_target = None;
+        }
+        if let Some(t) = self.scroll_target {
+            let t = t.clamp(0.0, max_scroll);
+            let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
+            self.scroll_y += (t - self.scroll_y) * (1.0 - (-dt * scroll_speed()).exp());
+            if (t - self.scroll_y).abs() < 0.5 {
+                self.scroll_y = t;
+                self.scroll_target = None;
+            } else {
+                ui.ctx().request_repaint();
+            }
         }
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
         if self.scroll_y >= max_scroll - 1.0 && resp.scrolled {
