@@ -704,7 +704,7 @@ pub fn install(ed: &mut Editor) {
         });
         Ok(())
     });
-    ed.define_command("chat-toggle-fold", "Expand or collapse the tool output at point.", o, |ed, _| {
+    ed.define_command("chat-toggle-fold", "Expand or collapse the tool output or thinking at point (TAB, or click it).", o, |ed, _| {
         with_chat(ed, |c, _| {
             c.toggle_fold_at_cursor();
         })

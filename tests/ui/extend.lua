@@ -284,5 +284,31 @@ steps({
   end,
   function()
     T.check("C-t shows it again", serpis.chat.transcript(other):find("step 6", 1, true) ~= nil, true)
+    -- TAB on the thinking unfolds it in full, then folds it to its header, like tool output.
+    serpis.command.run("chat-focus-transcript")
+    local n = 0
+    for l in (serpis.chat.transcript(other) .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if l:find("Thought", 1, true) then break end
+    end
+    serpis.buffer.set_cursor(n, 1)
+    d.key("Tab")
+  end,
+  function()
+    local t = serpis.chat.transcript(other)
+    T.check("TAB shows all of the thinking", t:find("step 1", 1, true) ~= nil and t:find("step 6", 1, true) ~= nil, true)
+    d.key("Tab")
+  end,
+  function()
+    local t = serpis.chat.transcript(other)
+    T.check("TAB again folds it to its header", t:find("step 6", 1, true) == nil and t:find("Thought", 1, true) ~= nil, true)
+    d.key("T", { "ctrl" })
+  end,
+  function()
+    d.key("T", { "ctrl" })
+  end,
+  function()
+    local t = serpis.chat.transcript(other)
+    T.check("C-t twice resets folds by hand", t:find("step 6", 1, true) ~= nil and t:find("step 1", 1, true) == nil, true)
   end,
 })

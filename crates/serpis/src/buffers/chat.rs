@@ -33,6 +33,9 @@ enum Entry {
         continuation: bool,
         usage: Option<Usage>,
         error: Option<String>,
+        /// Thinking folded by hand (click or TAB): Some(true) all of it, Some(false) only its
+        /// header; None follows chat-show-thinking.
+        thinking: Option<bool>,
     },
     Tool {
         id: String,
@@ -62,6 +65,10 @@ pub struct ChatBuffer {
     pub prompt: TextArea,
     lines: Vec<StyledLine>,
     line_entry: Vec<Option<usize>>,
+    /// Transcript lines that belong to thinking blocks (click or TAB folds them).
+    thinking_lines: Vec<usize>,
+    /// chat-show-thinking as last drawn; changing it unfolds what was folded by hand.
+    show_thinking: bool,
     dirty: bool,
     pub view: DocView,
     pub focus: Focus,
@@ -116,6 +123,8 @@ impl ChatBuffer {
             prompt,
             lines: Vec::new(),
             line_entry: Vec::new(),
+            thinking_lines: Vec::new(),
+            show_thinking: true,
             dirty: true,
             view,
             focus: Focus::Prompt,
@@ -382,6 +391,7 @@ impl ChatBuffer {
                 continuation: true,
                 usage: None,
                 error: None,
+                thinking: None,
             });
         }
     }
@@ -412,6 +422,7 @@ impl ChatBuffer {
                 continuation: false,
                 usage: None,
                 error: None,
+                thinking: None,
             }),
             AgentEvent::MessageStart(Message::ToolResult(_)) => {}
             AgentEvent::MessageDelta(d) => match d {
@@ -566,6 +577,7 @@ impl ChatBuffer {
     fn rebuild(&mut self, ed: &Editor) {
         let t = &ed.theme;
         let show_thinking = ed.var_bool("chat-show-thinking");
+        let mut thinking_lines = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
         let mut out: Vec<StyledLine> = Vec::new();
@@ -602,7 +614,7 @@ impl ChatBuffer {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
-                Entry::Assistant { blocks, model, streaming, continuation, usage, error } => {
+                Entry::Assistant { blocks, model, streaming, continuation, usage, error, thinking: fold } => {
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
                     if !continuation && (has_content || *streaming || error.is_some()) {
@@ -621,16 +633,24 @@ impl ChatBuffer {
                                     continue;
                                 }
                                 // Hidden thinking keeps its header, so you still see that the model thought.
-                                let shown: &[&str] = if !show_thinking { &[] } else if *streaming || body.len() <= 4 { &body } else { &body[body.len() - 3..] };
+                                let shown: &[&str] = match fold {
+                                    Some(true) => &body,
+                                    Some(false) => &[],
+                                    None if !show_thinking => &[],
+                                    None if *streaming || body.len() <= 4 => &body,
+                                    None => &body[body.len() - 3..],
+                                };
                                 let blk = Block::new(Color32::TRANSPARENT).bar(t.border);
                                 let head = if *streaming { "Thinking…".to_string() } else if body.len() > shown.len() && body.len() > 1 { format!("Thought · {} lines", body.len()) } else { "Thought".to_string() };
                                 let n = shown.len() + 1;
+                                thinking_lines.push(out.len());
                                 push(&mut out, &mut owner, StyledLine::new(head, Face::Meta).block(blk.nth(0, n)).indent(14.0 * k).gap(10.0 * k).pad(2.0 * k, 2.0 * k), Some(ei));
                                 for (i, l) in shown.iter().enumerate() {
                                     let mut line = StyledLine::new(*l, Face::Thinking).block(blk.nth(i + 1, n)).indent(14.0 * k);
                                     if i + 2 == n {
                                         line.pad_bottom = 2.0 * k;
                                     }
+                                    thinking_lines.push(out.len());
                                     push(&mut out, &mut owner, line, Some(ei));
                                 }
                             }
@@ -686,6 +706,7 @@ impl ChatBuffer {
         }
         self.lines = out;
         self.line_entry = owner;
+        self.thinking_lines = thinking_lines;
         self.dirty = false;
         let n = self.lines.len();
         if self.view.cursor.line >= n {
@@ -693,9 +714,29 @@ impl ChatBuffer {
         }
     }
 
+    /// Whether entry `ei`'s thinking is shown in full.
+    fn thinking_full(&self, ei: usize) -> bool {
+        let Some(Entry::Assistant { blocks, streaming, thinking, .. }) = self.entries.get(ei) else { return false };
+        thinking.unwrap_or_else(|| {
+            let lines = blocks.iter().map(|b| match b {
+                AssistantContent::Thinking { thinking, .. } => thinking.trim().lines().filter(|l| !l.trim().is_empty()).count(),
+                _ => 0,
+            });
+            self.show_thinking && (*streaming || lines.max().unwrap_or(0) <= 4)
+        })
+    }
+
     /// Toggle the fold of the entry at transcript line `line`.
     pub fn toggle_fold_at(&mut self, line: usize) -> bool {
         let Some(Some(ei)) = self.line_entry.get(line).copied() else { return false };
+        if self.thinking_lines.binary_search(&line).is_ok() {
+            let full = self.thinking_full(ei);
+            if let Some(Entry::Assistant { thinking, .. }) = self.entries.get_mut(ei) {
+                *thinking = Some(!full);
+                self.dirty = true;
+                return true;
+            }
+        }
         if let Some(Entry::Tool { expanded, name, result, .. }) = self.entries.get_mut(ei) {
             let default = default_expanded(name, result.as_ref());
             *expanded = Some(!expanded.unwrap_or(default));
@@ -815,6 +856,7 @@ impl ChatBuffer {
                         continuation: false,
                         usage: Some(a.usage.clone()),
                         error: failed.then(|| a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason))),
+                        thinking: None,
                     });
                     for tc in a.tool_calls() {
                         self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, expanded: None, started: None, elapsed: None });
@@ -889,6 +931,17 @@ fn add_usage(total: &mut Usage, u: &Usage) {
 
 fn short_model(id: &str) -> &str {
     id.rsplit('/').next().unwrap_or(id)
+}
+
+/// A duration people read at a glance: 4.2s (with `tenths`) or 42s, 11m 40s, 2h 05m.
+pub fn fmt_duration(d: Duration, tenths: bool) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=9 if tenths => format!("{:.1}s", d.as_secs_f32()),
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
 }
 
 pub fn fmt_tokens(n: u64) -> String {
@@ -1348,8 +1401,8 @@ fn tool_lines(
         spans.push((s1..header.len(), Face::ToolArgs));
     }
     let time = match (elapsed, started) {
-        (Some(e), _) if e.as_millis() >= 100 => format!("{:.1}s", e.as_secs_f32()),
-        (None, Some(s)) => format!("{:.0}s", s.elapsed().as_secs_f32()),
+        (Some(e), _) if e.as_millis() >= 100 => fmt_duration(e, true),
+        (None, Some(s)) => fmt_duration(s.elapsed(), false),
         _ => String::new(),
     };
     if !time.is_empty() {
@@ -1577,7 +1630,16 @@ impl Buffer for ChatBuffer {
             self.text_w = text_w;
             self.dirty = true;
         }
-        let show_thinking = ed.var_bool("chat-show-thinking") as u64;
+        if ed.var_bool("chat-show-thinking") != self.show_thinking {
+            // C-t (chat-toggle-thinking) shows or hides all of it, including what was folded by hand.
+            self.show_thinking = !self.show_thinking;
+            for e in &mut self.entries {
+                if let Entry::Assistant { thinking, .. } = e {
+                    *thinking = None;
+                }
+            }
+        }
+        let show_thinking = self.show_thinking as u64;
         let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if style_key != self.style_key {
             self.style_key = style_key;
@@ -1711,8 +1773,7 @@ impl Buffer for ChatBuffer {
         let right = send.left() - 12.0 * k;
         let mut right = right;
         if self.running() {
-            let secs = self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-            let label = format!("Working {secs}s");
+            let label = format!("Working {}", fmt_duration(self.started.map(|s| s.elapsed()).unwrap_or_default(), false));
             let w = crate::chrome::text_width(&painter, &label, small.clone());
             if right - w - 18.0 * k > tr.right() {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.accent, w + 1.0);
@@ -1903,6 +1964,16 @@ impl TextSurface for ChatBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_read_at_a_glance() {
+        let f = |s: f32, tenths| fmt_duration(Duration::from_secs_f32(s), tenths);
+        assert_eq!(f(4.25, true), "4.2s");
+        assert_eq!(f(4.25, false), "4s");
+        assert_eq!(f(28.0, true), "28s");
+        assert_eq!(f(700.0, false), "11m 40s");
+        assert_eq!(f(3600.0 * 2.0 + 300.0, false), "2h 05m");
+    }
 
     /// Lines that belong to the table (they carry a bordered card).
     fn table(lines: &[StyledLine]) -> Vec<&StyledLine> {
