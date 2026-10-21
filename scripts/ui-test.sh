@@ -17,7 +17,7 @@ trap 'kill $mock 2>/dev/null' EXIT
 for _ in $(seq 50); do [[ -s "$tmp/mock.port" ]] && break; sleep 0.1; done
 export SERPIS_TEST_MOCK_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/v1" SERPIS_TEST_MOCK_LOG="$tmp/mock.log"
 fail=0
-for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope}"; do
+for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model}"; do
   for name in $t; do
     out="$tmp/$name.out"
     # Each test starts from fresh state; sessions_restore checks what sessions left behind.

@@ -109,6 +109,7 @@ impl Buffer for TextBuffer {
             title: self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             status,
             busy: false,
+            ..Default::default()
         }
     }
 

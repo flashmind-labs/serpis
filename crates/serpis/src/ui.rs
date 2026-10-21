@@ -428,14 +428,26 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let name_font = FontId::proportional(theme.font_size - 0.5);
     let min_title = 80.0 * k;
     let mut status_left = bx;
-    for st in header_extra.iter().chain(modeline.status.iter()).rev() {
-        if crate::chrome::text_width(p, st, small.clone()) + 20.0 > bx - (x + min_title) {
+    let entries: Vec<(&String, Option<&String>)> = header_extra
+        .iter()
+        .map(|s| (s, None))
+        .chain(modeline.status.iter().enumerate().map(|(i, s)| (s, modeline.status_commands.get(i).and_then(Option::as_ref))))
+        .collect();
+    // Entries with a command become buttons once the header's own click area exists (they
+    // must be on top of it to get clicks).
+    let mut buttons: Vec<(Rect, String, usize)> = Vec::new();
+    for (i, (st, cmd)) in entries.iter().enumerate().rev() {
+        if crate::chrome::text_width(ui.painter(), st, small.clone()) + 20.0 > bx - (x + min_title) {
             break;
         }
-        let pr = crate::chrome::pill(p, bx, cy, st, small.clone(), theme.fg_dim, theme.chip(), true);
+        let pr = crate::chrome::pill(ui.painter(), bx, cy, st, small.clone(), theme.fg_dim, theme.chip(), true);
+        if let Some(cmd) = cmd {
+            buttons.push((pr, (*cmd).clone(), i));
+        }
         bx = pr.left() - 6.0 * k;
         status_left = pr.left();
     }
+    let p = ui.painter();
     // Where it works: project · branch, quietly.
     if let Some((proj, branch)) = place.filter(|(n, _)| !n.is_empty()) {
         let label = match branch.filter(|b| !b.is_empty()) {
@@ -461,6 +473,18 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     // (Alt: its container), double-click for fullscreen, middle-click to close, right-click
     // for `window-menu`.
     let head_resp = ui.interact(Rect::from_min_max(header.min, egui::pos2(buttons_left, header.bottom())), wid.with("head"), Sense::click_and_drag());
+    // Status entries with a command (a chat's model): a click runs it in this window.
+    for (pr, cmd, i) in buttons {
+        let resp = ui.interact(pr, wid.with(("status", i)), Sense::click()).on_hover_text(cmd.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            ui.painter().rect_filled(pr, pr.height() / 2.0, crate::chrome::hover_bg(&theme));
+        }
+        ed.debug_rects.insert("header-status-button", pr);
+        if resp.clicked() {
+            ed.focus_window(w);
+            ed.defer(move |ed| ed.call(&cmd));
+        }
+    }
     let on_name = head_resp.interact_pointer_pos().or(head_resp.hover_pos()).is_some_and(|p| p.x <= name_rect.right() + 8.0);
     if head_resp.drag_started() {
         let alt = ui.input(|i| i.modifiers.alt);

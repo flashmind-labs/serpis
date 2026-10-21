@@ -1215,6 +1215,7 @@ impl Buffer for TerminalBuffer {
             title: self.title.clone(),
             status,
             busy: false,
+            ..Default::default()
         }
     }
 

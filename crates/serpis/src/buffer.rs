@@ -40,6 +40,9 @@ pub struct Modeline {
     pub title: String,
     /// Short right-aligned status entries (model, cwd, process state, ...).
     pub status: Vec<String>,
+    /// A command per status entry that clicking it runs (in the buffer's window), parallel to
+    /// `status`; missing or None: not clickable.
+    pub status_commands: Vec<Option<String>>,
     pub busy: bool,
 }
 

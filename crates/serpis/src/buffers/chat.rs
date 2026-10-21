@@ -1963,13 +1963,12 @@ impl Buffer for ChatBuffer {
     }
 
     fn modeline(&self) -> Modeline {
-        let mut status = Vec::new();
-        if let Some(m) = &self.model {
-            status.push(short_model(&m.id).to_string());
-        }
+        // The model: clicking it chooses another, as the composer's model pill does.
+        let model = self.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
         Modeline {
             title: self.title.clone(),
-            status,
+            status: vec![model],
+            status_commands: vec![Some("chat-select-model".into())],
             busy: self.running(),
         }
     }
