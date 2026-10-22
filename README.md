@@ -50,7 +50,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `RET` / `S-RET` / `M-RET` | send / newline / queue follow-up |
 | `ESC` or `C-c C-c` | abort the agent |
 | `TAB` | fold/unfold the tool output at point |
-| `s-,` | open `init.lua` (saved changes reload live) |
+| `s-,` | open `init.lua` (`M-x reload-config` applies changes; `config-auto-reload` on applies them on save) |
 | `s-=` / `s--` / `s-0` | bigger / smaller / reset font size |
 
 Fonts are set in `init.lua` with an installed family name or a font file, e.g.
@@ -256,8 +256,8 @@ runs a whole chat over real ssh in a throwaway directory there, with a mock mode
 ## Extend
 
 - **Lua** (LuaJIT): `~/.config/serpis/init.lua` (created on first run with examples), plus one file per
-  extension in `~/.config/serpis/extensions/` (`name.lua` or `name/init.lua`), loaded after it. Saving
-  any of them reloads them all. Commands, keymaps, hooks, settings, buffers, windows, chats (model,
+  extension in `~/.config/serpis/extensions/` (`name.lua` or `name/init.lua`), loaded after it.
+  `reload-config` reloads them all, as does saving any of them with `config-auto-reload` on. Commands, keymaps, hooks, settings, buffers, windows, chats (model,
   usage, abort, session entries) and agent tools; the reference is `crates/serpis/src/extend.rs`. See
   `examples/extensions/` for ports of pi's max-money and model-presets extensions. One rule keeps
   prompt caching working: hooks and tools may block or add, never rewrite what a chat already sent
@@ -268,7 +268,8 @@ runs a whole chat over real ssh in a throwaway directory there, with a mock mode
   right now); `serpis_lua` runs Lua in the editor to load, test and inspect what they wrote. Hide
   them with `agent-disabled-tools`.
 - **Rust**: a `dylib` crate depending on `serpis`; see `examples/plugins/hello`. Put the built library in
-  `~/.config/serpis/plugins/` and it is loaded and hot-reloaded on rebuild. Plugins get `&mut Editor`:
+  `~/.config/serpis/plugins/` and it is loaded at start and on `reload-config` (on rebuild too, with
+  `config-auto-reload` on). Plugins get `&mut Editor`:
   they can define buffer kinds, agent tools, interceptors, anything the built-ins do. They must be
   rebuilt against the serpis they run in (stale builds are refused, not crashed).
 

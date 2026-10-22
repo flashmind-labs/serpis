@@ -165,8 +165,12 @@ pub fn reload_all(ed: &mut Editor) {
     ed.plugins = mgr;
 }
 
-/// Reload plugins whose files changed (checked once a second).
+/// Reload plugins whose files changed, and load new ones (checked once a second), with
+/// config-auto-reload on; off (the default), reload-config does it.
 pub fn poll_reload(ed: &mut Editor) {
+    if !ed.var("config-auto-reload").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        return;
+    }
     if ed.plugins.last_scan.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
         return;
     }

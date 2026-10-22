@@ -223,9 +223,10 @@ buffers, chats, agent tools, UI segments.
 - Loaded now: {loaded}.
 
 ## Loading
-Saving any .lua file under {config} reloads the whole Lua config about 150 ms later: what Lua
-registered (commands, bindings, hooks, tools, segments, settings' definitions) is removed and
-every file runs again in a fresh Lua state. So:
+Changes load on reload-config (serpis.reload() from Lua), or about 150 ms after any .lua file
+under {config} is saved when the user has config-auto-reload on (off by default). A reload
+removes what Lua registered (commands, bindings, hooks, tools, segments, settings'
+definitions) and runs every file again in a fresh Lua state. So:
 - top-level code runs on every reload; define things, don't accumulate them;
 - local variables reset on reload. Keep per-chat state in the session with
   serpis.chat.append / serpis.chat.entries (it also survives resume), and settings with

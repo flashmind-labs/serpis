@@ -205,7 +205,12 @@ pub fn install(ed: &mut Editor) {
         ed.message(format!("C-u {}", ed.prefix_arg.unwrap()));
         Ok(())
     });
-    ed.define_command("reload-config", "Reload init.lua and Rust plugins.", o, |ed, _| {
+    ed.define_command("reload-config", "Reload init.lua, the Lua extensions and Rust plugins (config-auto-reload does it whenever their files change).", o, |ed, _| {
+        crate::lua::reload(ed);
+        crate::plugins::reload_all(ed);
+        Ok(())
+    });
+    ed.define_command("reload-extensions", "Reload the extensions: the Lua ones in <config>/extensions and Rust plugins. Lua extensions share init.lua's Lua state, so init.lua runs again with them.", o, |ed, _| {
         crate::lua::reload(ed);
         crate::plugins::reload_all(ed);
         Ok(())

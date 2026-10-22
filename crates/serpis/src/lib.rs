@@ -107,6 +107,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("prefix-passthrough-timeout", json!(0.0), "Seconds before a lone prefix key in a passthrough buffer is sent to the program (0: wait for the next key, like Emacs; C-c C-c sends C-c).");
     ed.defvar("terminal-escape", json!("auto"), "Where ESC goes in a terminal in vim insert state: \"auto\" (the program when it is full-screen, else vim normal state), \"terminal\" or \"serpis\". C-c C-z cycles it per terminal.");
     ed.defvar("leader-key", json!("SPC"), "The key `<leader>` stands for in key bindings (vim normal state uses `<leader> b b`, ...). \"\" turns leader bindings off.");
+    ed.defvar("config-auto-reload", json!(false), "Reload init.lua, the Lua extensions and Rust plugins when their files change (watching the config folder). Off: they reload on reload-config or reload-extensions only.");
     ed.defvar("perf-slow-frame-ms", json!(100.0), "Frames slower than this many milliseconds are logged with where their time went (serpis.debug.slow_frames()).");
     ed.defvar("busy-indicator", json!(true), "Show work in progress (connecting to a machine, scripts' serpis.busy.start) as a card with a spinner above the echo area.");
     ed.defvar("minibuffer-style", json!("palette"), "Where prompts appear: \"palette\" (a floating card near the top, like a command palette) or \"bottom\" (the echo area, Emacs style).");

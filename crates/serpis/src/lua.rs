@@ -19,7 +19,8 @@ use crate::editor::{Args, Editor, buffer_id_from_u64, buffer_id_to_u64};
 
 pub const OWNER: &str = "lua";
 
-pub const DEFAULT_INIT: &str = r#"-- Serpis configuration. Saved changes are applied immediately (hot reload).
+pub const DEFAULT_INIT: &str = r#"-- Serpis configuration. Changes apply on M-x reload-config, or as soon as they are saved with
+-- serpis.var.set("config-auto-reload", true).
 -- Everything here uses the same API as the built-in packages: see `describe-command`,
 -- `describe-keymap` and `describe-variable` (M-x) to explore.
 
@@ -1602,15 +1603,13 @@ pub fn reload(ed: &mut Editor) {
         ed.error(format!("lua setup: {e}"));
         return;
     }
+    // The watcher (config-auto-reload) is made by poll_reload, and kept across reloads.
     let (watcher, rx, retired) = match ed.lua.take() {
         Some(mut old) => {
             old.retired.push(old.lua);
             (old._watcher, old.rx, old.retired)
         }
-        None => {
-            let (w, rx) = watch(&dir);
-            (w, rx, Vec::new())
-        }
+        None => (None, mpsc::channel().1, Vec::new()),
     };
     ed.lua = Some(LuaRuntime {
         lua: lua.clone(),
@@ -1680,9 +1679,24 @@ pub fn extensions(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Debounced hot reload when config files change.
+/// Debounced hot reload when config files change, with config-auto-reload on. Off (the
+/// default), nothing watches the config: it reloads on reload-config only.
 pub fn poll_reload(ed: &mut Editor) {
+    let on = ed.var("config-auto-reload").and_then(Value::as_bool).unwrap_or(false);
     let Some(rt) = ed.lua.as_mut() else { return };
+    if !on {
+        if rt._watcher.is_some() {
+            rt._watcher = None;
+            rt.rx = mpsc::channel().1;
+            rt.changed_at = None;
+        }
+        return;
+    }
+    if rt._watcher.is_none() {
+        let (w, rx) = watch(&crate::config_dir());
+        rt._watcher = w;
+        rt.rx = rx;
+    }
     while rt.rx.try_recv().is_ok() {
         rt.changed_at = Some(Instant::now());
     }
