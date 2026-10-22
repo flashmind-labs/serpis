@@ -198,6 +198,11 @@ it ships, so there is no runtime hashing of prompts.
    and it still read the cache (the simulator would have predicted a miss: re-check before
    changing its rule). Gemini was not checked: the account's zero-data-retention setting excludes
    Google's endpoints (now reported as skipped).
+   Second run: OpenRouter again moved DeepSeek from CoreWeave to SiliconFlow mid-conversation
+   despite the session id, and this time the move cost a full rewrite (0 read, then a hit again
+   on SiliconFlow): upstreams do have separate caches, as the simulator assumes, and OpenRouter's
+   sticky routing can't be relied on. Next: ask OpenRouter to prefer the upstream that served the
+   chat last (`provider.order`, fallbacks still allowed), checked by the live run.
 
 Deferred until usage data asks for them:
 
