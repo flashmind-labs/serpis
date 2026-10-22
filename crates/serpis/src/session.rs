@@ -480,4 +480,145 @@ mod tests {
         assert!(text(&l.messages[1]).starts_with("Ran `ls`"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    mod roundtrip {
+        //! A chat resumed from its session file must send the same bytes it sent before, or the
+        //! provider can't reuse its prompt cache (Claude Code's --resume cache bug).
+        use super::*;
+        use proptest::prelude::*;
+        use serpis_ai::*;
+
+        const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+        fn text() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9 .,:\"'\\\\é漢😀\n\t]{1,40}"
+        }
+
+        /// Tool arguments with the values JSON round-trips get wrong when they go wrong.
+        fn args() -> impl Strategy<Value = Value> {
+            (text(), prop_oneof![Just(0.1f64), Just(1e-7), Just(1.5e300), Just(-0.0), any::<f64>().prop_filter("finite", |f| f.is_finite())], any::<i64>(), any::<u64>(), prop::bool::ANY)
+                .prop_map(|(s, f, i, u, b)| json!({"path": s, "f": f, "i": i, "u": u, "nested": {"b": b, "list": [s, f, null]}}))
+        }
+
+        #[derive(Debug, Clone)]
+        enum Ev {
+            User(String, bool),
+            Step(Option<String>, Option<String>, Vec<(Value, String, bool, bool)>),
+            Answer(String),
+            Failed,
+            Aborted(String),
+        }
+
+        fn ev() -> impl Strategy<Value = Ev> {
+            prop_oneof![
+                3 => (text(), prop::bool::weighted(0.2)).prop_map(|(t, i)| Ev::User(t, i)),
+                3 => (prop::option::of(text()), prop::option::of(text()), prop::collection::vec((args(), text(), prop::bool::weighted(0.2), prop::bool::weighted(0.1)), 1..6))
+                    .prop_map(|(th, tx, calls)| Ev::Step(th, tx, calls)),
+                2 => text().prop_map(Ev::Answer),
+                1 => Just(Ev::Failed),
+                1 => text().prop_map(Ev::Aborted),
+            ]
+        }
+
+        fn model(api: &str, provider: &str, base: &str, id: &str) -> Model {
+            serde_json::from_value(json!({"id": id, "api": api, "provider": provider, "baseUrl": base, "reasoning": true, "input": ["text", "image"]})).unwrap()
+        }
+
+        fn messages(m: &Model, evs: &[Ev]) -> Vec<Message> {
+            let mut out = Vec::new();
+            for (k, e) in evs.iter().enumerate() {
+                let assistant = |content: Vec<AssistantContent>, stop: StopReason| {
+                    let mut a = AssistantMessage::empty(m);
+                    a.content = content;
+                    a.stop_reason = stop;
+                    a.timestamp = 1_700_000_000_123 + k as u64;
+                    Message::Assistant(a)
+                };
+                match e {
+                    Ev::User(t, image) => {
+                        let mut content = vec![UserContent::Text { text: t.clone() }];
+                        if *image {
+                            content.push(UserContent::Image { data: PIXEL.into(), mime_type: "image/png".into() });
+                        }
+                        out.push(Message::User { content, timestamp: 1_700_000_000_000 + k as u64 });
+                    }
+                    Ev::Step(th, tx, calls) => {
+                        let mut content = Vec::new();
+                        if let Some(th) = th {
+                            // Signatures can be opaque strings or JSON (OpenRouter's reasoning_details).
+                            let sig = if k % 2 == 0 { format!("sig-{k}") } else { json!([{"type": "reasoning.text", "text": th, "signature": "s"}]).to_string() };
+                            content.push(AssistantContent::Thinking { thinking: th.clone(), thinking_signature: Some(sig), redacted: false });
+                        }
+                        if let Some(tx) = tx {
+                            content.push(AssistantContent::Text { text: tx.clone(), text_signature: None });
+                        }
+                        for (i, (a, _, _, _)) in calls.iter().enumerate() {
+                            content.push(AssistantContent::ToolCall(ToolCall { id: format!("call_{k}_{i}"), name: "read".into(), arguments: a.clone(), thought_signature: None, arguments_error: None }));
+                        }
+                        out.push(assistant(content, StopReason::ToolUse));
+                        for (i, (_, r, err, img)) in calls.iter().enumerate() {
+                            let mut content = vec![UserContent::Text { text: r.clone() }];
+                            if *img {
+                                content.push(UserContent::Image { data: PIXEL.into(), mime_type: "image/png".into() });
+                            }
+                            out.push(Message::ToolResult(ToolResultMessage {
+                                tool_call_id: format!("call_{k}_{i}"),
+                                tool_name: "read".into(),
+                                content,
+                                is_error: *err,
+                                details: json!({"truncated": false, "lines": i}),
+                                timestamp: 1_700_000_000_500 + k as u64,
+                            }));
+                        }
+                    }
+                    Ev::Answer(t) => out.push(assistant(vec![AssistantContent::Text { text: t.clone(), text_signature: None }], StopReason::Stop)),
+                    Ev::Failed => out.push(assistant(vec![], StopReason::Error)),
+                    Ev::Aborted(t) => out.push(assistant(vec![AssistantContent::Text { text: t.clone(), text_signature: None }], StopReason::Aborted)),
+                }
+            }
+            out
+        }
+
+        fn body(m: &Model, msgs: Vec<Message>) -> String {
+            let ctx = Context {
+                system_prompt: "sys".into(),
+                messages: msgs,
+                tools: vec![Tool { name: "read".into(), description: "Read".into(), parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}) }],
+            };
+            let o = StreamOptions { api_key: Some("k".into()), session_id: Some("s".into()), cache_retention: CacheRetention::Long, reasoning: Some(ThinkingLevel::Medium), ..Default::default() };
+            serpis_ai::api::build_request(m, &ctx, &o).unwrap().body.to_string()
+        }
+
+        #[test]
+        fn floats_in_tool_arguments_survive_the_session_file() {
+            // Without serde_json's float_roundtrip this came back as 2.503507547925745e58.
+            let v = json!({"f": 2.5035075479257447e58});
+            let back: Value = serde_json::from_str(&v.to_string()).unwrap();
+            assert_eq!(back.to_string(), v.to_string());
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 120, ..ProptestConfig::default() })]
+
+            #[test]
+            fn a_resumed_session_sends_the_same_bytes(evs in prop::collection::vec(ev(), 1..14)) {
+                static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let root = std::env::temp_dir().join(format!("serpis-roundtrip-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+                for m in [
+                    model("openai-completions", "openrouter", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4.5"),
+                    model("anthropic-messages", "anthropic", "https://api.anthropic.com", "claude-sonnet-4-5"),
+                    model("openai-completions", "openrouter", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1"),
+                ] {
+                    let msgs = messages(&m, &evs);
+                    let mut w = SessionWriter::new(&root, Path::new("/tmp/proj"), &uuid::Uuid::now_v7().to_string());
+                    for x in &msgs {
+                        w.message(x).unwrap();
+                    }
+                    let loaded = load(&w.path).unwrap();
+                    prop_assert_eq!(body(&m, loaded.messages), body(&m, msgs), "{}", m.id);
+                }
+                let _ = std::fs::remove_dir_all(&root);
+            }
+        }
+    }
 }
