@@ -703,6 +703,9 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, opts: StreamOpt
                 em.output.response_model = Some(m.to_string());
             }
         }
+        if let Some(p) = chunk.get("provider").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+            em.output.upstream = Some(p.to_string());
+        }
         if let Some(u) = chunk.get("usage").filter(|u| u.is_object()) {
             em.output.usage = parse_usage(u, &model);
         }

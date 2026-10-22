@@ -151,6 +151,10 @@ pub struct AssistantMessage {
     pub response_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
+    /// Who served the response behind a router (OpenRouter's `provider`: "Anthropic",
+    /// "Amazon Bedrock", …). Each upstream has its own prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
     pub usage: Usage,
     pub stop_reason: StopReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +173,7 @@ impl AssistantMessage {
             model: model.id.clone(),
             response_id: None,
             response_model: None,
+            upstream: None,
             usage: Usage::default(),
             stop_reason: StopReason::Pending,
             raw_stop_reason: None,

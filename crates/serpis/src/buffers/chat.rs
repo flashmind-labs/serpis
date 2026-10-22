@@ -560,6 +560,7 @@ impl ChatBuffer {
                         "text": a.text(),
                         "stopReason": format!("{:?}", a.stop_reason),
                         "model": format!("{}/{}", a.provider, a.model),
+                        "upstream": a.upstream,
                         "usage": crate::chat_api::usage_json(&a.usage),
                         "total": crate::chat_api::usage_json(&self.totals),
                     });

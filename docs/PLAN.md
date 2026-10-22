@@ -147,7 +147,10 @@ it ships, so there is no runtime hashing of prompts.
    header, fails the suite. The shared prefix measures about 2K tokens: above the 1,024-token
    minimum, below 4,096. App scenarios: `tests/ui/cache.lua` runs the real app against
    `serpis-mock-provider` (CLAUDE.md edit, `chat-refresh-context`, thinking change, resume).
-   Re-introducing a per-message prompt rebuild or a new id on resume fails it.
+   Re-introducing a per-message prompt rebuild or a new id on resume fails it. Property tests
+   (`crates/serpis-ai/tests/cache_props.rs`, proptest) generate agent-shaped transcripts on six
+   venues: append-only always hits, bytes are deterministic, and each injected change is its own
+   miss cause and recovers. Seeds of past failures are kept next to them.
 2. **Frozen prefix** (*done*): the system prompt is kept per chat. `chat-refresh-context` rebuilds
    it with the next message, and `agent-live-context` rebuilds it for every message. The tool list
    stays live: a kept tool from a hot-reloaded Rust plugin would point into unloaded code, and
@@ -160,9 +163,10 @@ it ships, so there is no runtime hashing of prompts.
 4. **Retention** (*done*): `agent-cache-retention` (`none` / `short` / `long`, overridable per provider),
    default `long`. 1h writes cost 2× instead of 1.25×, but only on new tokens, while every pause
    over 5 minutes on a short TTL rewrites the whole context.
-5. **Routing**: a resumed chat reuses the saved session id (*done*: session files are created with
-   the chat's id). `compat.openRouter` marks a gateway in front of OpenRouter. Next: record each
-   OpenRouter response's upstream.
+5. **Routing** (*done*): a resumed chat reuses the saved session id (session files are created
+   with the chat's id). `compat.openRouter` marks a gateway in front of OpenRouter. Each
+   response's OpenRouter upstream is kept on the message (`upstream`, saved in the session) and
+   passed to the `assistant-message` hook.
 6. **Cache UI**, each part with its own var:
    - `chat-cache-indicator`: a hit / partial / miss chip on each response (cache reads ÷ prompt).
    - `chat-cache-status`: the session hit rate and the cache state ("warm 41m", "cold") in the

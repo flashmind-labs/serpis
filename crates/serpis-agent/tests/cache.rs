@@ -303,6 +303,16 @@ async fn an_openrouter_fallback_misses_once_then_recovers() {
         chat.send("after the fallback").await;
         chat.send("and again").await;
         assert_cache(venue, &mock, &[(3, "upstream")]);
+        // Chat completions responses name their upstream, and the chat records it.
+        if venue != Venue::OpenRouterClaudeMessages {
+            let ups: Vec<Option<String>> = chat.history.iter().filter_map(|m| match m {
+                Message::Assistant(a) => Some(a.upstream.clone()),
+                _ => None,
+            }).collect();
+            assert!(ups.iter().all(Option::is_some), "{venue:?}: {ups:?}");
+            assert_ne!(ups[1], ups[2], "{venue:?}: the fallback shows as a new upstream");
+            assert_eq!(ups[2], ups[3]);
+        }
     }
 }
 

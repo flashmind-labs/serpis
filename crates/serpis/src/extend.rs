@@ -169,7 +169,7 @@ pub const LUA_API: &[(&str, &str)] = &[
 /// Hooks serpis runs: (name, payload and what a handler may return).
 pub const HOOKS: &[(&str, &str)] = &[
     ("before-prompt", "{buffer, text, model, running}: a chat is about to send text. Return {block = \"reason\"} to refuse it (the text stays in the composer)."),
-    ("assistant-message", "{buffer, text, stopReason, model, usage, total}: a model response finished; usage is this response's, total the session's ({input, output, cache_read, cache_write, total_tokens, cost})."),
+    ("assistant-message", "{buffer, text, stopReason, model, upstream, usage, total}: a model response finished; upstream is who served it behind a router (OpenRouter's provider, e.g. \"Anthropic\"), usage is this response's, total the session's ({input, output, cache_read, cache_write, total_tokens, cost})."),
     ("before-tool-call", "{buffer, name, args}: the agent wants to run a tool. Return {block = \"reason\"} to refuse, or {args = {...}} to change its arguments."),
     ("after-tool-call", "{buffer, name, text, isError}: a tool finished. Return {text = \"...\"} to replace what the model sees."),
     ("tool-finished", "{buffer, name, isError}: a tool's result reached the chat."),

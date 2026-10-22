@@ -89,6 +89,10 @@ local function steps(list)
   go()
 end
 
+-- Who served each response, from the assistant-message hook.
+local upstreams = {}
+serpis.hook.add("assistant-message", function(p) table.insert(upstreams, p.upstream or "?") end)
+
 steps({
   function()
     serpis.command.run("new-chat", project)
@@ -129,5 +133,6 @@ steps({
     T.check("every request, before and after the resume, has one session id", n, 1)
     T.check("cache writes are 1-hour by default (agent-cache-retention)", long, true)
     T.check("no request was rejected", sh("grep -c rejected '" .. log .. "'"):gsub("%s+", ""), "0")
+    T.check("responses name their OpenRouter upstream", #upstreams > 0 and upstreams[1]:match("^upstream%-[ab]$") ~= nil, true)
   end,
 })

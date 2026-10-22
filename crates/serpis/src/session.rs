@@ -407,6 +407,7 @@ mod tests {
             model: "m1".into(),
             response_id: None,
             response_model: None,
+            upstream: None,
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
             raw_stop_reason: None,
