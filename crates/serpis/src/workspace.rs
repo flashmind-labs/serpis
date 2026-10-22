@@ -197,7 +197,7 @@ impl Editor {
         let mut seen = Vec::new();
         let bufs = self.workspace_buffers(name);
         for id in &bufs {
-            let label = self.buffer_directory(*id).and_then(|d| crate::project::name(&d)).unwrap_or_else(|| self.buffer_display_name(*id));
+            let label = self.local_directory(*id).and_then(|d| crate::project::name(&d)).unwrap_or_else(|| self.buffer_display_name(*id));
             if !seen.contains(&label) {
                 seen.push(label);
             }

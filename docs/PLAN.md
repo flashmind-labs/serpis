@@ -313,6 +313,12 @@ Steps:
    to an older running node isn't handled yet beyond a version check in hello.
    Next here: the node's own Lua config (hooks and tools on boxes); running turns that survive
    a node restart; parking a turn that keeps crashing it.
+   **Pinned for later: release builds of the node.** Building a node on demand only works when
+   serpis runs from its source with Rust installed; a clean install elsewhere has nothing to
+   build from, and falls back to a serpis-node installed on the machine. The fix is a release
+   pipeline publishing serpis-node for each system (Linux x86-64/arm64, macOS), which serpis
+   downloads when a machine first needs one, checked against checksums built into serpis
+   itself. Needs a decision on where releases are hosted.
 3. Remote terminals through manymux.
 4. Moving and syncing chats; sessions of every machine in one list.
 5. The iOS app.

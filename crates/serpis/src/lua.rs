@@ -656,7 +656,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     project.set("name", lua.create_function(|_, dir: String| Ok(crate::project::name(std::path::Path::new(&dir))))?)?;
     project.set("of_buffer", lua.create_function(|_, id: Option<u64>| ed(|e| {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
-        e.buffer_directory(id).and_then(|d| crate::project::name(&d))
+        e.local_directory(id).and_then(|d| crate::project::name(&d))
     }))?)?;
     // serpis.project.repo(dir): {worktree, main, branch, linked} for the repository around dir.
     project.set("repo", lua.create_function(|lua, dir: String| {
@@ -1440,6 +1440,8 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // How many times a project root was looked up on disk (nothing should do it every frame).
+    debug.set("project_lookups", lua.create_function(|_, ()| Ok(crate::project::lookups()))?)?;
     // Recent slow frames (perf-slow-frame-ms): {ms, parts = {{name, ms}, ...}}, newest last.
     debug.set("slow_frames", lua.create_function(|lua, ()| {
         let v = ed(|e| json!(e.slow_frames.iter().map(|(ms, parts)| json!({"ms": ms, "parts": parts.iter().map(|(n, t)| json!([n, t])).collect::<Vec<_>>()})).collect::<Vec<_>>()))?;

@@ -117,6 +117,16 @@ steps({
     T.check("scripts see where it runs", info.machine, "box")
     T.check("the sidebar groups it under the folder on the box", item(chat) and item(chat).project, "box:" .. home .. "/proj")
   end,
+  -- Its folder is a path on the other machine: nothing looks it up here, let alone every
+  -- frame (on macOS a /home path goes to the automounter, at ~15 ms a lookup).
+  function(go)
+    local before, frames = d.project_lookups(), d.frames()
+    serpis.defer(1000, function()
+      T.check("drawing it looks nothing up on this disk", d.frames() - frames > 10 and d.project_lookups() - before <= 1, true)
+      go()
+    end)
+    return false
+  end,
   -- Typed and sent like any chat; the tools run on the box.
   function(go)
     T.press("R E A D SPC 2 RET")

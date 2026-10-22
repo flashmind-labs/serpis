@@ -412,12 +412,16 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     // The same name the sidebar and the buffer pickers use.
     let primary = ed.buffer_display_name(id);
     let secondary = String::new();
-    let place = ed.buffer_directory(id).map(|d| {
-        let repo = ed.repo_of(&d);
-        let root = repo.as_ref().map(|r| r.main.clone()).or_else(|| crate::project::root(&d)).unwrap_or(d);
-        let name = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        (name, repo.map(|r| r.head_label()))
-    });
+    let place = match ed.local_directory(id) {
+        Some(d) => {
+            let repo = ed.repo_of(&d);
+            let root = repo.as_ref().map(|r| r.main.clone()).or_else(|| ed.marked_root_of(&d)).unwrap_or(d);
+            let name = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            Some((name, repo.map(|r| r.head_label())))
+        }
+        // A folder on another machine: its name, nothing looked up here.
+        None => ed.buffer_directory(id).map(|d| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), None)),
+    };
     let p = ui.painter();
     let small = FontId::proportional(theme.font_size - 2.0);
     let cy = header.center().y;

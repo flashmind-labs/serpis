@@ -890,6 +890,16 @@ impl Editor {
         self.buffers.get(id)?.buf.as_ref()?.machine()
     }
 
+    /// The directory a buffer works in, when it is on this machine: the folder of a chat on
+    /// another machine is a path there, and looking it up here is wrong and can be slow (an
+    /// automounted `/home`, a network volume).
+    pub fn local_directory(&self, id: BufferId) -> Option<std::path::PathBuf> {
+        if self.buffer_machine(id).is_some() {
+            return None;
+        }
+        self.buffer_directory(id)
+    }
+
     // ------------------------------------------------------------------
     // Text surface helpers
     // ------------------------------------------------------------------

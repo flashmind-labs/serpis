@@ -41,7 +41,7 @@ impl Editor {
         let label = self.buffer_display_name(id);
         let kind = self.meta(id).map(|m| crate::chrome::pretty_name(&format!("*{}*", m.major))).unwrap_or_default();
         let mut detail = vec![kind];
-        if let Some(d) = self.buffer_directory(id) {
+        if let Some(d) = self.local_directory(id) {
             match self.repo_of(&d) {
                 Some(r) => {
                     detail.push(r.main.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());

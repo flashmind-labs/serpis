@@ -75,6 +75,8 @@ pub struct Sidebar {
     seq: u64,
     /// `git::repo` per directory, re-read every few seconds.
     repos: HashMap<PathBuf, (Instant, Option<git::Repo>)>,
+    /// Project roots by marker (`.git`, `.project`, ...), by directory.
+    roots: HashMap<PathBuf, (Instant, Option<PathBuf>)>,
     pub git: HashMap<PathBuf, GitInfo>,
     git_at: HashMap<PathBuf, Instant>,
     refreshing: HashSet<PathBuf>,
@@ -248,7 +250,20 @@ impl Editor {
     /// The project root of a directory: the main checkout of its repository, else the
     /// nearest `project.el`-style root.
     pub fn project_root_of(&mut self, dir: &Path) -> Option<PathBuf> {
-        self.repo_of(dir).map(|r| r.main).or_else(|| crate::project::root(dir))
+        self.repo_of(dir).map(|r| r.main).or_else(|| self.marked_root_of(dir))
+    }
+
+    /// The nearest ancestor with a project marker (cached for a few seconds: it looks at every
+    /// ancestor, which is slow on network or automounted volumes, and windows ask every frame).
+    pub fn marked_root_of(&mut self, dir: &Path) -> Option<PathBuf> {
+        if let Some((t, r)) = self.sidebar.roots.get(dir)
+            && t.elapsed() < Duration::from_secs(3)
+        {
+            return r.clone();
+        }
+        let r = crate::project::root(dir);
+        self.sidebar.roots.insert(dir.to_path_buf(), (Instant::now(), r.clone()));
+        r
     }
 
     /// The window showing `id` in any workspace, current first.
@@ -285,11 +300,11 @@ impl Editor {
     /// started ("editor").
     pub fn new_buffer_directory(&mut self) -> PathBuf {
         let mode = self.var_str("new-buffer-directory").unwrap_or_else(|| "project".into());
-        let dir = self.buffer_directory(self.current_buffer());
+        let dir = self.local_directory(self.current_buffer());
         match (mode.as_str(), dir) {
             ("editor", _) | (_, None) => self.cwd.clone(),
             ("buffer", Some(d)) => d,
-            (_, Some(d)) => self.repo_of(&d).map(|r| r.worktree).or_else(|| crate::project::root(&d)).unwrap_or(d),
+            (_, Some(d)) => self.repo_of(&d).map(|r| r.worktree).or_else(|| self.marked_root_of(&d)).unwrap_or(d),
         }
     }
 
@@ -385,7 +400,7 @@ pub fn items(ed: &mut Editor) -> Vec<Item> {
         let project = match (&machine, &repo) {
             (Some(m), _) => dir.as_ref().map(|d| PathBuf::from(format!("{m}:{}", d.display()))),
             (None, Some(r)) => Some(r.main.clone()),
-            (None, None) => dir.as_ref().and_then(|d| crate::project::root(d)),
+            (None, None) => dir.as_ref().and_then(|d| ed.marked_root_of(d)),
         };
         let activity = ed.buffer_activity(id);
         let agent = meta.major == "chat" || activity.program.as_deref().is_some_and(|p| is_agent_program(ed, p));
@@ -609,7 +624,7 @@ fn target_dir(ed: &mut Editor, a: &Args, worktree: bool) -> PathBuf {
         match selected_row(ed) {
             Some(RowRef::Project(p) | RowRef::Worktree(p)) if !p.as_os_str().is_empty() => return p,
             Some(RowRef::Item(id)) => {
-                if let Some(d) = ed.buffer_directory(id) {
+                if let Some(d) = ed.local_directory(id) {
                     let r = ed.repo_of(&d);
                     return match r {
                         Some(r) if worktree => r.worktree,
