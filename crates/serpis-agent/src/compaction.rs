@@ -1,11 +1,13 @@
 //! Compaction (pi's `core/compaction`): when a conversation nears its model's context window, the
 //! messages before a cut point are replaced by a summary and the recent ones are kept as they are.
 //!
-//! Unlike pi, the summary is asked for in the conversation itself: the messages before the cut
-//! plus one instruction, sent as the agent sends everything (`crate::complete`). That request is a
-//! prefix of what the chat already sent, so the provider reads it from the prompt cache instead of
-//! billing the whole history again as new input; and it never includes the kept messages, so it
-//! fits even when the conversation no longer does.
+//! Unlike pi, the summary is asked for in the conversation itself, sent as the agent sends
+//! everything (`crate::complete`), so the provider reads it from the prompt cache instead of
+//! billing the whole history again as new input. Normally that is the whole conversation plus one
+//! instruction: an extension of the last request, which every cache serves (some, like DeepInfra's,
+//! keep only a conversation's latest path). After a context overflow the whole conversation no
+//! longer fits, so it is the messages before the cut plus the instruction: a prefix of what was
+//! sent, which caches that keep earlier entries (Anthropic, OpenAI) still serve.
 
 use serpis_ai::{Message, UserContent};
 
@@ -65,14 +67,45 @@ pub fn cut_point(history: &[Message], keep: u64) -> Option<usize> {
     None
 }
 
-/// The request for a summary, sent after the messages it summarizes.
-pub fn instruction(custom: Option<&str>) -> Message {
-    let mut text = String::from(
-        "Stop here: do not continue the conversation, answer anything in it, or call tools. This message only asks for a summary.\n\n\
-         The conversation above is about to be compacted: it will be replaced by your summary, and the conversation continues after it. \
-         Create a structured context checkpoint summary that another LLM will use to continue the work. \
-         If the conversation starts with an earlier summary, carry its information over.\n\n",
-    );
+/// Where a summary request ends: the whole conversation (the messages from `cut` on are kept
+/// after the summary), or only the messages before the cut.
+pub fn summary_request(history: &[Message], cut: usize, whole: bool, custom: Option<&str>) -> Vec<Message> {
+    let mut msgs = if whole { history.to_vec() } else { history[..cut].to_vec() };
+    let kept = whole.then(|| (history.len() - cut, history.get(cut).map(opening).unwrap_or_default()));
+    msgs.push(instruction(kept, custom));
+    msgs
+}
+
+/// The first words of a message, to point at it.
+fn opening(m: &Message) -> String {
+    let text = match m {
+        Message::User { content, .. } => content.iter().find_map(|c| match c {
+            UserContent::Text { text } => Some(text.clone()),
+            _ => None,
+        }),
+        Message::Assistant(a) => Some(a.text()).filter(|t| !t.trim().is_empty()).or_else(|| a.tool_calls().next().map(|c| format!("a call to {}", c.name))),
+        Message::ToolResult(r) => Some(format!("the result of {}", r.tool_name)),
+    }
+    .unwrap_or_default();
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 80 { line.chars().take(80).collect::<String>() + "…" } else { line.to_string() }
+}
+
+/// The request for a summary. `kept`: (how many of the last messages stay as they are, how the
+/// first of them begins) when the whole conversation is sent.
+pub fn instruction(kept: Option<(usize, String)>, custom: Option<&str>) -> Message {
+    let mut text = String::from("Stop here: do not continue the conversation, answer anything in it, or call tools. This message only asks for a summary.\n\n");
+    match kept {
+        Some((n, first)) => text.push_str(&format!(
+            "The conversation above is about to be compacted: everything before its last {n} messages (from the one that begins \"{first}\") will be replaced by your summary, and those {n} messages are kept as they are after it. \
+             Create a structured context checkpoint summary of the earlier part, that another LLM will use to continue the work. "
+        )),
+        None => text.push_str(
+            "The conversation above is about to be compacted: it will be replaced by your summary, and the conversation continues after it. \
+             Create a structured context checkpoint summary that another LLM will use to continue the work. ",
+        ),
+    }
+    text.push_str("If the conversation starts with an earlier summary, carry its information over.\n\n");
     text.push_str(SUMMARY_FORMAT);
     if let Some(c) = custom.filter(|c| !c.trim().is_empty()) {
         text.push_str("\n\nAdditional focus: ");
@@ -167,6 +200,23 @@ mod tests {
         }
         let cut = cut_point(&h, 300).unwrap();
         assert!(matches!(h[cut], Message::Assistant(_)), "{cut}");
+    }
+
+    #[test]
+    fn a_summary_request_is_the_whole_conversation_or_the_part_before_the_cut() {
+        let mut h = vec![user("first")];
+        h.push(user("Fix the parser please"));
+        h.extend(step(2));
+        let whole = summary_request(&h, 1, true, Some("the parser"));
+        assert_eq!(whole.len(), h.len() + 1);
+        assert_eq!(whole[..h.len()], h[..]);
+        let Message::User { content, .. } = whole.last().unwrap() else { panic!() };
+        let UserContent::Text { text } = &content[0] else { panic!() };
+        assert!(text.contains("before its last 4 messages (from the one that begins \"Fix the parser please\")"), "{text}");
+        assert!(text.ends_with("Additional focus: the parser"));
+        let prefix = summary_request(&h, 1, false, None);
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(prefix[0], h[0]);
     }
 
     #[test]

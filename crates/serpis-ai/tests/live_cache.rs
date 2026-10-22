@@ -205,7 +205,8 @@ async fn real_providers_cache_like_the_simulator_says() {
                 break;
             }
             if let Ok(p) = &predicted {
-                if p.read > 0 && u.cache_read == 0 {
+                // Simulated tokens are estimates: a read far below the prediction is a miss.
+                if p.read > 0 && u.cache_read * 4 < p.read {
                     let msg = format!("{id} {label}: the simulator expects a cache read, the provider reported none");
                     if explicit { failures.push(msg) } else { println!("  warning: {msg} (best-effort cache)") }
                 }

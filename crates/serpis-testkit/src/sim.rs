@@ -43,6 +43,10 @@ pub struct Config {
     pub auto_long_ttl: Duration,
     pub auto_min_tokens: u64,
     pub upstreams: Vec<String>,
+    /// Automatic caches keep only a session's latest whole prompt, reusable only by a request
+    /// that extends all of it: one that branches off an earlier prefix misses (DeepInfra's
+    /// DeepSeek in the live check read 1 token of a 7,800-token shared prefix).
+    pub latest_prompt_only: bool,
 }
 
 impl Default for Config {
@@ -57,6 +61,7 @@ impl Default for Config {
             auto_long_ttl: Duration::from_secs(24 * 60 * 60),
             auto_min_tokens: 1024,
             upstreams: vec!["upstream-a".into(), "upstream-b".into()],
+            latest_prompt_only: false,
         }
     }
 }
@@ -167,6 +172,8 @@ pub struct Simulator {
     sticky: HashMap<String, String>,
     rotate: usize,
     sessions: HashMap<String, Prev>,
+    /// The automatic-cache entry each session wrote last (for `latest_prompt_only`).
+    auto_paths: HashMap<String, Vec<(String, u64)>>,
 }
 
 fn h(seed: u64, s: &str) -> u64 {
@@ -190,7 +197,7 @@ fn short(s: &str) -> String {
 
 impl Simulator {
     pub fn new(config: Config) -> Self {
-        Simulator { config, now_ms: 0, store: HashMap::new(), sticky: HashMap::new(), rotate: 0, sessions: HashMap::new() }
+        Simulator { config, now_ms: 0, store: HashMap::new(), sticky: HashMap::new(), rotate: 0, sessions: HashMap::new(), auto_paths: HashMap::new() }
     }
 
     pub fn advance(&mut self, d: Duration) {
@@ -378,8 +385,18 @@ impl Simulator {
         } else {
             let read_to = (0..hashes.len()).rev().find(|i| cum[*i] >= self.config.auto_min_tokens && self.live(&upstream, hashes[*i]));
             let ttl = if p.auto_long { self.config.auto_long_ttl } else { self.config.auto_ttl }.as_millis() as u64;
-            for x in &hashes {
-                self.store.insert((upstream.clone(), *x), Entry { expires: self.now_ms + ttl, ttl });
+            if self.config.latest_prompt_only {
+                for k in self.auto_paths.remove(&session).unwrap_or_default() {
+                    self.store.remove(&k);
+                }
+                if let Some(last) = hashes.last() {
+                    self.auto_paths.insert(session.clone(), vec![(upstream.clone(), *last)]);
+                    self.store.insert((upstream.clone(), *last), Entry { expires: self.now_ms + ttl, ttl });
+                }
+            } else {
+                for x in &hashes {
+                    self.store.insert((upstream.clone(), *x), Entry { expires: self.now_ms + ttl, ttl });
+                }
             }
             let cached_to = (0..hashes.len()).rev().find(|i| cum[*i] >= self.config.auto_min_tokens);
             (read_to, cached_to, 0, 0)
@@ -519,6 +536,26 @@ mod tests {
         let mut changed = body("sys ", 6, &[]);
         changed["messages"][1]["content"][0]["text"] = json!("edited");
         assert!(matches!(send(&mut s, &changed).miss, Some(Miss::PrefixChanged { .. })));
+    }
+
+    #[test]
+    fn a_latest_prompt_only_cache_misses_a_branch_but_serves_an_extension() {
+        let mut s = Simulator::new(Config { latest_prompt_only: true, ..Config::default() });
+        let chat = |n: usize, extra: Option<&str>| {
+            let mut msgs = vec![json!({"role": "system", "content": "sys ".repeat(1200)})];
+            msgs.extend((0..n).map(|i| json!({"role": "user", "content": format!("message {i}")})));
+            if let Some(e) = extra {
+                msgs.push(json!({"role": "user", "content": e}));
+            }
+            json!({"model": "deepseek/x", "messages": msgs, "prompt_cache_key": "k"})
+        };
+        s.request(Wire::ChatCompletions, &[], &chat(2, None)).unwrap();
+        s.request(Wire::ChatCompletions, &[], &chat(4, None)).unwrap();
+        let branch = s.request(Wire::ChatCompletions, &[], &chat(2, Some("summarize"))).unwrap();
+        assert_eq!(branch.read, 0, "only the latest whole prompt is kept");
+        s.request(Wire::ChatCompletions, &[], &chat(4, None)).unwrap();
+        let extension = s.request(Wire::ChatCompletions, &[], &chat(4, Some("summarize"))).unwrap();
+        assert!(extension.read > 0 && extension.miss.is_none());
     }
 
     #[test]

@@ -396,7 +396,7 @@ impl ChatBuffer {
     /// near the context window). The summary is asked for in the conversation itself, so the
     /// request reads the prompt cache; see `serpis_agent::compaction`.
     pub fn compact(&mut self, ed: &mut Editor, reason: CompactReason, instructions: Option<String>) {
-        use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, instruction};
+        use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, summary_request};
         if self.running() || self.compacting.is_some() {
             if reason == CompactReason::Manual {
                 ed.message("Wait for the agent to finish before compacting");
@@ -431,8 +431,9 @@ impl ChatBuffer {
         let reserve = ed.var("chat-compact-reserve-tokens").and_then(Value::as_u64).unwrap_or(16_384);
         cfg.max_tokens = Some((reserve * 4 / 5).min(cfg.model.max_tokens).max(1024));
         let custom = instructions.or_else(|| ed.var_str("chat-compact-instructions"));
-        let mut msgs = self.history[..cut].to_vec();
-        msgs.push(instruction(custom.as_deref()));
+        // The whole conversation extends the last request (every cache serves it); after an
+        // overflow only the part before the cut fits.
+        let msgs = summary_request(&self.history, cut, reason != CompactReason::Overflow, custom.as_deref());
         let cancel = serpis_ai::CancellationToken::new();
         self.compacting = Some(cancel.clone());
         self.entries.push(Entry::Info { text: format!("Compacting: summarizing {cut} earlier messages…"), face: Face::Meta });

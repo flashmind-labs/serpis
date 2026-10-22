@@ -338,7 +338,7 @@ async fn the_same_conversation_is_sent_as_the_same_bytes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_compaction_summary_reads_the_cache_and_costs_one_miss_after() {
-    use serpis_agent::compaction::{cut_point, instruction, summary_message};
+    use serpis_agent::compaction::{cut_point, summary_message, summary_request};
     for venue in VENUES {
         let mock = venue.mock().await;
         let mut chat = Chat::new(venue.model(&mock.base, ""));
@@ -346,17 +346,18 @@ async fn a_compaction_summary_reads_the_cache_and_costs_one_miss_after() {
         chat.send("READ 10").await;
         chat.send("READ 3").await;
         chat.send("next").await;
-        // The summary request: the messages before the cut plus the instruction, sent as the
-        // agent sends everything.
+        // Both summary requests, sent as the agent sends everything: after an overflow the part
+        // before the cut (a prefix of what was sent), otherwise the whole conversation.
         let cut = cut_point(&chat.history, 300).expect("something to compact");
-        let mut msgs = chat.history[..cut].to_vec();
-        msgs.push(instruction(None));
-        let summary = serpis_agent::complete(&chat.cfg, msgs, CancellationToken::new()).await;
-        assert!(summary.error_message.is_none(), "{venue:?}: {:?}", summary.error_message);
-        let o = mock.outcomes();
-        let s = o.last().unwrap();
-        assert!(s.miss.is_none() && s.read > 0, "{venue:?}: the summary request should read the cache\n{}", report(&mock));
-        assert!(s.write + s.input < 600, "{venue:?}: only the instruction is new\n{}", report(&mock));
+        for whole in [false, true] {
+            let msgs = summary_request(&chat.history, cut, whole, None);
+            let summary = serpis_agent::complete(&chat.cfg, msgs, CancellationToken::new()).await;
+            assert!(summary.error_message.is_none(), "{venue:?}: {:?}", summary.error_message);
+            let o = mock.outcomes();
+            let s = o.last().unwrap();
+            assert!(s.miss.is_none() && s.read > 0, "{venue:?} whole={whole}: the summary request should read the cache\n{}", report(&mock));
+            assert!(s.write + s.input < 700, "{venue:?} whole={whole}: only the instruction is new\n{}", report(&mock));
+        }
         // The chat continues from the summary and the kept messages: one miss, then hits.
         let mut compacted = vec![summary_message("## Goal\nKeep testing.")];
         compacted.extend(chat.history[cut..].iter().cloned());
@@ -369,4 +370,30 @@ async fn a_compaction_summary_reads_the_cache_and_costs_one_miss_after() {
         let after: Vec<&str> = mock.log()[n..].iter().map(|e| e.outcome.as_ref().unwrap().miss.as_ref().map(kind).unwrap_or("none")).collect();
         assert!(matches!(after[..], ["prefix" | "none", "none"]), "{venue:?}: {after:?}\n{}", report(&mock));
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_a_cache_that_keeps_only_the_latest_prompt_the_whole_conversation_summary_hits() {
+    // DeepInfra's DeepSeek (live check): only a session's latest whole prompt is reused. A summary
+    // request that extends the whole conversation reads it; one that branches off before the end
+    // (the overflow fallback) can't.
+    use serpis_agent::compaction::{cut_point, summary_request};
+    let mock = Mock::start_with(Config { latest_prompt_only: true, ..Config::default() }, commands()).await;
+    let m: Model = serde_json::from_value(json!({
+        "id": "deepseek/deepseek-chat-v3.1", "api": "openai-completions", "provider": "openrouter",
+        "baseUrl": format!("{}/api/v1", mock.base), "reasoning": true, "input": ["text"],
+    }))
+    .unwrap();
+    let mut chat = Chat::new(m);
+    chat.send("hello").await;
+    chat.send("READ 3").await;
+    chat.send("next").await;
+    let cut = cut_point(&chat.history, 300).expect("something to compact");
+    let whole = serpis_agent::complete(&chat.cfg, summary_request(&chat.history, cut, true, None), CancellationToken::new()).await;
+    assert!(whole.error_message.is_none());
+    let o = mock.outcomes();
+    assert!(o.last().unwrap().read > 0 && o.last().unwrap().miss.is_none(), "whole conversation\n{}", report(&mock));
+    chat.send("again").await;
+    serpis_agent::complete(&chat.cfg, summary_request(&chat.history, cut, false, None), CancellationToken::new()).await;
+    assert_eq!(mock.outcomes().last().unwrap().read, 0, "a branch misses here\n{}", report(&mock));
 }

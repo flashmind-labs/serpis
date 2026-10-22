@@ -228,10 +228,15 @@ it ships, so there is no runtime hashing of prompts.
    context-overflow error, then the turn is retried once) and `chat-compact`, keeping
    `chat-compact-keep-tokens` of recent messages; pi-format `compaction` session entries. Unlike
    pi, which sends the old conversation re-serialized as text under its own system prompt (the
-   whole history at full input price), serpis asks for the summary in the conversation itself:
-   the messages before the cut plus one instruction, through `serpis_agent::complete`, the agent's
-   own request path. That request is a prefix of what the chat already sent, so it reads the cache
-   (about a tenth of the price) and fits even when the conversation no longer does. The next
+   whole history at full input price), serpis asks for the summary in the conversation itself,
+   through `serpis_agent::complete`, the agent's own request path, with the chat's own retention
+   (`none` would send no cache markers, and nothing could be read). Normally the request is the
+   whole conversation plus one instruction naming the kept messages: an extension of the last
+   request, which every cache serves. After an overflow the whole conversation doesn't fit, so it
+   is the messages before the cut plus the instruction: a prefix of what was sent, read by caches
+   that keep earlier entries. The live check showed why both: Claude (Vertex) and GPT-5 mini
+   (Azure) read the prefix request, but DeepInfra's DeepSeek keeps only a conversation's latest
+   whole prompt and read 1 token of it (now the simulator's `latest_prompt_only`, with a test). The next
    request misses once, named "compacted". Hooks: `before-compact` (cancel, or supply a summary),
    `chat-compacted`. Tests: `serpis_agent::compaction` units, an agent scenario on every venue,
    `tests/ui/compact.lua` (manual, automatic, overflow and retry, resume after compaction), and a
