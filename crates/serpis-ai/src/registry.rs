@@ -244,6 +244,24 @@ impl Registry {
         out
     }
 
+    /// Whether `provider`'s credential is an OAuth login (its tokens belong to one machine:
+    /// refreshing them on another would log this one out).
+    pub fn is_oauth(&self, provider: &str) -> bool {
+        matches!(self.state.read().unwrap().auth.get(provider), Some(Credential::Oauth { .. }))
+    }
+
+    /// The models.json in effect: this agent directory's, else pi's.
+    pub fn models_file_path(&self) -> PathBuf {
+        let own = self.paths.models_json();
+        if own.exists() { own } else { Paths::pi_agent_dir().join("models.json") }
+    }
+
+    /// The auth.json in effect: this agent directory's, else pi's.
+    pub fn auth_file_path(&self) -> PathBuf {
+        let own = self.paths.auth_json();
+        if own.exists() { own } else { Paths::pi_agent_dir().join("auth.json") }
+    }
+
     /// Fetch catalogs for configured built-in providers whose cache is stale.
     pub async fn refresh_catalogs(&self, force: bool) -> Vec<String> {
         let mut errors = Vec::new();

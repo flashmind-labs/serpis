@@ -88,6 +88,16 @@ pub enum Request {
     },
     /// Stop the node: its chats are aborted, their sessions kept to reopen when it starts again.
     Stop,
+    /// Set the machine up with what the client sends: API keys by provider (auth.json entries),
+    /// models.json's providers, and settings. Only what the machine doesn't have yet is added.
+    Setup {
+        #[serde(default)]
+        auth: serde_json::Map<String, serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        models: Option<serde_json::Value>,
+        #[serde(default)]
+        settings: serde_json::Map<String, serde_json::Value>,
+    },
     /// The folders in a directory on the node (`~` and relative paths start from its home),
     /// for picking where a chat runs.
     Dirs { path: String },
@@ -106,13 +116,32 @@ pub struct Reply {
 pub enum Response {
     Ok,
     Error { message: String },
-    Hello { version: u32, host: String, serpis: String, home: String },
+    Hello {
+        version: u32,
+        host: String,
+        serpis: String,
+        home: String,
+        /// What the machine has set up for chats.
+        #[serde(default)]
+        setup: NodeSetup,
+    },
     Chats { chats: Vec<ChatSummary> },
     /// The chat a `New` or `Resume` made.
     Chat { chat: String },
     Models { models: Vec<ModelInfo> },
     Sessions { sessions: Vec<SessionInfo> },
     Dirs { path: String, dirs: Vec<String> },
+    /// What a `Setup` added (`auth:openrouter`, `models:local`, `settings:agent-model`).
+    Setup { added: Vec<String> },
+}
+
+/// What a machine has set up for chats.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeSetup {
+    /// Providers it has credentials for.
+    pub providers: Vec<String>,
+    /// Where they come from (`~/.serpis/agent`, `~/.pi/agent`).
+    pub sources: Vec<String>,
 }
 
 /// Something about an attached chat, unasked.

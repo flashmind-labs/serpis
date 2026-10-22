@@ -103,6 +103,8 @@ pub struct Hello {
     pub host: String,
     pub serpis: String,
     pub home: String,
+    /// What the machine has set up for chats (models, credentials).
+    pub setup: serpis_proto::wire::NodeSetup,
 }
 
 impl Client {
@@ -165,7 +167,7 @@ impl Client {
             Target::Command(argv) => Self::spawn(argv).map_err(failed)?,
         };
         match client.call(Request::Hello { version: wire::VERSION, client: name.to_string() }).await {
-            Ok(Response::Hello { host, serpis, home, .. }) => client.hello = Hello { host, serpis, home },
+            Ok(Response::Hello { host, serpis, home, setup, .. }) => client.hello = Hello { host, serpis, home, setup },
             Ok(other) => return Err(failed(anyhow!("the node answered hello with {other:?}"))),
             Err(e) => {
                 // What the far side said is the reason: wait for all of it.

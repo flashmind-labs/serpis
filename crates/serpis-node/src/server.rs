@@ -480,6 +480,7 @@ impl Node {
                     host: nix::unistd::gethostname().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
                     serpis: crate::VERSION.to_string(),
                     home: dirs::home_dir().unwrap_or_default().to_string_lossy().into_owned(),
+                    setup: self.setup(),
                 }
             }
             Request::List => Response::Chats { chats: self.chats.iter().map(|(id, s)| ChatSummary { chat: id.clone(), state: s.chat.state() }).collect() },
@@ -580,6 +581,7 @@ impl Node {
                 Response::Sessions { sessions }
             }
             Request::Stop => Response::Ok,
+            Request::Setup { auth, models, settings } => Response::Setup { added: self.apply_setup(auth, models, settings)? },
             Request::Dirs { path } => {
                 let dir = from_home(&path);
                 let mut dirs: Vec<String> = std::fs::read_dir(&dir)
@@ -593,6 +595,80 @@ impl Node {
                 Response::Dirs { path: dir.to_string_lossy().into_owned(), dirs }
             }
         })
+    }
+
+    /// What this machine has for chats: the providers it has credentials for, and from where.
+    fn setup(&self) -> wire::NodeSetup {
+        let home = dirs::home_dir().unwrap_or_default();
+        let short = |p: &Path| p.strip_prefix(&home).map(|r| format!("~/{}", r.display())).unwrap_or_else(|_| p.display().to_string());
+        let mut sources = Vec::new();
+        for f in [self.registry.auth_file_path(), self.registry.models_file_path()] {
+            if f.exists() && let Some(d) = f.parent().map(short) && !sources.contains(&d) {
+                sources.push(d);
+            }
+        }
+        wire::NodeSetup { providers: self.registry.configured_providers(), sources }
+    }
+
+    /// Add what a client sent and this machine lacks: credentials of providers it has none for,
+    /// models.json providers it doesn't define, settings it doesn't set. Files that hold keys are
+    /// the user's alone. Starts from pi's files where those are the ones in effect, so they keep
+    /// working.
+    fn apply_setup(&mut self, auth: serde_json::Map<String, Value>, models: Option<Value>, settings: serde_json::Map<String, Value>) -> Result<Vec<String>, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let paths = self.registry.paths().clone();
+        let write = |path: &Path, v: &Value| -> Result<(), String> {
+            let dir = path.parent().ok_or("no directory")?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            let tmp = path.with_extension("json.part");
+            std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+            std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+        };
+        let read = |path: &Path| std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or_else(|| json!({}));
+        let mut added = Vec::new();
+        if !auth.is_empty() {
+            let mut have = read(&self.registry.auth_file_path());
+            let configured = self.registry.configured_providers();
+            for (provider, cred) in auth {
+                if have.get(&provider).is_none() && !configured.contains(&provider) {
+                    have[&provider] = cred;
+                    added.push(format!("auth:{provider}"));
+                }
+            }
+            if added.iter().any(|a| a.starts_with("auth:")) {
+                write(&paths.auth_json(), &have)?;
+            }
+        }
+        if let Some(Value::Object(providers)) = models.as_ref().and_then(|m| m.get("providers")).cloned() {
+            let mut have = read(&self.registry.models_file_path());
+            let n = added.len();
+            for (id, p) in providers {
+                if have.pointer(&format!("/providers/{id}")).is_none() {
+                    if have.get("providers").is_none_or(|v| !v.is_object()) {
+                        have["providers"] = json!({});
+                    }
+                    have["providers"][&id] = p;
+                    added.push(format!("models:{id}"));
+                }
+            }
+            if added.len() > n {
+                write(&paths.models_json(), &have)?;
+            }
+        }
+        let n = added.len();
+        for (k, v) in settings {
+            if !self.settings.vars.contains_key(&k) {
+                self.settings.vars.insert(k.clone(), v);
+                added.push(format!("settings:{k}"));
+            }
+        }
+        if added.len() > n {
+            write(&self.settings.path.clone(), &Value::Object(self.settings.vars.clone()))?;
+        }
+        self.registry.reload();
+        Ok(added)
     }
 
     fn find_model(&self, spec: &str) -> Result<serpis_ai::Model, String> {

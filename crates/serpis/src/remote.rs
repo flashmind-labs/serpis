@@ -59,6 +59,8 @@ pub struct Remotes {
     picker: Option<(String, bool)>,
     /// Accounts being tried for machines, kept (remote-users) once a login with one works.
     trying: HashMap<String, String>,
+    /// Machines offered setting up this session (asked once).
+    offered: std::collections::HashSet<String>,
     /// The node builds serpis installs on machines, as last scanned: (directory, when it
     /// changed, builds).
     builds: Option<(std::path::PathBuf, Option<std::time::SystemTime>, Vec<serpis_node::deploy::NodeBinary>)>,
@@ -342,6 +344,10 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
     match &client {
         Ok(c) => {
             ed.remote.conns.insert(machine.to_string(), Conn::Up(c.clone()));
+            // A machine with no models or keys can't run a chat: offer to copy this one's.
+            if c.hello.setup.providers.is_empty() {
+                offer_setup(ed, machine, false);
+            }
             ed.run_hook("remote-connected", &json!({"machine": machine, "host": c.hello.host, "serpis": c.hello.serpis}));
         }
         Err(e) => {
@@ -415,6 +421,131 @@ pub fn remember_account(ed: &mut Editor, machine: &str, account: &str) {
     ed.set_var("remote-users", Value::Object(users.clone()));
     ed.persist_state("remote-users", Value::Object(users));
     ed.message(format!("Logged in to {machine} as {account} (kept in remote-users)"));
+}
+
+/// What this machine can give another to run chats: API keys by provider (not OAuth logins,
+/// whose tokens belong to one machine), models.json, and the default model and thinking level.
+struct Setup {
+    auth: serde_json::Map<String, Value>,
+    oauth: Vec<String>,
+    models: Option<Value>,
+    settings: serde_json::Map<String, Value>,
+}
+
+fn local_setup(ed: &Editor) -> Setup {
+    let mut auth = serde_json::Map::new();
+    let mut oauth = Vec::new();
+    for p in ed.registry.configured_providers() {
+        if ed.registry.is_oauth(&p) {
+            oauth.push(p);
+        } else if let Some(key) = ed.registry.api_key(&p).filter(|k| !k.is_empty()) {
+            auth.insert(p, json!({"type": "api_key", "key": key}));
+        }
+    }
+    let models = std::fs::read_to_string(ed.registry.models_file_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(|m| m.get("providers").is_some_and(|p| p.as_object().is_some_and(|o| !o.is_empty())));
+    let mut settings = serde_json::Map::new();
+    for k in ["agent-model", "agent-thinking"] {
+        if let Some(v) = ed.var_str(k).filter(|v| !v.is_empty()) {
+            settings.insert(k.into(), json!(v));
+        }
+    }
+    if !settings.contains_key("agent-model")
+        && let Some(m) = crate::buffers::chat::default_model(ed)
+    {
+        settings.insert("agent-model".into(), json!(format!("{}/{}", m.provider, m.id)));
+    }
+    Setup { auth, oauth, models, settings }
+}
+
+/// Offer to copy this machine's keys and models to `machine` (once a session, unless `asked`
+/// for, and never for a machine it was declined for), when no other prompt is open.
+pub fn offer_setup(ed: &mut Editor, machine: &str, asked: bool) {
+    if !asked {
+        let declined = ed.var("remote-setup-declined").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        if !ed.var("remote-offer-setup").and_then(Value::as_bool).unwrap_or(true) || declined.iter().any(|d| d.as_str() == Some(machine)) || !ed.remote.offered.insert(machine.to_string()) {
+            return;
+        }
+    }
+    if ed.minibuffer.is_some() {
+        // Another question is open (the folder to start in): after it.
+        let (main, m) = (ed.main_sender(), machine.to_string());
+        ed.rt.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            main.send(move |ed| offer_setup(ed, &m, true));
+        });
+        return;
+    }
+    let setup = local_setup(ed);
+    let mut have: Vec<String> = setup.auth.keys().cloned().collect();
+    if let Some(Value::Object(p)) = setup.models.as_ref().and_then(|m| m.get("providers")) {
+        have.extend(p.keys().filter(|k| !setup.auth.contains_key(*k)).cloned());
+    }
+    if have.is_empty() {
+        if asked {
+            ed.message("This machine has no API keys or models to copy");
+        }
+        return;
+    }
+    let what = format!("{} · over the ssh connection, readable by your account there only", have.join(", "));
+    let cands = vec![
+        Candidate::new("Copy my API keys and models").detail(what).value("copy"),
+        Candidate::new("Not now").value("later"),
+        Candidate::new("Never for this machine").value("never"),
+    ];
+    let m = machine.to_string();
+    ed.completing_read(&format!("{machine} has no models: "), cands, true, move |ed, c, _| match c.map(|c| c.value).as_deref() {
+        Some("copy") => copy_setup(ed, &m, setup),
+        Some("never") => {
+            let mut declined = ed.var("remote-setup-declined").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+            declined.push(json!(m));
+            ed.set_var("remote-setup-declined", Value::Array(declined.clone()));
+            ed.persist_state("remote-setup-declined", Value::Array(declined));
+            ed.message(format!("Won't offer to set up {m} again (remote-setup copies when you want)"));
+        }
+        _ => {}
+    });
+}
+
+fn copy_setup(ed: &mut Editor, machine: &str, setup: Setup) {
+    let Setup { auth, oauth, models, settings } = setup;
+    let default_model = settings.get("agent-model").and_then(Value::as_str).map(str::to_string);
+    let m = machine.to_string();
+    ed.busy_start(&format!("remote-setup:{m}"), &format!("Copying keys and models to {m}…"));
+    request(ed, machine, Request::Setup { auth, models, settings }, move |ed, r| {
+        ed.busy_stop(&format!("remote-setup:{m}"));
+        match r {
+            Ok(Response::Setup { added }) => {
+                let of = |kind: &str| added.iter().filter_map(|a| a.strip_prefix(kind)).collect::<Vec<_>>();
+                let mut parts = Vec::new();
+                if !of("auth:").is_empty() {
+                    parts.push(format!("API keys for {}", of("auth:").join(", ")));
+                }
+                if !of("models:").is_empty() {
+                    parts.push(format!("models of {}", of("models:").join(", ")));
+                }
+                if !of("settings:").is_empty() {
+                    parts.push("the default model".to_string());
+                }
+                let mut text = if added.is_empty() { format!("{m} already had all of it") } else { format!("Set up {m}: {}", parts.join(", ")) };
+                if !oauth.is_empty() {
+                    text.push_str(&format!(". Log in there for {} (logins aren't copied: their tokens belong to one machine)", oauth.join(", ")));
+                }
+                ed.message(text);
+                // Its chats that had no model can use the default one now.
+                if let Some(model) = default_model {
+                    for id in chats_on(ed, &m) {
+                        ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| {
+                            if c.remote.as_ref().is_some_and(|r| r.state.model.is_none()) {
+                                c.set_remote_model(&model);
+                            }
+                        });
+                    }
+                }
+            }
+            Ok(other) => ed.error(format!("{m}: unexpected answer {other:?}")),
+            Err(e) => ed.error(format!("{m}: {e}")),
+        }
+    });
 }
 
 /// The stream to `machine` ended: its chats show it, and it is retried while any is shown.
@@ -683,6 +814,8 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
     ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<serpis version>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (from serpis's source, when it runs from a checkout), or by scripts/build-node.sh --store.");
     ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"alice\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
+    ed.defvar("remote-offer-setup", json!(true), "When a machine has no models or API keys, offer to copy this machine's there (remote-setup does it any time).");
+    ed.defvar("remote-setup-declined", Editor::persisted_state("remote-setup-declined").unwrap_or_else(|| json!([])), "Machines not to offer setting up again.");
     ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 
@@ -781,6 +914,14 @@ pub fn install(ed: &mut Editor) {
         };
         send(ed, &m, Request::Close { chat });
         ed.kill_buffer(id);
+        Ok(())
+    });
+    ed.define_command("remote-setup", "Copy this machine's API keys, models and default model to another machine, adding what it lacks (param: machine; default: the current chat's).", o, |ed, a| {
+        let here = crate::commands::current_chat(ed).and_then(|id| ed.buffer_machine(id));
+        match a.str(0).map(str::to_string).or(here) {
+            Some(m) => offer_setup(ed, &m, true),
+            None => pick_machine(ed, "Set up: ", false, |ed, m| offer_setup(ed, &m, true)),
+        }
         Ok(())
     });
     ed.define_command("remote-stop-node", "Stop the node on a machine: its chats stop, and come back when it starts again (param: machine).", o, |ed, a| {

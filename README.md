@@ -234,7 +234,11 @@ version, into `~/.serpis/nodes`: serpis run from its source builds it with `scri
 Without a build, a `serpis-node` already installed there is used. `remote-deploy` turns
 installing off, and `remote-node-command` runs something else there. On the machine, the
 node keeps its settings in `~/.serpis/node/settings.json` (the variables above, by name) and uses
-models and keys from `~/.serpis/agent` or `~/.pi/agent` there. `scripts/ssh-check.sh <host>`
+models and keys from `~/.serpis/agent` or `~/.pi/agent` there. When it has none, serpis offers to
+copy this machine's API keys, models.json and default model there (over the ssh connection, into
+files only that account can read), adding only what it lacks; OAuth logins aren't copied, since
+their tokens belong to one machine. `remote-setup` offers it any time, `remote-offer-setup` turns
+the offer off. Extensions aren't copied yet: chats on other machines don't run Lua there. `scripts/ssh-check.sh <host>`
 runs a whole chat over real ssh in a throwaway directory there, with a mock model.
 
 ## Images
