@@ -103,8 +103,14 @@ fn ssh_host(t: &Target) -> Option<String> {
 }
 
 fn ssh_target(ed: &mut Editor, host: &str, command: Option<String>) -> Target {
-    let mut t = Target::ssh(host);
-    let Target::Ssh { ssh_args, command: run, deploy, .. } = &mut t else { unreachable!() };
+    // `remote-users` names the account for a host given without one.
+    let account = (!host.contains('@')).then(|| ed.var("remote-users").and_then(|u| u.get(host)?.as_str().map(str::to_string))).flatten();
+    let login = account.map(|a| format!("{a}@{host}")).unwrap_or_else(|| host.to_string());
+    let mut t = Target::ssh(&login);
+    let Target::Ssh { ssh, ssh_args, command: run, deploy, .. } = &mut t else { unreachable!() };
+    if let Some(program) = ed.var_str("remote-ssh-command").filter(|p| !p.is_empty()) {
+        *ssh = vec![program];
+    }
     if let Some(Value::Array(extra)) = ed.var("remote-ssh-args") {
         ssh_args.extend(extra.iter().filter_map(Value::as_str).map(str::to_string));
     }
@@ -234,6 +240,14 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
         Some(Conn::Connecting(w)) => w,
         _ => Vec::new(),
     };
+    // A login refused for a machine named without an account (a rayfish peer, a bare host):
+    // most likely the account here isn't one there. Ask which, and carry on with it.
+    if let Err(e) = &client
+        && e.contains("Permission denied")
+        && account_unknown(ed, machine)
+    {
+        return ask_account(ed, machine, e.clone(), waiting);
+    }
     match &client {
         Ok(c) => {
             ed.remote.conns.insert(machine.to_string(), Conn::Up(c.clone()));
@@ -248,6 +262,60 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
     for w in waiting {
         w(ed, client.clone());
     }
+}
+
+/// Whether `machine` is reached over ssh with no account named for it.
+fn account_unknown(ed: &mut Editor, machine: &str) -> bool {
+    matches!(target_of(ed, machine), Target::Ssh { host, .. } if !host.contains('@'))
+}
+
+/// Ask for the account to log in to `machine` as, remember it (`remote-users`) and connect
+/// again; whoever was waiting for the connection gets that one. Cancelled, they get `error`.
+fn ask_account(ed: &mut Editor, machine: &str, error: String, waiting: Vec<Waiter>) {
+    ed.remote.conns.insert(machine.to_string(), Conn::Down { error: error.clone(), failures: 1 });
+    let me = std::env::var("USER").unwrap_or_default();
+    let m = machine.to_string();
+    let waiting = std::rc::Rc::new(std::cell::RefCell::new(Some(waiting)));
+    let on_cancel = waiting.clone();
+    let err = error.clone();
+    ed.completing_read(
+        &format!("{machine} doesn't let {me} in. Account to log in as there: "),
+        Vec::new(),
+        false,
+        move |ed, _, typed| {
+            let account = typed.trim().to_string();
+            let waiting = waiting.borrow_mut().take().unwrap_or_default();
+            if account.is_empty() {
+                return waiting.into_iter().for_each(|w| w(ed, Err(err.clone())));
+            }
+            remember_account(ed, &m, &account);
+            ed.remote.conns.remove(&m);
+            for w in waiting {
+                with_client(ed, &m, w);
+            }
+        },
+    );
+    ed.minibuffer_preview(
+        None,
+        Some(Box::new(move |ed| {
+            for w in on_cancel.borrow_mut().take().unwrap_or_default() {
+                w(ed, Err(error.clone()));
+            }
+        })),
+        false,
+    );
+}
+
+/// Log in to `machine` as `account` from now on (`remote-users`, kept for next time).
+pub fn remember_account(ed: &mut Editor, machine: &str, account: &str) {
+    let mut users = match ed.var("remote-users") {
+        Some(Value::Object(o)) => o.clone(),
+        _ => Default::default(),
+    };
+    users.insert(machine.to_string(), json!(account));
+    ed.set_var("remote-users", Value::Object(users.clone()));
+    ed.persist_state("remote-users", Value::Object(users));
+    ed.message(format!("Logging in to {machine} as {account} (remote-users)"));
 }
 
 /// The stream to `machine` ended: its chats show it, and it is retried while any is shown.
@@ -432,6 +500,10 @@ fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(
             (false, None, false) => format!("{} · {}", m.source, m.detail),
             (false, None, true) => m.source.to_string(),
         };
+        let detail = match ed.var("remote-users").and_then(|u| u.get(&m.name)?.as_str().map(str::to_string)) {
+            Some(account) => format!("{detail} · as {account}"),
+            None => detail,
+        };
         cands.push(Candidate::new(m.name.clone()).detail(detail));
     }
     if cands.is_empty() {
@@ -489,6 +561,8 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh, instead of the node serpis installs there (\"\": serpis's own, else serpis-node from PATH, ~/.local/bin or ~/.cargo/bin).");
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
     ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<target triple>/serpis-node (scripts/build-node.sh --store, and the install script, put them there).");
+    ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"aelita\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
+    ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 
     ed.define_command("remote-new-chat", "Start a chat on another machine: pick the machine, then a folder there (params: machine, folder, model).", o, |ed, a| {
