@@ -181,12 +181,16 @@ it ships, so there is no runtime hashing of prompts.
      with the estimate (last prompt tokens × write price). "Don't warn again" updates
      `cache-warn-actions`, and the `before-cache-invalidate` hook can veto or rewrite it.
 
-7. **Provider-reported cache data** (`cache-debug`, off by default): a per-request log of what
-   the provider reported (reads, writes, uncached input, OpenRouter upstream) next to what serpis
-   sent. Optionally the simulator runs alongside real requests and flags any request whose
-   reported read falls short of the predicted one. Either the provider behaves differently from
-   the model (fix the simulator, then serpis) or bytes changed (a bug). Tests never use real
-   endpoints.
+7. **Live check against real providers** (*done*): `scripts/live-cache-check.sh` runs
+   `crates/serpis-ai/tests/live_cache.rs` with the user's `OPENROUTER_API_KEY` (a few cents). A
+   short conversation per model family (Claude, Gemini, OpenAI, DeepSeek; first, next turn,
+   12 parallel tool calls, another turn) goes through serpis' adapters exactly as a chat sends it,
+   and through the simulator alongside. A missing read the simulator expects fails the run for
+   explicit caches and is reported for automatic ones; rejected requests fail. Each surprise
+   becomes a simulator rule and a test. The test is ignored, needs SERPIS_LIVE_TEST=1, and reads
+   the key only from the environment: the test suites never touch real providers. A per-request
+   debug log was dropped: sessions already keep each response's cache usage and upstream, and the
+   chat flags unexplained misses itself.
 
 Deferred until usage data asks for them:
 
