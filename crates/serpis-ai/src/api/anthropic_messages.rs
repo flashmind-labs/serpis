@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use crate::api::Request;
 use crate::stream::*;
 use crate::transform::transform_messages;
 use crate::types::*;
@@ -169,18 +170,28 @@ fn convert_messages(messages: &[Message], oauth: bool, cache_control: Option<&Va
         }
         i += 1;
     }
-    if let (Some(cc), Some(last)) = (cache_control, params.last_mut()) {
-        if last["role"] == "user" {
-            if let Some(Value::Array(blocks)) = last.get_mut("content") {
-                if let Some(b) = blocks.last_mut() {
-                    if matches!(b["type"].as_str(), Some("text" | "image" | "tool_result")) {
-                        b["cache_control"] = cc.clone();
-                    }
-                }
-            }
+    if let Some(cc) = cache_control {
+        // Mark this request's end and the previous request's end (the last user message before
+        // the newest assistant message). One step can add more blocks than the provider looks
+        // back over, so the previous mark keeps the cached prefix reachable.
+        let last_assistant = params.iter().rposition(|m| m["role"] == "assistant");
+        let previous = last_assistant.and_then(|a| params[..a].iter().rposition(|m| m["role"] == "user"));
+        for i in [previous, params.len().checked_sub(1)].into_iter().flatten() {
+            mark_last_block(&mut params[i], cc);
         }
     }
     params
+}
+
+fn mark_last_block(msg: &mut Value, cc: &Value) {
+    if msg["role"] != "user" {
+        return;
+    }
+    if let Some(b) = msg.get_mut("content").and_then(Value::as_array_mut).and_then(|b| b.last_mut()) {
+        if matches!(b["type"].as_str(), Some("text" | "image" | "tool_result")) {
+            b["cache_control"] = cc.clone();
+        }
+    }
 }
 
 fn map_effort(model: &Model, level: ThinkingLevel) -> &'static str {
@@ -198,14 +209,14 @@ fn map_effort(model: &Model, level: ThinkingLevel) -> &'static str {
     }
 }
 
-pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyhow::Result<Request> {
     let api_key = opts.api_key.clone().unwrap_or_default();
     let has_auth_header = opts.headers.keys().any(|k| k.eq_ignore_ascii_case("authorization"));
     if api_key.is_empty() && !has_auth_header && model.provider != "github-copilot" {
         anyhow::bail!("No API key for provider: {}", model.provider);
     }
     let oauth = is_oauth_token(&api_key);
-    let is_openrouter = model.provider == "openrouter" || model.base_url.contains("openrouter.ai");
+    let is_openrouter = model.is_openrouter();
     let cb = |k: &str, d: bool| model.compat_bool(k).unwrap_or(d);
     let supports_eager = cb("supportsEagerToolInputStreaming", true);
     let supports_long = cb("supportsLongCacheRetention", true);
@@ -249,11 +260,9 @@ pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &
 
     let mut system = Vec::new();
     if oauth {
-        let mut b = json!({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."});
-        if let Some(cc) = &cache_control {
-            b["cache_control"] = cc.clone();
-        }
-        system.push(b);
+        // No mark of its own: the system prompt's mark right after it covers it, and the four
+        // allowed marks go to the system prompt, the tools and the two message ends.
+        system.push(json!({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}));
     }
     if !ctx.system_prompt.is_empty() {
         let mut b = json!({"type": "text", "text": ctx.system_prompt});
@@ -366,26 +375,20 @@ pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &
         headers.insert("anthropic-beta".into(), betas.join(","));
     }
 
-    let url = format!("{}/v1/messages", model.base_url.trim_end_matches('/'));
-    let body = Value::Object(p);
-    let client = http_client();
-    let resp = send_with_retry(
-        || {
-            let mut rb = client.post(&url).json(&body);
-            if oauth || model.provider == "github-copilot" {
-                rb = rb.bearer_auth(&api_key);
-            } else if !api_key.is_empty() {
-                rb = rb.header("x-api-key", &api_key);
-            }
-            for (k, v) in &headers {
-                rb = rb.header(k, v);
-            }
-            rb
-        },
-        opts.max_retries,
-        &opts.cancel,
-    )
-    .await?;
+    let req = Request {
+        url: format!("{}/v1/messages", model.base_url.trim_end_matches('/')),
+        headers,
+        body: Value::Object(p),
+    };
+    Ok(if oauth || model.provider == "github-copilot" {
+        req.with_auth("authorization", format!("Bearer {api_key}"))
+    } else {
+        req.with_auth("x-api-key", api_key)
+    })
+}
+
+pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+    let oauth = is_oauth_token(opts.api_key.as_deref().unwrap_or_default());
     em.emit(StreamEvent::Start);
 
     // Anthropic block index -> (content index, partial json for tool calls)

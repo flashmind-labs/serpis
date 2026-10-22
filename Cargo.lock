@@ -3247,6 +3247,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serpis-ai",
+ "serpis-testkit",
  "similar",
  "tokio",
  "tracing",
@@ -3280,6 +3281,15 @@ name = "serpis-bin"
 version = "0.1.0"
 dependencies = [
  "serpis",
+]
+
+[[package]]
+name = "serpis-testkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

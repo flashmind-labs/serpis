@@ -133,6 +133,8 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-native-web-search", json!(true), "Use the provider's own web search when the model supports it.");
     ed.defvar("agent-disabled-tools", json!([]), "Tool names hidden from the agent.");
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");
+    ed.defvar("agent-cache-retention", json!("long"), "How long providers keep a chat's prompt cached: \"long\" (1 hour on Anthropic-style caches, 24 hours where OpenAI-style caches allow it), \"short\" (5 minutes) or \"none\". Or per provider: {\"default\": \"long\", \"openrouter\": \"short\"}. 1-hour writes cost 2x input instead of 1.25x, but only for new tokens; a short cache expires during pauses and the next message rewrites the whole conversation.");
+    ed.defvar("agent-live-context", json!(false), "Rebuild the system prompt (AGENTS.md / CLAUDE.md, agent-guidelines, agent-append-system-prompt) for every message instead of keeping the one a chat started with. Any change then rewrites the chat's whole prompt cache; chat-refresh-context picks up changes once.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
     ed.defvar("extensions-disabled", json!([]), "Lua extensions in <config>/extensions not to load, by name (\"max-money\" for max-money.lua).");

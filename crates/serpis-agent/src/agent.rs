@@ -60,6 +60,8 @@ pub struct AgentConfig {
     /// Ask the provider to search instead of offering the client-side `web_search` tool.
     pub native_web_search: bool,
     pub max_tokens: Option<u64>,
+    /// How long providers should keep this chat's prompt cached.
+    pub cache_retention: CacheRetention,
     pub hooks: Option<Arc<dyn ToolHooks>>,
     pub sequential_tools: bool,
 }
@@ -67,7 +69,7 @@ pub struct AgentConfig {
 /// Whether a model's API can search the web server-side.
 pub fn supports_native_web_search(model: &Model) -> bool {
     match model.api.as_str() {
-        "anthropic-messages" => !model.base_url.contains("openrouter.ai"),
+        "anthropic-messages" => !model.is_openrouter(),
         "openai-responses" => model.provider == "openai",
         "google-generative-ai" => true,
         // OpenRouter's "web" plugin searches on every request rather than letting the model
@@ -155,6 +157,7 @@ async fn run_loop(
                 reasoning: Some(cfg.reasoning),
                 max_tokens: cfg.max_tokens,
                 session_id: Some(cfg.session_id.clone()),
+                cache_retention: cfg.cache_retention,
                 cancel: h.cancel.child_token(),
                 native_web_search: native,
                 ..Default::default()

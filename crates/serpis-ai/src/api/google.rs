@@ -2,6 +2,7 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::api::Request;
 use crate::stream::*;
 use crate::transform::transform_messages;
 use crate::types::*;
@@ -221,7 +222,7 @@ fn resolve_level(model: &Model, level: ThinkingLevel) -> String {
     }
 }
 
-pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyhow::Result<Request> {
     let api_key = opts.api_key.clone().unwrap_or_default();
     let mut config = Map::new();
     if let Some(t) = opts.temperature {
@@ -279,19 +280,10 @@ pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &
     let url = format!("{base}/models/{}:streamGenerateContent?alt=sse", model.id);
     let mut headers = model.headers.clone().unwrap_or_default();
     headers.extend(opts.headers.clone());
-    let client = http_client();
-    let resp = send_with_retry(
-        || {
-            let mut rb = client.post(&url).json(&body).header("x-goog-api-key", &api_key);
-            for (k, v) in &headers {
-                rb = rb.header(k, v);
-            }
-            rb
-        },
-        opts.max_retries,
-        &opts.cancel,
-    )
-    .await?;
+    Ok(Request { url, headers, body }.with_auth("x-goog-api-key", api_key))
+}
+
+pub async fn stream_inner(resp: reqwest::Response, model: Model, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
     em.emit(StreamEvent::Start);
 
     let mut current: Option<(usize, bool)> = None; // (content index, is_thinking)

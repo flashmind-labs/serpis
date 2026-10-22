@@ -3,7 +3,7 @@
 # Uses throwaway config/agent dirs so your own config is untouched.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-cargo build -q --manifest-path "$root/Cargo.toml" -p serpis-bin
+cargo build -q --manifest-path "$root/Cargo.toml" -p serpis-bin -p serpis-testkit
 tmp="$(mktemp -d)"
 # A throwaway HOME: tests never see your pi/serpis sessions, settings or API keys
 # (~/.pi/agent is read as a fallback otherwise), and never call a real provider.
@@ -13,11 +13,15 @@ for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; don
 # A local model (tests/ui/mock_llm.py) for tests that run agents end to end.
 python3 "$root/tests/ui/mock_llm.py" "$tmp/mock.port" "$tmp/mock.log" &
 mock=$!
-trap 'kill $mock 2>/dev/null' EXIT
-for _ in $(seq 50); do [[ -s "$tmp/mock.port" ]] && break; sleep 0.1; done
+# A simulated caching provider (crates/serpis-testkit) for the cache tests.
+"$root/target/debug/serpis-mock-provider" "$tmp/cache-mock.port" "$tmp/cache-mock.log" &
+cache=$!
+trap 'kill $mock $cache 2>/dev/null' EXIT
+for _ in $(seq 50); do [[ -s "$tmp/mock.port" && -s "$tmp/cache-mock.port" ]] && break; sleep 0.1; done
 export SERPIS_TEST_MOCK_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/v1" SERPIS_TEST_MOCK_LOG="$tmp/mock.log"
+export SERPIS_TEST_CACHE_URL="http://127.0.0.1:$(cat "$tmp/cache-mock.port")" SERPIS_TEST_CACHE_LOG="$tmp/cache-mock.log"
 fail=0
-for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model}"; do
+for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model cache}"; do
   for name in $t; do
     out="$tmp/$name.out"
     # Each test starts from fresh state; sessions_restore checks what sessions left behind.

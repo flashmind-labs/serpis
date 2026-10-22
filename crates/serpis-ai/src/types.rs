@@ -327,6 +327,12 @@ impl Model {
         self.compat.as_ref().and_then(|c| c.get(key))
     }
 
+    /// Whether requests go to OpenRouter: its provider id or base URL, or `compat.openRouter`
+    /// for a gateway or proxy in front of it.
+    pub fn is_openrouter(&self) -> bool {
+        self.compat_bool("openRouter").unwrap_or(self.provider == "openrouter" || self.base_url.contains("openrouter.ai"))
+    }
+
     pub fn compat_bool(&self, key: &str) -> Option<bool> {
         self.compat_value(key).and_then(Value::as_bool)
     }

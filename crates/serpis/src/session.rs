@@ -71,9 +71,10 @@ pub struct SessionWriter {
 }
 
 impl SessionWriter {
-    /// A new session for `cwd` under `root` (nothing is written until the first entry).
-    pub fn new(root: &Path, cwd: &Path) -> Self {
-        let id = uuid::Uuid::now_v7().to_string();
+    /// A new session `id` for `cwd` under `root` (nothing is written until the first entry). The
+    /// id is the chat's session id, so a resumed chat keeps routing to the same provider cache.
+    pub fn new(root: &Path, cwd: &Path, id: &str) -> Self {
+        let id = id.to_string();
         let stamp = iso(SystemTime::now()).replace([':', '.'], "-");
         let path = root.join(dir_for(cwd)).join(format!("{stamp}_{id}.jsonl"));
         SessionWriter { id, path, cwd: cwd.to_path_buf(), leaf: None, created: false, model: None, thinking: None }
@@ -425,7 +426,7 @@ mod tests {
     fn write_load_resume_roundtrip() {
         let root = std::env::temp_dir().join(format!("serpis-sessions-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let mut w = SessionWriter::new(&root, Path::new("/tmp/proj"));
+        let mut w = SessionWriter::new(&root, Path::new("/tmp/proj"), &uuid::Uuid::now_v7().to_string());
         assert!(!w.path.exists(), "nothing written before the first entry");
         w.note_settings("openrouter", "m1", "high").unwrap();
         w.message(&Message::user_text("list files")).unwrap();

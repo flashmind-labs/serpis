@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use crate::api::Request;
 use crate::stream::*;
 use crate::transform::{short_hash, transform_messages};
 use crate::types::*;
@@ -164,7 +165,7 @@ pub fn convert_messages(model: &Model, ctx: &Context) -> Vec<Value> {
     items
 }
 
-pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyhow::Result<Request> {
     let api_key = opts.api_key.clone().unwrap_or_default();
     let mut p = Map::new();
     p.insert("model".into(), model.id.clone().into());
@@ -227,7 +228,7 @@ pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &
     let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("User-Agent".into(), crate::USER_AGENT.into());
     if let Some(sid) = &opts.session_id {
-        if model.provider == "openrouter" || model.base_url.contains("openrouter.ai") {
+        if model.is_openrouter() {
             headers.insert("x-session-id".into(), sid.clone());
         }
     }
@@ -236,23 +237,11 @@ pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &
     }
     headers.extend(opts.headers.clone());
     let url = format!("{}/responses", model.base_url.trim_end_matches('/'));
-    let body = Value::Object(p);
-    let client = http_client();
-    let resp = send_with_retry(
-        || {
-            let mut rb = client.post(&url).json(&body);
-            if !api_key.is_empty() {
-                rb = rb.bearer_auth(&api_key);
-            }
-            for (k, v) in &headers {
-                rb = rb.header(k, v);
-            }
-            rb
-        },
-        opts.max_retries,
-        &opts.cancel,
-    )
-    .await?;
+    let bearer = if api_key.is_empty() { String::new() } else { format!("Bearer {api_key}") };
+    Ok(Request { url, headers, body: Value::Object(p) }.with_auth("authorization", bearer))
+}
+
+pub async fn stream_inner(resp: reqwest::Response, model: Model, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
     em.emit(StreamEvent::Start);
 
     enum Slot {

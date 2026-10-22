@@ -1,0 +1,12 @@
+[package]
+name = "serpis-testkit"
+description = "Test support: a model of provider prompt caching and a local mock provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

@@ -721,6 +721,16 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("chat-clear", "Start a fresh conversation in this chat.", o, |ed, _| with_chat(ed, |c, _| c.clear()));
+    ed.define_command(
+        "chat-refresh-context",
+        "Re-read AGENTS.md / CLAUDE.md and the system prompt vars with the next message. A chat keeps the system prompt it started with, so the provider can reuse its cache; refreshing rewrites the cache once.",
+        o,
+        |ed, _| {
+            with_chat(ed, |c, _| c.refresh_context())?;
+            ed.message("The next message re-reads the project's instructions (rewrites the prompt cache once)");
+            Ok(())
+        },
+    );
     ed.define_command("chat-toggle-thinking", "Show or hide the model's thinking in chats (chat-show-thinking).", o, |ed, _| {
         let show = !ed.var_bool("chat-show-thinking");
         ed.set_var("chat-show-thinking", serde_json::json!(show));

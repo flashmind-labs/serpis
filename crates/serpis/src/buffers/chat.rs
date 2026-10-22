@@ -101,6 +101,9 @@ pub struct ChatBuffer {
     /// Where the conversation is recorded (created with the first prompt).
     pub session: Option<crate::session::SessionWriter>,
     session_failed: bool,
+    /// The system prompt this chat sends, built on its first message and kept so the provider can
+    /// reuse its cache: (tool names it was built for, prompt). `chat-refresh-context` drops it.
+    system_prompt: Option<(Vec<String>, String)>,
 }
 
 const PREVIEW_LINES: usize = 10;
@@ -136,7 +139,7 @@ impl ChatBuffer {
             rx,
             model,
             thinking,
-            session_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::now_v7().to_string(),
             cwd: params.get("cwd").and_then(Value::as_str).map(crate::expand_home).unwrap_or_else(|| ed.cwd.clone()),
             totals: Usage::default(),
             started: None,
@@ -151,6 +154,7 @@ impl ChatBuffer {
             attachments: Vec::new(),
             session: None,
             session_failed: false,
+            system_prompt: None,
         };
         if chat.model.is_none() {
             chat.entries.push(Entry::Info {
@@ -176,10 +180,11 @@ impl ChatBuffer {
         self.entries.clear();
         self.history.clear();
         self.totals = Usage::default();
-        self.session_id = uuid::Uuid::new_v4().to_string();
+        self.session_id = uuid::Uuid::now_v7().to_string();
         self.title.clear();
         self.last_error = None;
         self.session = None;
+        self.system_prompt = None;
         self.custom_entries.clear();
         self.dirty = true;
     }
@@ -265,7 +270,7 @@ impl ChatBuffer {
             return false;
         };
         if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
-            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd));
+            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd, &self.session_id));
         }
         let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
         self.record(ed, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
@@ -280,17 +285,9 @@ impl ChatBuffer {
             .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
             .unwrap_or_default();
         tools.retain(|t| !disabled.iter().any(|d| d == t.name()));
-        let agent_dir = ed.registry.paths().agent_dir.clone();
-        let mut opts = serpis_agent::system_prompt::PromptOptions {
-            context_files: serpis_agent::system_prompt::load_context_files(&self.cwd, &agent_dir),
-            append: ed.var_str("agent-append-system-prompt"),
-            ..Default::default()
-        };
-        if let Some(Value::Array(g)) = ed.var("agent-guidelines") {
-            opts.guidelines = g.iter().filter_map(Value::as_str).map(str::to_string).collect();
-        }
-        let system_prompt = serpis_agent::system_prompt::build_system_prompt(&tools, &self.cwd, &opts);
+        let system_prompt = self.system_prompt_for(ed, &tools);
         let native = ed.var("agent-native-web-search").and_then(Value::as_bool).unwrap_or(true);
+        let cache_retention = cache_retention(ed, &model.provider);
         let cfg = AgentConfig {
             api_key: ed.registry.api_key(&model.provider),
             headers: ed.registry.provider_headers(&model.provider),
@@ -302,6 +299,7 @@ impl ChatBuffer {
             cwd: self.cwd.clone(),
             native_web_search: native,
             max_tokens: None,
+            cache_retention,
             hooks: Some(Arc::new(EditorToolHooks { main: ed.main_sender(), buffer: ed.this_buffer().map(crate::editor::buffer_id_to_u64) })),
             sequential_tools: false,
         };
@@ -358,6 +356,37 @@ impl ChatBuffer {
         self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 
+    /// The system prompt to send: the one this chat was started with, unless its tools changed
+    /// (that misses the cache anyway, so the prompt catches up for free) or `agent-live-context`
+    /// asks for a fresh one every time. Re-reading AGENTS.md / CLAUDE.md and the prompt vars on
+    /// every message would rewrite the whole cached conversation whenever one of them changed.
+    fn system_prompt_for(&mut self, ed: &Editor, tools: &[serpis_agent::ToolRef]) -> String {
+        let names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+        let live = ed.var("agent-live-context").and_then(Value::as_bool).unwrap_or(false);
+        if let Some((n, p)) = &self.system_prompt {
+            if *n == names && !live {
+                return p.clone();
+            }
+        }
+        let agent_dir = ed.registry.paths().agent_dir.clone();
+        let mut opts = serpis_agent::system_prompt::PromptOptions {
+            context_files: serpis_agent::system_prompt::load_context_files(&self.cwd, &agent_dir),
+            append: ed.var_str("agent-append-system-prompt"),
+            ..Default::default()
+        };
+        if let Some(Value::Array(g)) = ed.var("agent-guidelines") {
+            opts.guidelines = g.iter().filter_map(Value::as_str).map(str::to_string).collect();
+        }
+        let prompt = serpis_agent::system_prompt::build_system_prompt(tools, &self.cwd, &opts);
+        self.system_prompt = Some((names, prompt.clone()));
+        prompt
+    }
+
+    /// Rebuild the system prompt with the next message (AGENTS.md / CLAUDE.md, prompt vars).
+    pub fn refresh_context(&mut self) {
+        self.system_prompt = None;
+    }
+
     /// Attach an image file to the next message.
     pub fn attach_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
         let (image, encoded) = crate::images::load_file(path).ok_or_else(|| anyhow::anyhow!("{} isn't an image serpis can read", path.display()))?;
@@ -391,7 +420,7 @@ impl ChatBuffer {
     /// Record a custom entry in the session (created if needed) and keep it for resume.
     pub fn append_entry(&mut self, ed: &mut Editor, kind: &str, data: Value) {
         if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
-            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd));
+            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd, &self.session_id));
         }
         let fields = serde_json::json!({"customType": kind, "data": data});
         self.record(ed, |w| w.append("custom", fields).map(|_| ()));
@@ -854,6 +883,10 @@ impl ChatBuffer {
         self.entries.clear();
         self.totals = Usage::default();
         self.history = l.messages.clone();
+        // Requests keep the session's id, so they route to the provider cache they warmed.
+        if !l.id.is_empty() {
+            self.session_id = l.id.clone();
+        }
         if l.cwd.is_dir() {
             self.cwd = l.cwd.clone();
         }
@@ -904,6 +937,7 @@ impl ChatBuffer {
         let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| crate::sidebar::fmt_age(d) + " ago").unwrap_or_default();
         self.entries.push(Entry::Info { text: format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), face: Face::Dim });
         self.custom_entries = l.entries.clone();
+        self.system_prompt = None;
         self.session = Some(crate::session::SessionWriter::resume(l));
         self.session_failed = false;
         self.last_error = None;
@@ -2116,6 +2150,21 @@ impl TextSurface for ChatBuffer {
             Focus::Transcript => self.view.reveal_cursor(),
             Focus::Prompt => self.prompt.reveal_cursor(),
         }
+    }
+}
+
+/// `agent-cache-retention` for `provider`: a level, or {"default": level, "<provider>": level}.
+fn cache_retention(ed: &Editor, provider: &str) -> serpis_ai::CacheRetention {
+    let v = ed.var("agent-cache-retention");
+    let level = match &v {
+        Some(Value::Object(o)) => o.get(provider).or_else(|| o.get("default")).and_then(Value::as_str),
+        Some(v) => v.as_str(),
+        None => None,
+    };
+    match level {
+        Some("none") => serpis_ai::CacheRetention::None,
+        Some("short") => serpis_ai::CacheRetention::Short,
+        _ => serpis_ai::CacheRetention::Long,
     }
 }
 

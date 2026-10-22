@@ -98,3 +98,98 @@ Done and tested (unit tests + `scripts/ui-test.sh` against a real window):
 Known gaps carried into phase 2: OAuth logins and the remaining adapters (Bedrock, Vertex, Azure,
 Mistral, Codex), session persistence and compaction, terminal mouse reporting and mouse selection,
 kitty images, syntax highlighting, and the avy/flash package.
+
+## Cost and caching
+
+Goal: pay as little as possible for the same work, and show the user why. **OpenRouter is the
+venue we optimize for first**: every item is built and tested on its paths (chat completions with
+`anthropic/*`, `google/*` and `openai/*` models, and Anthropic messages on an openrouter.ai base
+URL) before the direct providers, and OpenRouter is detected by provider id *or* base URL. Every
+behavior is a var, and every UI element can be turned off.
+
+A cache read needs four things, and each has one cheap fix:
+
+| Condition | Fix |
+|---|---|
+| Same bytes: the prefix is unchanged | Everything already sent is immutable (items 1–2) |
+| Correct marks: on explicit-cache APIs a mark sits within 20 blocks of the last cached entry | Two rolling marks (item 3) |
+| Not expired | 1h retention by default (item 4) |
+| Same place: same upstream / routing key | Keep the session id; record the OpenRouter upstream (item 5) |
+
+With the prefix immutable by construction, a miss has only three possible causes, and serpis knows
+each: a setting changed (model, thinking, tools), the entry expired, or OpenRouter moved the chat
+to another upstream. Any other miss is a bug, and the test suite (item 1) exists to catch it before
+it ships, so there is no runtime hashing of prompts.
+
+1. **Cache test suite** (`crates/serpis-testkit`, dev-only). One model of provider caching, used at
+   every level:
+   - *Simulator*: Anthropic-style rules (prefix keyed by model and thinking settings, at most 4
+     marks, a 20-block lookback per mark, TTL reset on each read, minimum cacheable size) and
+     automatic prefix caching (OpenAI-style, keyed by routing key). OpenRouter is modelled as one
+     cache per upstream, keyed by `x-session-id`.
+   - *Mock provider*: a local HTTP server speaking chat completions (OpenRouter format included)
+     and Anthropic messages. It answers with the simulator's numbers in real usage fields and
+     logs each request's read, write and miss cause.
+   - *Adapter tests*: every API path through `serpis_ai::api::build_request` into the simulator.
+   - *Agent scenarios*: real agent runs against the mock: multi-turn, 10 parallel tool calls,
+     steering, follow-ups, abort, an errored turn, truncated tool calls, images. Each scenario
+     asserts the hit rate and that every miss has an expected cause.
+   - *App scenarios* (`scripts/ui-test.sh` runs the mock as a binary): resume, model and thinking
+     switches, CLAUDE.md edits, tool toggles, and the cache UI from item 6.
+   - A test that sends the same conversation twice and requires identical bytes (determinism).
+
+   *Done*: the simulator and mock (`crates/serpis-testkit`, with tests of
+   each caching rule), adapter fixtures (`crates/serpis-ai/tests/requests.rs`) and 8 agent
+   scenarios on 5 venues (`crates/serpis-agent/tests/cache.rs`). The suite found two leaks, both
+   fixed: on OpenRouter Claude models only the marked message went out as content parts, so the
+   previous request's last message changed bytes each turn; and a step with 10 parallel tool calls
+   missed through the lookback. Re-introducing either leak, or dropping the OpenRouter session
+   header, fails the suite. The shared prefix measures about 2K tokens: above the 1,024-token
+   minimum, below 4,096. App scenarios: `tests/ui/cache.lua` runs the real app against
+   `serpis-mock-provider` (CLAUDE.md edit, `chat-refresh-context`, thinking change, resume).
+   Re-introducing a per-message prompt rebuild or a new id on resume fails it.
+2. **Frozen prefix** (*done*): the system prompt is kept per chat. `chat-refresh-context` rebuilds
+   it with the next message, and `agent-live-context` rebuilds it for every message. The tool list
+   stays live: a kept tool from a hot-reloaded Rust plugin would point into unloaded code, and
+   changing tools is an explicit action (a stated miss cause, warned about in item 6). When the
+   tools change, the prompt is rebuilt with them, since that request misses anyway.
+3. **Marks** (*done*): the system prompt, the last tool, the previous request's end (the last user
+   or tool message before the newest assistant message) and this request's end. The OAuth
+   identity block is no longer marked (the system mark covers it). OpenRouter gets marks for
+   `google/*` too, and is detected by base URL.
+4. **Retention** (*done*): `agent-cache-retention` (`none` / `short` / `long`, overridable per provider),
+   default `long`. 1h writes cost 2× instead of 1.25×, but only on new tokens, while every pause
+   over 5 minutes on a short TTL rewrites the whole context.
+5. **Routing**: a resumed chat reuses the saved session id (*done*: session files are created with
+   the chat's id). `compat.openRouter` marks a gateway in front of OpenRouter. Next: record each
+   OpenRouter response's upstream.
+6. **Cache UI**, each part with its own var:
+   - `chat-cache-indicator`: a hit / partial / miss chip on each response (cache reads ÷ prompt).
+   - `chat-cache-status`: the session hit rate and the cache state ("warm 41m", "cold") in the
+     header; clicking lists recent misses with their causes.
+   - `chat-cache-miss-notice` (`inline` / `message` / `off`): e.g. "cache miss: thinking level
+     changed, rewrote 84K tokens (~$0.32)".
+   - `cache-warn` (`confirm` / `notice` / `off`), `cache-warn-threshold` (default $0.10) and
+     `cache-warn-actions`: a warning before an action that invalidates the cache (model,
+     thinking, tool or web-search toggle, `chat-refresh-context`, sending after the TTL expired),
+     with the estimate (last prompt tokens × write price). "Don't warn again" updates
+     `cache-warn-actions`, and the `before-cache-invalidate` hook can veto or rewrite it.
+
+7. **Provider-reported cache data** (`cache-debug`, off by default): a per-request log of what
+   the provider reported (reads, writes, uncached input, OpenRouter upstream) next to what serpis
+   sent. Optionally the simulator runs alongside real requests and flags any request whose
+   reported read falls short of the predicted one. Either the provider behaves differently from
+   the model (fix the simulator, then serpis) or bytes changed (a bug). Tests never use real
+   endpoints.
+
+Deferred until usage data asks for them:
+
+- **Cache warmer** (pi 1.3's `cache-warmer.js`: refresh at 90% of the TTL when the expected saving
+  is at least $0.05). With 1h retention it only helps tool runs or pauses longer than an hour. It
+  is the next step if the usage data shows expiries.
+- Sharing the stable prefix across chats: worth about $0.02 per new chat for a ~5K-token prefix,
+  because serpis chats are long, unlike the short CI jobs in Cloudflare's post.
+- Staggered parallel writes (needs sub-agents first), tool-usage stats, per-effort cost reports.
+
+Sources: serpis' request path (2026-10-21), pi 1.3.0's `cache-warmer.js`, and Cloudflare's
+"obsessive inference optimization" post.

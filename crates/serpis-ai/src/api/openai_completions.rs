@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use crate::api::Request;
 use crate::stream::*;
 use crate::transform::{short_hash, transform_messages};
 use crate::types::*;
@@ -41,7 +42,7 @@ pub fn detect_compat(model: &Model) -> Compat {
     let is_zai = provider == "zai" || provider == "zai-coding-cn" || base.contains("api.z.ai") || base.contains("open.bigmodel.cn");
     let is_together = provider == "together" || base.contains("api.together.ai") || base.contains("api.together.xyz");
     let is_moonshot = provider == "moonshotai" || provider == "moonshotai-cn" || base.contains("api.moonshot.");
-    let is_openrouter = provider == "openrouter" || base.contains("openrouter.ai");
+    let is_openrouter = model.is_openrouter();
     let is_cf_workers = provider == "cloudflare-workers-ai" || base.contains("api.cloudflare.com");
     let is_cf_gateway = provider == "cloudflare-ai-gateway" || base.contains("gateway.ai.cloudflare.com");
     let is_nvidia = provider == "nvidia" || base.contains("integrate.api.nvidia.com");
@@ -104,7 +105,7 @@ pub fn detect_compat(model: &Model) -> Compat {
         zai_tool_stream: false,
         thinking_token_budget_field: None,
         supports_strict_mode: false,
-        cache_control_format: (provider == "openrouter" && model.id.starts_with("anthropic/")).then(|| "anthropic".into()),
+        cache_control_format: (is_openrouter && (model.id.starts_with("anthropic/") || model.id.starts_with("google/"))).then(|| "anthropic".into()),
         send_session_affinity_headers: is_openrouter,
         session_affinity_format: if is_openrouter { "openrouter" } else { "openai" }.into(),
         supports_long_cache_retention: !(is_together || is_cf_workers || is_cf_gateway || is_nvidia || is_ant_ling),
@@ -361,13 +362,19 @@ fn convert_tools(tools: &[Tool], compat: &Compat) -> Vec<Value> {
         .collect()
 }
 
+/// Send text content as parts. A string would become parts only while it carries the mark, so the
+/// same message would change bytes between requests and miss the cache.
+fn text_as_parts(msg: &mut Value) {
+    if let Some(Value::String(s)) = msg.get_mut("content") {
+        if !s.is_empty() {
+            let text = std::mem::take(s);
+            msg["content"] = json!([{"type": "text", "text": text}]);
+        }
+    }
+}
+
 fn add_cache_control_to_text(msg: &mut Value, cc: &Value) -> bool {
     match msg.get_mut("content") {
-        Some(Value::String(s)) if !s.is_empty() => {
-            let text = std::mem::take(s);
-            msg["content"] = json!([{"type": "text", "text": text, "cache_control": cc}]);
-            true
-        }
         Some(Value::Array(parts)) => {
             for p in parts.iter_mut().rev() {
                 if p["type"] == "text" {
@@ -382,16 +389,21 @@ fn add_cache_control_to_text(msg: &mut Value, cc: &Value) -> bool {
 }
 
 fn apply_anthropic_cache_control(messages: &mut [Value], tools: Option<&mut Vec<Value>>, cc: &Value) {
+    messages.iter_mut().for_each(text_as_parts);
     if let Some(m) = messages.iter_mut().find(|m| m["role"] == "system" || m["role"] == "developer") {
         add_cache_control_to_text(m, cc);
     }
     if let Some(last) = tools.and_then(|t| t.last_mut()) {
         last["cache_control"] = cc.clone();
     }
-    for m in messages.iter_mut().rev() {
-        if matches!(m["role"].as_str(), Some("user" | "assistant" | "tool")) && add_cache_control_to_text(m, cc) {
-            break;
-        }
+    // This request's end and the previous request's end (the last user or tool message before
+    // the newest assistant message), as in the Anthropic adapter.
+    let is_input = |m: &Value| matches!(m["role"].as_str(), Some("user" | "tool"));
+    let last_assistant = messages.iter().rposition(|m| m["role"] == "assistant");
+    let previous = last_assistant.and_then(|a| messages[..a].iter().rposition(is_input));
+    let current = messages.iter().rposition(is_input);
+    for i in [previous, current].into_iter().flatten() {
+        add_cache_control_to_text(&mut messages[i], cc);
     }
 }
 
@@ -634,9 +646,9 @@ fn merge_reasoning_detail(details: &mut Vec<Value>, d: &Value) {
     details.push(d.clone());
 }
 
-pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
-    let compat = get_compat(&model);
-    let params = build_params(&model, &ctx, &opts, &compat);
+pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyhow::Result<Request> {
+    let compat = get_compat(model);
+    let params = build_params(model, ctx, opts, &compat);
     let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
     let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("User-Agent".into(), crate::USER_AGENT.into());
@@ -656,22 +668,12 @@ pub async fn stream_inner(model: Model, ctx: Context, opts: StreamOptions, em: &
     }
     headers.extend(opts.headers.clone());
     let api_key = opts.api_key.clone().unwrap_or_default();
-    let client = http_client();
-    let resp = send_with_retry(
-        || {
-            let mut rb = client.post(&url).json(&params);
-            if !api_key.is_empty() && !headers.keys().any(|k| k.eq_ignore_ascii_case("authorization")) {
-                rb = rb.bearer_auth(&api_key);
-            }
-            for (k, v) in &headers {
-                rb = rb.header(k, v);
-            }
-            rb
-        },
-        opts.max_retries,
-        &opts.cancel,
-    )
-    .await?;
+    let bearer = if api_key.is_empty() { String::new() } else { format!("Bearer {api_key}") };
+    Ok(Request { url, headers, body: params }.with_auth("authorization", bearer))
+}
+
+pub async fn stream_inner(resp: reqwest::Response, model: Model, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+    let compat = get_compat(&model);
     em.emit(StreamEvent::Start);
 
     struct ToolBuf {
