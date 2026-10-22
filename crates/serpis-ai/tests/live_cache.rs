@@ -152,6 +152,7 @@ async fn real_providers_cache_like_the_simulator_says() {
         };
         let mut sim = Simulator::new(Config::default());
         let mut history = vec![user("Reply with OK.")];
+        let mut upstream: Option<String> = None;
         let steps: [(&str, Option<usize>); 4] = [("first", None), ("next turn", None), ("12 parallel reads", Some(12)), ("another turn", None)];
         for (k, (label, reads)) in steps.into_iter().enumerate() {
             if k > 0 {
@@ -199,6 +200,12 @@ async fn real_providers_cache_like_the_simulator_says() {
                     println!("  note: no cache write reported (this provider may not report writes)");
                 }
             }
+            if let (Some(prev), Some(now)) = (&upstream, &a.upstream) {
+                if prev != now {
+                    println!("  warning: OpenRouter moved the conversation from {prev} to {now} (the sticky upstream failed or was unavailable)");
+                }
+            }
+            upstream = a.upstream.clone().or(upstream);
             history.push(Message::Assistant(a));
             // Automatic caches take a moment to become readable.
             tokio::time::sleep(Duration::from_secs(2)).await;

@@ -20,6 +20,11 @@ pub struct Compat {
     pub max_tokens_field: String,
     pub requires_tool_result_name: bool,
     pub requires_assistant_after_tool_result: bool,
+    /// Send an assistant message without text as `content: ""` instead of null. Some OpenRouter
+    /// upstreams' chat templates fail on null next to tool calls (CoreWeave's DeepSeek: "tried to
+    /// use + operator on unsupported types undefined and string"), and OpenRouter then silently
+    /// falls back to another upstream, whose cache is cold.
+    pub empty_assistant_content_as_string: bool,
     pub requires_thinking_as_text: bool,
     pub requires_reasoning_content_on_assistant_messages: bool,
     pub thinking_format: String,
@@ -83,6 +88,9 @@ pub fn detect_compat(model: &Model) -> Compat {
         max_tokens_field: if use_max_tokens { "max_tokens" } else { "max_completion_tokens" }.into(),
         requires_tool_result_name: false,
         requires_assistant_after_tool_result: false,
+        // Not for models OpenRouter translates to Anthropic's or Gemini's APIs: Anthropic rejects
+        // empty text blocks, and null works there.
+        empty_assistant_content_as_string: is_openrouter && !model.id.starts_with("anthropic/") && !model.id.starts_with("google/"),
         requires_thinking_as_text: false,
         requires_reasoning_content_on_assistant_messages: is_deepseek,
         thinking_format: if is_deepseek {
@@ -127,6 +135,7 @@ pub fn get_compat(model: &Model) -> Compat {
     c.max_tokens_field = s("maxTokensField").unwrap_or(c.max_tokens_field);
     c.requires_tool_result_name = b("requiresToolResultName", c.requires_tool_result_name);
     c.requires_assistant_after_tool_result = b("requiresAssistantAfterToolResult", c.requires_assistant_after_tool_result);
+    c.empty_assistant_content_as_string = b("emptyAssistantContentAsString", c.empty_assistant_content_as_string);
     c.requires_thinking_as_text = b("requiresThinkingAsText", c.requires_thinking_as_text);
     c.requires_reasoning_content_on_assistant_messages = b(
         "requiresReasoningContentOnAssistantMessages",
@@ -215,7 +224,7 @@ pub fn convert_messages(model: &Model, ctx: &Context, compat: &Compat) -> Vec<Va
                 out.insert("role".into(), "assistant".into());
                 out.insert(
                     "content".into(),
-                    if compat.requires_assistant_after_tool_result { Value::String(String::new()) } else { Value::Null },
+                    if compat.requires_assistant_after_tool_result || compat.empty_assistant_content_as_string { Value::String(String::new()) } else { Value::Null },
                 );
                 let text: String = a
                     .content

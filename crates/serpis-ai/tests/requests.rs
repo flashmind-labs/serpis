@@ -327,3 +327,21 @@ fn a_gateway_in_front_of_openrouter_is_openrouter_through_compat() {
     assert_eq!(r.header("x-session-id"), Some(SID));
     assert_eq!(marks(&r.body).len(), 4);
 }
+
+#[test]
+fn an_assistant_tool_step_without_text_has_empty_string_content_on_openrouter_except_anthropic_and_gemini() {
+    // CoreWeave's DeepSeek template fails on null content next to tool calls.
+    let content = |m: &Model| {
+        let r = build(m, &ctx(conversation(m)), CacheRetention::Short);
+        let msgs = r.body["messages"].as_array().unwrap().clone();
+        msgs.into_iter().find(|x| x["role"] == "assistant").unwrap()["content"].clone()
+    };
+    assert_eq!(content(&openrouter("deepseek/deepseek-chat-v3.1")), json!(""));
+    assert_eq!(content(&openrouter("openai/gpt-5.1")), json!(""));
+    assert_eq!(content(&openrouter("anthropic/claude-sonnet-4.5")), Value::Null);
+    assert_eq!(content(&openrouter("google/gemini-2.5-pro")), Value::Null);
+    assert_eq!(content(&model("openai-completions", "openai", "https://api.openai.com/v1", "gpt-5.1")), Value::Null);
+    let mut m = openrouter("anthropic/claude-sonnet-4.5");
+    m.compat = Some(serde_json::from_value(json!({"emptyAssistantContentAsString": true})).unwrap());
+    assert_eq!(content(&m), json!(""), "compat overrides the detection");
+}

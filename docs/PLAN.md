@@ -202,8 +202,12 @@ it ships, so there is no runtime hashing of prompts.
    (the 12-parallel-call step), and this time the move cost a full rewrite: upstreams do have
    separate caches, as the simulator assumes. OpenRouter documents sticky routing keyed on our
    session id, with fallback when the sticky upstream errors or is unavailable, and expiry after
-   10 minutes idle. The same request moving twice points at CoreWeave rejecting that request shape
-   (to check: SERPIS_LIVE_ROUTING pinning CoreWeave without fallbacks), not at sticky routing.
+   10 minutes idle. Pinned to CoreWeave without fallbacks, that request failed with "Failed to
+   apply prompt template: ... undefined and string": its DeepSeek template can't take an assistant
+   message with `content: null` next to tool calls. Serpis now sends `""` there for OpenRouter
+   models other than `anthropic/*` and `google/*` (`compat.emptyAssistantContentAsString`), and
+   with that the conversation stays on CoreWeave and reads the cache on every request: OpenRouter's
+   sticky routing works. The live check now warns whenever the upstream changes mid-conversation.
    The 10-minute expiry matters more: after a longer pause a multi-upstream model can land on an
    upstream whose cache is cold while the 1h entry is still alive elsewhere. If that shows up, an
    opt-in, off-by-default preference for the chat's last upstream (`provider.order`, fallbacks
