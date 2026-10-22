@@ -219,7 +219,6 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyh
     let is_openrouter = model.is_openrouter();
     let cb = |k: &str, d: bool| model.compat_bool(k).unwrap_or(d);
     let supports_eager = cb("supportsEagerToolInputStreaming", true);
-    let supports_long = cb("supportsLongCacheRetention", true);
     let send_affinity = cb("sendSessionAffinityHeaders", is_openrouter);
     let cache_on_tools = cb("supportsCacheControlOnTools", true);
     let supports_temperature = cb("supportsTemperature", true);
@@ -228,7 +227,7 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyh
 
     let cache_control = match opts.cache_retention {
         CacheRetention::None => None,
-        CacheRetention::Long if supports_long => Some(json!({"type": "ephemeral", "ttl": "1h"})),
+        CacheRetention::Long if model.supports_long_cache_retention() => Some(json!({"type": "ephemeral", "ttl": "1h"})),
         _ => Some(json!({"type": "ephemeral"})),
     };
 

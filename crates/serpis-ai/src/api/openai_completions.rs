@@ -116,7 +116,7 @@ pub fn detect_compat(model: &Model) -> Compat {
         cache_control_format: (is_openrouter && (model.id.starts_with("anthropic/") || model.id.starts_with("google/"))).then(|| "anthropic".into()),
         send_session_affinity_headers: is_openrouter,
         session_affinity_format: if is_openrouter { "openrouter" } else { "openai" }.into(),
-        supports_long_cache_retention: !(is_together || is_cf_workers || is_cf_gateway || is_nvidia || is_ant_ling),
+        supports_long_cache_retention: model.supports_long_cache_retention(),
         vllm_priority: None,
     }
 }

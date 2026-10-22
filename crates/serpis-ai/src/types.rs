@@ -332,6 +332,28 @@ impl Model {
         self.compat.as_ref().and_then(|c| c.get(key))
     }
 
+    /// Whether the provider takes long cache retention (Anthropic's 1h `ttl`, OpenAI's 24h
+    /// `prompt_cache_retention`): `compat.supportsLongCacheRetention`, else only where it is
+    /// verified or documented (Anthropic, OpenAI, OpenRouter). Strict OpenAI-compatible servers
+    /// may reject fields they don't know, which would fail every request.
+    pub fn supports_long_cache_retention(&self) -> bool {
+        self.compat_bool("supportsLongCacheRetention").unwrap_or_else(|| {
+            self.is_openrouter()
+                || matches!(self.provider.as_str(), "anthropic" | "openai")
+                || self.base_url.contains("api.anthropic.com")
+                || self.base_url.contains("api.openai.com")
+        })
+    }
+
+    /// The retention a request for this model actually gets: long falls back to short where
+    /// the provider doesn't take it.
+    pub fn cache_retention(&self, wanted: crate::CacheRetention) -> crate::CacheRetention {
+        match wanted {
+            crate::CacheRetention::Long if !self.supports_long_cache_retention() => crate::CacheRetention::Short,
+            r => r,
+        }
+    }
+
     /// Whether requests go to OpenRouter: its provider id or base URL, or `compat.openRouter`
     /// for a gateway or proxy in front of it.
     pub fn is_openrouter(&self) -> bool {

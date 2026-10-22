@@ -345,3 +345,36 @@ fn an_assistant_tool_step_without_text_has_empty_string_content_on_openrouter_ex
     m.compat = Some(serde_json::from_value(json!({"emptyAssistantContentAsString": true})).unwrap());
     assert_eq!(content(&m), json!(""), "compat overrides the detection");
 }
+
+#[test]
+fn long_retention_goes_only_where_it_is_verified_or_documented() {
+    let c = ctx(conversation(&openrouter("x/y")));
+    let long = |m: &Model| build(m, &c, CacheRetention::Long);
+    // OpenRouter and OpenAI: the 24h fields.
+    for m in [openrouter("openai/gpt-5.1"), model("openai-completions", "openai", "https://api.openai.com/v1", "gpt-5.1")] {
+        let r = long(&m);
+        assert_eq!(r.body["prompt_cache_retention"], "24h", "{}", m.id);
+        assert_eq!(r.body["prompt_cache_key"], SID);
+    }
+    let r = long(&model("openai-responses", "openai", "https://api.openai.com/v1", "gpt-5.1"));
+    assert_eq!(r.body["prompt_cache_retention"], "24h");
+    // Any other OpenAI-compatible chat completions server: neither field (a strict one would
+    // reject them). Responses servers keep prompt_cache_key, a field of that API, but not 24h.
+    for m in [model("openai-completions", "groq", "https://api.groq.com/openai/v1", "llama-4"), model("openai-completions", "local", "http://127.0.0.1:8080/v1", "qwen")] {
+        let r = long(&m);
+        assert!(r.body.get("prompt_cache_retention").is_none() && r.body.get("prompt_cache_key").is_none(), "{} {}", m.provider, r.body);
+        assert_eq!(m.cache_retention(CacheRetention::Long), CacheRetention::Short);
+    }
+    let r = long(&model("openai-responses", "xai", "https://api.x.ai/v1", "grok-4"));
+    assert!(r.body.get("prompt_cache_retention").is_none());
+    // Anthropic and OpenRouter Claude: 1h marks; an Anthropic-compatible third party: 5m.
+    for m in [model("anthropic-messages", "anthropic", "https://api.anthropic.com", "claude-sonnet-4-5"), openrouter("anthropic/claude-sonnet-4.5")] {
+        assert!(marks(&long(&m).body).iter().all(|c| *c == json!({"type": "ephemeral", "ttl": "1h"})), "{}", m.id);
+    }
+    let third = model("anthropic-messages", "minimax", "https://api.minimax.io/anthropic", "MiniMax-M2");
+    assert!(marks(&long(&third).body).iter().all(|c| *c == json!({"type": "ephemeral"})));
+    // compat opts a provider in.
+    let mut m = model("openai-completions", "groq", "https://api.groq.com/openai/v1", "llama-4");
+    m.compat = Some(serde_json::from_value(json!({"supportsLongCacheRetention": true})).unwrap());
+    assert_eq!(long(&m).body["prompt_cache_retention"], "24h");
+}

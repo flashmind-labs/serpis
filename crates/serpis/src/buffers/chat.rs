@@ -301,7 +301,7 @@ impl ChatBuffer {
         tools.retain(|t| !disabled.iter().any(|d| d == t.name()));
         let system_prompt = self.system_prompt_for(ed, &tools);
         let native = ed.var("agent-native-web-search").and_then(Value::as_bool).unwrap_or(true);
-        let cache_retention = cache_retention(ed, &model.provider);
+        let cache_retention = model.cache_retention(cache_retention(ed, &model.provider));
         self.sent = Some(crate::cache_watch::Sent {
             model: format!("{}/{}", model.provider, model.id),
             thinking: self.thinking.as_str().to_string(),

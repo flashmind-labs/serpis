@@ -176,7 +176,7 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyh
         if let Some(sid) = &opts.session_id {
             p.insert("prompt_cache_key".into(), sid.chars().take(64).collect::<String>().into());
         }
-        if opts.cache_retention == CacheRetention::Long && model.compat_bool("supportsLongCacheRetention") != Some(false) {
+        if opts.cache_retention == CacheRetention::Long && model.supports_long_cache_retention() {
             p.insert("prompt_cache_retention".into(), "24h".into());
         }
     }
