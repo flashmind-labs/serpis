@@ -70,6 +70,8 @@ pub struct Minibuffer {
     pub frecency_empty: bool,
     /// Switch the candidates to another set (TAB forward, S-TAB back): chat-resume's scopes.
     pub cycle: Option<CycleFn>,
+    /// More candidates are on their way (a list fetched from elsewhere): shown as a moving bar.
+    pub loading: bool,
 }
 
 /// Replaces the open prompt's candidates for the next (+1) or previous (-1) set.
@@ -209,6 +211,7 @@ impl Editor {
             boost: Vec::new(),
             frecency_empty: false,
             cycle: None,
+            loading: false,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -244,6 +247,7 @@ impl Editor {
             boost: Vec::new(),
             frecency_empty: false,
             cycle: None,
+            loading: false,
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -303,6 +307,29 @@ impl Editor {
                     f(ed, false);
                 }
             }));
+        }
+    }
+
+    /// Show or hide the open prompt's loading bar (more candidates are coming).
+    pub fn minibuffer_loading(&mut self, loading: bool) {
+        if let Some(mb) = &mut self.minibuffer {
+            mb.loading = loading;
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// Replace the open prompt's candidates (they arrived), keeping the selected one selected.
+    pub fn minibuffer_set_candidates(&mut self, candidates: Vec<Candidate>) {
+        if let Some(mb) = &mut self.minibuffer {
+            let selected = mb.filtered.get(mb.selected).and_then(|(i, _)| mb.candidates.get(*i)).map(|c| c.value.clone());
+            mb.candidates = candidates;
+            mb.boost.clear();
+            mb.last_query = None;
+            mb.refilter();
+            if let Some(v) = selected {
+                mb.selected = mb.filtered.iter().position(|(i, _)| mb.candidates[*i].value == v).unwrap_or(0);
+            }
+            self.ctx.request_repaint();
         }
     }
 

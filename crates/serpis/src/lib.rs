@@ -107,6 +107,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("prefix-passthrough-timeout", json!(0.0), "Seconds before a lone prefix key in a passthrough buffer is sent to the program (0: wait for the next key, like Emacs; C-c C-c sends C-c).");
     ed.defvar("terminal-escape", json!("auto"), "Where ESC goes in a terminal in vim insert state: \"auto\" (the program when it is full-screen, else vim normal state), \"terminal\" or \"serpis\". C-c C-z cycles it per terminal.");
     ed.defvar("leader-key", json!("SPC"), "The key `<leader>` stands for in key bindings (vim normal state uses `<leader> b b`, ...). \"\" turns leader bindings off.");
+    ed.defvar("busy-indicator", json!(true), "Show work in progress (connecting to a machine, scripts' serpis.busy.start) as a card with a spinner above the echo area.");
     ed.defvar("minibuffer-style", json!("palette"), "Where prompts appear: \"palette\" (a floating card near the top, like a command palette) or \"bottom\" (the echo area, Emacs style).");
     ed.defvar("chat-show-thinking", json!(true), "Show the model's thinking in chats; when false only its header (\"Thought · 12 lines\") is shown. chat-toggle-thinking flips it.");
     ed.defvar("chat-show-usage", json!(true), "Show the session's usage in the chat's composer, like pi's footer: ↑input ↓output Rcache-read Wcache-write $cost context%/window.");

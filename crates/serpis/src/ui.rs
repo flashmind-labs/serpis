@@ -58,6 +58,9 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
             }
         }
     }
+    if !ed.busy.is_empty() && ed.var("busy-indicator").and_then(Value::as_bool).unwrap_or(true) {
+        draw_busy(ui, ed, Rect::from_min_max(full.min, egui::pos2(full.right(), echo.top())));
+    }
     crate::mouse::update_drag(ui, ed);
     crate::jump::draw(ui, ed);
     for o in &ed.overlays {
@@ -65,6 +68,40 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
         p.rect_filled(o.rect, 3.0, o.color);
         p.text(o.rect.center(), Align2::CENTER_CENTER, &o.label, FontId::monospace(ed.theme.mono_size - 1.0), Color32::BLACK);
     }
+}
+
+/// Work in progress (`Editor::busy`): a small card per item, centered above the echo area, with a
+/// spinner, its label and, after a few seconds, how long it has taken.
+fn draw_busy(ui: &mut egui::Ui, ed: &mut Editor, above: Rect) {
+    use crate::chrome;
+    let t = &ed.theme;
+    let k = t.ui_scale();
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("serpis-busy"));
+    let painter = ui.ctx().layer_painter(layer);
+    let font = FontId::proportional(t.font_size - 1.0);
+    let time = ui.input(|i| i.time);
+    let mut bottom = above.bottom() - 12.0 * k;
+    let mut cards = Vec::new();
+    for b in ed.busy.iter().rev() {
+        let secs = b.since.elapsed().as_secs();
+        let label = if secs >= 3 { format!("{} · {secs}s", b.label) } else { b.label.clone() };
+        let tw = chrome::text_width(&painter, &label, font.clone());
+        let (h, w) = ((34.0 * k).round(), tw + 52.0 * k);
+        let card = Rect::from_min_size(egui::pos2(above.center().x - w / 2.0, bottom - h), egui::vec2(w, h));
+        let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(if t.dark { 110 } else { 36 }) };
+        painter.add(shadow.as_shape(card, (h / 2.0) as u8));
+        painter.rect_filled(card, h / 2.0, t.bg_elevated);
+        painter.rect_stroke(card, h / 2.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        chrome::spinner(&painter, egui::pos2(card.left() + 20.0 * k, card.center().y), 6.0 * k, time, t.accent);
+        chrome::text(&painter, egui::pos2(card.left() + 36.0 * k, card.center().y), &label, font.clone(), t.fg, tw + 1.0);
+        cards.push(card);
+        bottom = card.top() - 8.0 * k;
+    }
+    // Tests find the newest one.
+    if let Some(c) = cards.first() {
+        ed.debug_rects.insert("busy", *c);
+    }
+    ui.ctx().request_repaint_after(Duration::from_millis(50));
 }
 
 fn draw_layout(ui: &mut egui::Ui, ed: &mut Editor, body: Rect) {
@@ -723,6 +760,13 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
         chrome::text(&painter, egui::pos2(input.right() - 16.0 * k - count_w, cy), &count, small.clone(), t.fg_faint, count_w + 1.0);
     }
 
+    // More candidates on their way: a moving bar under the input.
+    if mb.loading {
+        let bar = Rect::from_min_max(egui::pos2(card.left() + radius as f32, input.bottom() - 2.0 * k), egui::pos2(card.right() - radius as f32, input.bottom()));
+        chrome::loading_bar(&painter, bar, pui.input(|i| i.time), &[t.accent, t.purple, t.cyan, t.green]);
+        pui.ctx().request_repaint();
+    }
+
     // Candidates.
     let mut clicked = None;
     if n > 0 {
@@ -786,6 +830,12 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
 fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
     let theme = ed.theme.clone();
     let Some(mb) = &ed.minibuffer else { return };
+    // More candidates on their way: a moving bar along the top of the echo area.
+    if mb.loading {
+        let bar = Rect::from_min_max(egui::pos2(echo.left(), echo.top()), egui::pos2(echo.right(), echo.top() + 2.0));
+        crate::chrome::loading_bar(ui.painter(), bar, ui.input(|i| i.time), &[theme.accent, theme.purple, theme.cyan, theme.green]);
+        ui.ctx().request_repaint();
+    }
     if mb.filtered.is_empty() {
         return;
     }

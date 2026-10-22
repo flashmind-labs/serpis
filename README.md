@@ -215,8 +215,9 @@ Machines are ssh destinations: `remote-hosts` (`serpis.var.set("remote-hosts", {
 [rayfish](https://github.com/rayfish/rayfish) networks (`remote-rayfish`), named
 `host.network.ray`. With rayfish, `ray ssh on` and `ray ssh allow <network> <this machine> --user
 <account>` on the other machine let serpis in by mesh identity, no keys needed; rayfish logs in
-as the account the client asks for, so name it when it differs from yours here
-(`"aelita@box.net.ray"` in `remote-hosts`, or `User` in `~/.ssh/config`). serpis keeps no
+as the account the client asks for, so when a machine refuses yours serpis asks for the username
+there, and keeps it (`remote-users`) once a login with it works; `"aelita@box.net.ray"` in
+`remote-hosts`, or `User` in `~/.ssh/config`, names it up front. serpis keeps no
 credentials of its own: sshd, or rayfish, decides who gets in.
 
 The composer's machine pill (`chat-select-machine`) moves a new chat to a machine and a folder

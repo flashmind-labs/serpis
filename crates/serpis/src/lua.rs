@@ -954,7 +954,47 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             call(e, &l, &f, &json!(yes));
         }))
     })?)?;
+    // serpis.minibuffer.loading(on?): show (true) or hide (false) the open prompt's loading bar,
+    // or (no argument) whether it shows.
+    mb.set("loading", lua.create_function(|_, on: Option<bool>| {
+        ed(|e| match on {
+            Some(on) => {
+                e.minibuffer_loading(on);
+                on
+            }
+            None => e.minibuffer.as_ref().is_some_and(|m| m.loading),
+        })
+    })?)?;
+    // serpis.minibuffer.set_candidates(list): replace the open prompt's candidates (strings or
+    // {label, value, detail}), e.g. once a list fetched in the background arrives.
+    mb.set("set_candidates", lua.create_function(|_, list: Table| {
+        let mut cands = Vec::new();
+        for v in list.sequence_values::<LuaValue>() {
+            match v? {
+                LuaValue::String(s) => cands.push(crate::minibuffer::Candidate::new(s.to_string_lossy().to_string())),
+                LuaValue::Table(t) => {
+                    let label: String = t.get("label")?;
+                    let value: Option<String> = t.get("value")?;
+                    let detail: Option<String> = t.get("detail")?;
+                    cands.push(crate::minibuffer::Candidate::new(label.clone()).value(value.unwrap_or(label)).detail(detail.unwrap_or_default()));
+                }
+                _ => {}
+            }
+        }
+        ed(|e| e.minibuffer_set_candidates(cands))
+    })?)?;
     s.set("minibuffer", mb)?;
+
+    // serpis.busy.start(key, label) / .stop(key) / .list(): work in progress, shown as a card
+    // with a spinner (busy-indicator) until stopped; starting a key again changes its label.
+    let busy = lua.create_table()?;
+    busy.set("start", lua.create_function(|_, (key, label): (String, String)| ed(|e| e.busy_start(&key, &label)))?)?;
+    busy.set("stop", lua.create_function(|_, key: String| ed(|e| e.busy_stop(&key)))?)?;
+    busy.set("list", lua.create_function(|lua, ()| {
+        let v = ed(|e| json!(e.busy.iter().map(|b| json!({"key": b.key, "label": b.label, "seconds": b.since.elapsed().as_secs_f64()})).collect::<Vec<_>>()))?;
+        lua_of(lua, &v)
+    })?)?;
+    s.set("busy", busy)?;
 
     // Keys.
     let keys = lua.create_table()?;

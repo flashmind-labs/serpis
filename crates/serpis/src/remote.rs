@@ -53,6 +53,12 @@ pub struct Remotes {
     next_answer: u64,
     rayfish: Vec<Machine>,
     rayfish_checked: Option<Instant>,
+    /// `ray status` is running.
+    rayfish_loading: bool,
+    /// The machine picker that is open (its prompt, to recognise it), filled in as peers arrive.
+    picker: Option<(String, bool)>,
+    /// Accounts being tried for machines, kept (remote-users) once a login with one works.
+    trying: HashMap<String, String>,
     /// The node builds serpis installs on machines, as last scanned: (directory, when it
     /// changed, builds).
     builds: Option<(std::path::PathBuf, Option<std::time::SystemTime>, Vec<serpis_node::deploy::NodeBinary>)>,
@@ -103,8 +109,8 @@ fn ssh_host(t: &Target) -> Option<String> {
 }
 
 fn ssh_target(ed: &mut Editor, host: &str, command: Option<String>) -> Target {
-    // `remote-users` names the account for a host given without one.
-    let account = (!host.contains('@')).then(|| ed.var("remote-users").and_then(|u| u.get(host)?.as_str().map(str::to_string))).flatten();
+    // The account being tried, else the one remote-users keeps, for a host given without one.
+    let account = (!host.contains('@')).then(|| ed.remote.trying.get(host).cloned().or_else(|| ed.var("remote-users").and_then(|u| u.get(host)?.as_str().map(str::to_string)))).flatten();
     let login = account.map(|a| format!("{a}@{host}")).unwrap_or_else(|| host.to_string());
     let mut t = Target::ssh(&login);
     let Target::Ssh { ssh, ssh_args, command: run, deploy, .. } = &mut t else { unreachable!() };
@@ -167,17 +173,18 @@ fn refresh_rayfish(ed: &mut Editor) {
         return;
     }
     ed.remote.rayfish_checked = Some(Instant::now());
+    ed.remote.rayfish_loading = true;
     let main = ed.main_sender();
     let ray = ray_command(ed);
     ed.rt.spawn(async move {
         // A daemon that isn't running answers in words, not JSON: no peers, then.
         let out = tokio::process::Command::new(ray).args(["status", "--json"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().await;
-        let Ok(out) = out else { return };
-        let Ok(status) = serde_json::from_slice::<Value>(&out.stdout) else { return };
-        let peers = rayfish_peers(&status);
+        let peers = out.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()).map(|s| rayfish_peers(&s)).unwrap_or_default();
         main.send(move |ed| {
             let targets: Vec<Machine> = peers.into_iter().map(|(host, state)| Machine { target: ssh_target(ed, &host, None), name: host, source: "rayfish", detail: state }).collect();
             ed.remote.rayfish = targets;
+            ed.remote.rayfish_loading = false;
+            refresh_picker(ed);
         });
     });
 }
@@ -197,7 +204,12 @@ pub fn rayfish_peers(status: &Value) -> Vec<(String, String)> {
 }
 
 fn target_of(ed: &mut Editor, name: &str) -> Target {
-    machines(ed).into_iter().find(|m| m.name == name).map(|m| m.target).unwrap_or_else(|| ssh_target(ed, name, None))
+    match machines(ed).into_iter().find(|m| m.name == name) {
+        // Built now, not when the peer was found: the account to try may have changed since.
+        Some(m) if m.source == "rayfish" => ssh_target(ed, name, None),
+        Some(m) => m.target,
+        None => ssh_target(ed, name, None),
+    }
 }
 
 /// Run `f` with a connection to `machine`'s node, connecting first if needed.
@@ -211,12 +223,18 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
         _ => {}
     }
     ed.remote.conns.insert(machine.to_string(), Conn::Connecting(vec![Box::new(f)]));
-    // The first connect to a machine installs its node, which takes a few seconds.
-    ed.message(format!("Connecting to {machine}…"));
+    let key = busy_key(machine);
+    ed.busy_start(&key, &format!("Connecting to {machine}…"));
+    tracing::info!("connecting to {machine}");
     let target = target_of(ed, machine);
     let (main, name) = (ed.main_sender(), machine.to_string());
     ed.rt.spawn(async move {
-        let result = Client::connect(&target, "serpis").await;
+        // The first connect to a machine installs its node there, which takes a few seconds.
+        let installing = {
+            let (main, name, key) = (main.clone(), name.clone(), key.clone());
+            move || main.send(move |ed| ed.busy_start(&key, &format!("Installing serpis-node on {name}…")))
+        };
+        let result = Client::connect_reporting(&target, "serpis", installing).await;
         let (client, events) = match result {
             Ok((c, e)) => (Ok(Arc::new(c)), Some(e)),
             Err(e) => (Err(format!("{e:#}")), None),
@@ -235,18 +253,30 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
     });
 }
 
+fn busy_key(machine: &str) -> String {
+    format!("remote-connect:{machine}")
+}
+
 fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>) {
+    ed.busy_stop(&busy_key(machine));
     let waiting = match ed.remote.conns.remove(machine) {
         Some(Conn::Connecting(w)) => w,
         _ => Vec::new(),
     };
-    // A login refused for a machine named without an account (a rayfish peer, a bare host):
-    // most likely the account here isn't one there. Ask which, and carry on with it.
+    // A refused login, unless the account was named in remote-hosts (user@host): most likely the
+    // account here (or the one tried, or remembered) isn't one there. Ask, and carry on.
     if let Err(e) = &client
         && e.contains("Permission denied")
-        && account_unknown(ed, machine)
+        && !account_named(ed, machine)
     {
+        ed.remote.trying.remove(machine);
         return ask_account(ed, machine, e.clone(), waiting);
+    }
+    // An account that worked is kept for next time; a wrong one never is.
+    if client.is_ok()
+        && let Some(account) = ed.remote.trying.remove(machine)
+    {
+        remember_account(ed, machine, &account);
     }
     match &client {
         Ok(c) => {
@@ -264,22 +294,29 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
     }
 }
 
-/// Whether `machine` is reached over ssh with no account named for it.
-fn account_unknown(ed: &mut Editor, machine: &str) -> bool {
-    matches!(target_of(ed, machine), Target::Ssh { host, .. } if !host.contains('@'))
+/// Whether `remote-hosts` names the account for `machine` itself (`user@host`).
+fn account_named(ed: &Editor, machine: &str) -> bool {
+    let Some(Value::Array(list)) = ed.var("remote-hosts") else { return false };
+    list.iter().any(|h| match h {
+        Value::String(host) => host == machine && host.contains('@'),
+        Value::Object(o) => {
+            let host = o.get("host").and_then(Value::as_str).unwrap_or("");
+            (o.get("name").and_then(Value::as_str) == Some(machine) || host == machine) && host.contains('@')
+        }
+        _ => false,
+    })
 }
 
 /// Ask for the account to log in to `machine` as, remember it (`remote-users`) and connect
 /// again; whoever was waiting for the connection gets that one. Cancelled, they get `error`.
 fn ask_account(ed: &mut Editor, machine: &str, error: String, waiting: Vec<Waiter>) {
     ed.remote.conns.insert(machine.to_string(), Conn::Down { error: error.clone(), failures: 1 });
-    let me = std::env::var("USER").unwrap_or_default();
     let m = machine.to_string();
     let waiting = std::rc::Rc::new(std::cell::RefCell::new(Some(waiting)));
     let on_cancel = waiting.clone();
     let err = error.clone();
     ed.completing_read(
-        &format!("{machine} doesn't let {me} in. Account to log in as there: "),
+        "Username: ",
         Vec::new(),
         false,
         move |ed, _, typed| {
@@ -288,7 +325,8 @@ fn ask_account(ed: &mut Editor, machine: &str, error: String, waiting: Vec<Waite
             if account.is_empty() {
                 return waiting.into_iter().for_each(|w| w(ed, Err(err.clone())));
             }
-            remember_account(ed, &m, &account);
+            // Tried now, and kept only if it gets in.
+            ed.remote.trying.insert(m.clone(), account);
             ed.remote.conns.remove(&m);
             for w in waiting {
                 with_client(ed, &m, w);
@@ -315,7 +353,7 @@ pub fn remember_account(ed: &mut Editor, machine: &str, account: &str) {
     users.insert(machine.to_string(), json!(account));
     ed.set_var("remote-users", Value::Object(users.clone()));
     ed.persist_state("remote-users", Value::Object(users));
-    ed.message(format!("Logging in to {machine} as {account} (remote-users)"));
+    ed.message(format!("Logged in to {machine} as {account} (kept in remote-users)"));
 }
 
 /// The stream to `machine` ended: its chats show it, and it is retried while any is shown.
@@ -488,6 +526,37 @@ fn move_empty_chat(ed: &mut Editor, id: BufferId, machine: &str, dir: &str) {
 
 /// Pick a machine (`local` first), then call `f` with its name ("local" for this one).
 fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(&mut Editor, String) + 'static) {
+    let cands = machine_candidates(ed, with_local);
+    let loading = ed.remote.rayfish_loading;
+    if cands.is_empty() && !loading {
+        ed.message("No machines: add ssh hosts to remote-hosts (or install rayfish), e.g. serpis.var.set(\"remote-hosts\", {\"gpu-box\"})");
+        return;
+    }
+    ed.remote.picker = Some((prompt.to_string(), with_local));
+    ed.completing_read(prompt, cands, false, move |ed, c, typed| {
+        ed.remote.picker = None;
+        let name = c.map(|c| c.value).unwrap_or(typed);
+        if !name.trim().is_empty() {
+            f(ed, name.trim().to_string());
+        }
+    });
+    // rayfish peers are still being asked for: they join the list when they arrive.
+    ed.minibuffer_loading(loading);
+}
+
+/// The open machine picker, again with what is known now (rayfish answered).
+fn refresh_picker(ed: &mut Editor) {
+    let Some((prompt, with_local)) = ed.remote.picker.clone() else { return };
+    if ed.minibuffer.as_ref().is_none_or(|m| m.prompt != prompt) {
+        ed.remote.picker = None;
+        return;
+    }
+    let cands = machine_candidates(ed, with_local);
+    ed.minibuffer_set_candidates(cands);
+    ed.minibuffer_loading(ed.remote.rayfish_loading);
+}
+
+fn machine_candidates(ed: &mut Editor, with_local: bool) -> Vec<Candidate> {
     let mut cands = Vec::new();
     if with_local {
         cands.push(Candidate::new("local").detail("this machine, in serpis"));
@@ -506,16 +575,7 @@ fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(
         };
         cands.push(Candidate::new(m.name.clone()).detail(detail));
     }
-    if cands.is_empty() {
-        ed.message("No machines: add ssh hosts to remote-hosts (or install rayfish), e.g. serpis.var.set(\"remote-hosts\", {\"gpu-box\"})");
-        return;
-    }
-    ed.completing_read(prompt, cands, false, move |ed, c, typed| {
-        let name = c.map(|c| c.value).unwrap_or(typed);
-        if !name.trim().is_empty() {
-            f(ed, name.trim().to_string());
-        }
-    });
+    cands
 }
 
 /// Pick a folder on `machine` (its home's folders, or a typed path), then call `f` with it.

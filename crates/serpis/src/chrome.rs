@@ -156,6 +156,25 @@ pub fn spinner(p: &egui::Painter, c: Pos2, r: f32, time: f64, color: Color32) {
     p.add(egui::Shape::line(pts, Stroke::new(1.6, color)));
 }
 
+/// An indeterminate progress bar along `r`: a band that sweeps across and shifts through
+/// `colors`, for work whose length isn't known.
+pub fn loading_bar(p: &egui::Painter, r: Rect, time: f64, colors: &[Color32]) {
+    let w = r.width();
+    let band = w * 0.35;
+    // Sweeps across in 1.4 s, starting just off the left edge.
+    let phase = (time / 1.4).fract() as f32;
+    let x0 = r.left() - band + phase * (w + band);
+    let seg = Rect::from_min_max(egui::pos2(x0.max(r.left()), r.top()), egui::pos2((x0 + band).min(r.right()), r.bottom()));
+    let n = colors.len().max(1);
+    let t = (time / 2.0) as f32 * n as f32;
+    let (i, f) = (t.floor() as usize % n, t.fract());
+    let c = colors.get(i).copied().unwrap_or(Color32::GRAY).lerp_to_gamma(colors.get((i + 1) % n).copied().unwrap_or(Color32::GRAY), f);
+    p.rect_filled(r, 0.0, tint(c, 0.12));
+    if seg.width() > 0.0 {
+        p.rect_filled(seg, r.height() / 2.0, c);
+    }
+}
+
 pub fn branch(p: &egui::Painter, r: Rect, color: Color32) {
     let s = Stroke::new(1.2, color);
     let a = egui::pos2(r.left() + r.width() * 0.25, r.top() + 1.5);

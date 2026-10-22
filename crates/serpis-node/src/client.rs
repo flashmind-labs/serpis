@@ -93,10 +93,17 @@ impl Client {
     /// Connect and greet the node, installing it first if the machine asks for it. Must be
     /// called on a tokio runtime.
     pub async fn connect(target: &Target, name: &str) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
+        Self::connect_reporting(target, name, || {}).await
+    }
+
+    /// [`Client::connect`], calling `installing` when it starts installing the node there (which
+    /// takes a while: the node is megabytes).
+    pub async fn connect_reporting(target: &Target, name: &str, installing: impl FnOnce()) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
         match Self::connect_once(target, name).await {
             Err(Failed { stderr, error }) => {
                 let Target::Ssh { host, ssh, ssh_args, env, deploy, .. } = target else { return Err(error) };
                 let Some(node) = crate::deploy::wanted(&stderr).and_then(|h| deploy.iter().find(|n| n.sha256 == h)) else { return Err(error) };
+                installing();
                 crate::deploy::upload(ssh, ssh_args, host, &env_prefix(env), node).await?;
                 Self::connect_once(target, name).await.map_err(|f| f.error)
             }

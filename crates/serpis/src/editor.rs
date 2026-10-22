@@ -116,6 +116,14 @@ pub struct Flash {
     pub color: egui::Color32,
 }
 
+/// Something in progress, shown with a spinner until it stops (`Editor::busy_start`).
+#[derive(Debug, Clone)]
+pub struct Busy {
+    pub key: String,
+    pub label: String,
+    pub since: Instant,
+}
+
 /// Work sent to the UI thread from anywhere.
 pub type MainTask = Box<dyn FnOnce(&mut Editor) + Send>;
 
@@ -248,6 +256,8 @@ pub struct Editor {
     pub loaded_extensions: Vec<String>,
     /// Connections to the nodes of other machines (remote chats).
     pub remote: crate::remote::Remotes,
+    /// Work in progress the window shows (busy-indicator): connecting to a machine, ...
+    pub busy: Vec<Busy>,
 }
 
 impl Editor {
@@ -327,6 +337,7 @@ impl Editor {
             deferred: Vec::new(),
             loaded_extensions: Vec::new(),
             remote: Default::default(),
+            busy: Vec::new(),
         }
     }
 
@@ -839,6 +850,20 @@ impl Editor {
     /// The directory a buffer works in (file directory, chat cwd, terminal pwd).
     pub fn buffer_directory(&self, id: BufferId) -> Option<std::path::PathBuf> {
         self.buffers.get(id)?.buf.as_ref()?.directory()
+    }
+
+    /// Show `label` with a spinner until `busy_stop(key)`; a running `key` gets the new label.
+    pub fn busy_start(&mut self, key: &str, label: &str) {
+        match self.busy.iter_mut().find(|b| b.key == key) {
+            Some(b) => b.label = label.to_string(),
+            None => self.busy.push(Busy { key: key.to_string(), label: label.to_string(), since: Instant::now() }),
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub fn busy_stop(&mut self, key: &str) {
+        self.busy.retain(|b| b.key != key);
+        self.ctx.request_repaint();
     }
 
     /// The machine a buffer's work runs on, when it isn't this one.
