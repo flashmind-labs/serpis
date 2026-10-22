@@ -240,6 +240,22 @@ every file runs again in a fresh Lua state. So:
 - Errors raised in hooks and commands are shown to the user; prefer serpis.message for
   feedback, serpis.error for failures.
 
+## Keep the prompt cache warm
+Providers reuse what a chat already sent only while those bytes stay exactly the same. An
+extension that changes anything already sent makes the next request rewrite the whole
+conversation, about ten times the price of reading it from the cache, on every turn.
+- Hooks may block or add, never rewrite what was already sent. Add with serpis.chat.prompt,
+  block with before-prompt; don't edit earlier messages, the system prompt or tool definitions
+  from one request to the next.
+- Agent tools: keep the name, description and parameters fixed. No dates, counts or state in a
+  description; changing data goes in the tool's result. Registering, removing or reordering
+  tools in the middle of a chat throws its cache away.
+- No dates, times or ids in agent-append-system-prompt or agent-guidelines.
+- Session entries (serpis.chat.append) are never sent to the model: use them freely.
+- Check your extension: serpis.chat.cache(CHAT) shows the hit rate and recent misses with their
+  causes, and the cache-miss hook fires on each one. A miss with cause "unexplained" after your
+  change means it altered something already sent.
+
 ## Example: a command that shows what this chat has spent
 serpis.command.define("chat-cost", function()
   local u = serpis.chat.usage()

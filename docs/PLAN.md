@@ -116,6 +116,10 @@ A cache read needs four things, and each has one cheap fix:
 | Not expired | 1h retention by default (item 4) |
 | Same place: same upstream / routing key | Keep the session id; record the OpenRouter upstream (item 5) |
 
+The invariant behind all of it, for serpis and its extensions alike: block or add, never rewrite
+what a chat already sent (earlier messages, the system prompt, tool definitions). The extension
+guide (`serpis_api` "guide") and the README say so, with how to check it.
+
 With the prefix immutable by construction, a miss has only three possible causes, and serpis knows
 each: a setting changed (model, thinking, tools), the entry expired, or OpenRouter moved the chat
 to another upstream. Any other miss is a bug, and the test suite (item 1) exists to catch it before

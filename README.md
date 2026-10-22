@@ -222,7 +222,10 @@ From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configu
   extension in `~/.config/serpis/extensions/` (`name.lua` or `name/init.lua`), loaded after it. Saving
   any of them reloads them all. Commands, keymaps, hooks, settings, buffers, windows, chats (model,
   usage, abort, session entries) and agent tools; the reference is `crates/serpis/src/extend.rs`. See
-  `examples/extensions/` for ports of pi's max-money and model-presets extensions.
+  `examples/extensions/` for ports of pi's max-money and model-presets extensions. One rule keeps
+  prompt caching working: hooks and tools may block or add, never rewrite what a chat already sent
+  (earlier messages, the system prompt, tool definitions), or every turn rewrites the cache.
+  `serpis.chat.cache` and the `cache-miss` hook show what an extension does to it.
 - **From a chat**: agents can extend serpis while it runs, like pi's agents write pi extensions.
   `serpis_api` gives them the guide and the reference (plus the commands, settings and hooks defined
   right now); `serpis_lua` runs Lua in the editor to load, test and inspect what they wrote. Hide
