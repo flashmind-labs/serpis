@@ -236,7 +236,13 @@ it ships, so there is no runtime hashing of prompts.
    is the messages before the cut plus the instruction: a prefix of what was sent, read by caches
    that keep earlier entries. The live check showed why both: Claude (Vertex) and GPT-5 mini
    (Azure) read the prefix request, but DeepInfra's DeepSeek keeps only a conversation's latest
-   whole prompt and read 1 token of it (now the simulator's `latest_prompt_only`, with a test). The next
+   whole prompt and read 1 token of it (now the simulator's `latest_prompt_only`, with a test).
+   A later run on DeepSeek via CoreWeave missed twice mid-conversation, then read an earlier
+   prefix in full: CoreWeave keeps earlier prefixes but serves them unreliably (likely several
+   machines behind one endpoint), and run to run differs, so it is noise, not a rule. In chats,
+   a miss with no known cause on such automatic caches is now reported as the provider's best
+   effort ("provider"), and "unexplained" is kept for explicit caches, where a miss with nothing
+   changed would point at serpis. The next
    request misses once, named "compacted". Hooks: `before-compact` (cancel, or supply a summary),
    `chat-compacted`. Tests: `serpis_agent::compaction` units, an agent scenario on every venue,
    `tests/ui/compact.lua` (manual, automatic, overflow and retry, resume after compaction), and a

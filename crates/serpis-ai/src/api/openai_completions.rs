@@ -113,7 +113,7 @@ pub fn detect_compat(model: &Model) -> Compat {
         zai_tool_stream: false,
         thinking_token_budget_field: None,
         supports_strict_mode: false,
-        cache_control_format: (is_openrouter && (model.id.starts_with("anthropic/") || model.id.starts_with("google/"))).then(|| "anthropic".into()),
+        cache_control_format: model.explicit_prompt_cache().then(|| "anthropic".into()),
         send_session_affinity_headers: is_openrouter,
         session_affinity_format: if is_openrouter { "openrouter" } else { "openai" }.into(),
         supports_long_cache_retention: model.supports_long_cache_retention(),

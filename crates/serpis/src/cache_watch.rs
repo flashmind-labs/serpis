@@ -34,6 +34,8 @@ pub enum Cause {
     Prompt,
     Expired { idle: Duration, ttl: Duration },
     Upstream { from: String, to: String },
+    /// An automatic, best-effort cache didn't reuse a prefix it could have.
+    Provider,
     Unexplained,
 }
 
@@ -48,6 +50,7 @@ impl Cause {
             Cause::Prompt => "prompt",
             Cause::Expired { .. } => "expired",
             Cause::Upstream { .. } => "upstream",
+            Cause::Provider => "provider",
             Cause::Unexplained => "unexplained",
         }
     }
@@ -61,6 +64,7 @@ impl Cause {
             Cause::Prompt => "the system prompt was refreshed".into(),
             Cause::Expired { idle, ttl } => format!("idle {} with a {} cache", fmt_duration(*idle), fmt_duration(*ttl)),
             Cause::Upstream { from, to } => format!("OpenRouter moved the chat from {from} to {to}"),
+            Cause::Provider => "the provider didn't reuse its cache this time (its caching is best-effort)".into(),
             Cause::Unexplained => "unexplained (bytes already sent may have changed: please report it)".into(),
         }
     }
@@ -196,6 +200,9 @@ impl CacheWatch {
             } else {
                 match (&last.upstream, &upstream) {
                     (Some(from), Some(to)) if from != to => Cause::Upstream { from: from.clone(), to: to.clone() },
+                    // Only an explicit cache serves an unchanged prefix reliably enough to blame
+                    // serpis; serpis' own requests are held to that by the cache test suite.
+                    _ if !model.explicit_prompt_cache() => Cause::Provider,
                     _ => Cause::Unexplained,
                 }
             };
@@ -416,11 +423,19 @@ mod tests {
         t.send(sent(), usage(0, 0, 2000), None);
         assert_eq!(t.send(sent(), usage(0, 0, 0), None), (Hit::New, None), "no usage: the cache is as it was");
         assert_eq!(t.send(sent(), usage(0, 2000, 50), None).1, None);
-        // OpenAI-style: no writes reported; the second request reads the first one's prompt.
+        // OpenAI-style: no writes reported; the second request reads the first one's prompt. An
+        // explicit cache that misses with no other cause is unexplained; an automatic one is the
+        // provider's best effort.
         let mut t = T::new();
         t.send(sent(), usage(1500, 0, 0), None);
         assert_eq!(t.send(sent(), usage(100, 1500, 0), None).1, None);
         assert_eq!(t.send(sent(), usage(1700, 0, 0), None).1.unwrap().cause, Cause::Unexplained);
+        let auto: Model = serde_json::from_value(serde_json::json!({"id": "deepseek/deepseek-chat", "api": "openai-completions", "provider": "openrouter"})).unwrap();
+        let mut w = CacheWatch::default();
+        let now = Instant::now();
+        w.observe(sent(), &auto, &usage(1500, 0, 0), None, now, now);
+        w.observe(sent(), &auto, &usage(100, 1500, 0), None, now, now);
+        assert_eq!(w.observe(sent(), &auto, &usage(1700, 0, 0), None, now, now).1.unwrap().cause, Cause::Provider);
     }
 
     #[test]

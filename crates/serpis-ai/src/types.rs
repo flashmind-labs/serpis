@@ -354,6 +354,15 @@ impl Model {
         }
     }
 
+    /// Whether the provider caches prompts only where a request marks them (`cache_control`:
+    /// Anthropic's API, and Anthropic and Gemini models through OpenRouter) and so serves an
+    /// unchanged prefix reliably; otherwise caching is automatic and best effort.
+    pub fn explicit_prompt_cache(&self) -> bool {
+        self.api == "anthropic-messages"
+            || self.compat_str("cacheControlFormat") == Some("anthropic")
+            || (self.api == "openai-completions" && self.is_openrouter() && (self.id.starts_with("anthropic/") || self.id.starts_with("google/")))
+    }
+
     /// Whether requests go to OpenRouter: its provider id or base URL, or `compat.openRouter`
     /// for a gateway or proxy in front of it.
     pub fn is_openrouter(&self) -> bool {
