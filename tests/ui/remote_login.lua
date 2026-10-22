@@ -3,7 +3,7 @@
 -- rayfish answers, a card says serpis is connecting, a refused login asks for the username, a
 -- wrong one is asked again and never kept, and the right one is kept once it gets in.
 -- Stand-ins: a `ray` that answers after a while, and an `ssh` that takes a second and only lets
--- "aelita" in, running the node here in a throwaway home.
+-- "alice" in, running the node here in a throwaway home.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 local d = serpis.debug
 local root = os.getenv("SERPIS_TEST_DIR") .. "/../.."
@@ -30,7 +30,7 @@ script(box .. "/ssh", [[#!/bin/sh
 host=; while [ $# -gt 0 ] && [ "$1" != "--" ]; do host="$1"; shift; done; shift
 echo "$host" >> "]] .. box .. [[/logins"
 sleep 1
-case "$host" in aelita@*) exec sh -c "$*" ;; *) echo "$host: Permission denied ()." >&2; exit 255 ;; esac
+case "$host" in alice@*) exec sh -c "$*" ;; *) echo "$host: Permission denied ()." >&2; exit 255 ;; esac
 ]])
 serpis.var.set("remote-hosts", {})
 serpis.var.set("remote-rayfish", true)
@@ -106,7 +106,7 @@ steps({
   function()
     T.check("a wrong name is asked again", prompt(), "Username: ")
     T.check("and is not kept", users(), nil)
-    T.press("a e l i t a RET")
+    T.press("a l i c e RET")
   end,
   function(go)
     when(function() return prompt():find("Folder on box.net.ray", 1, true) ~= nil end, go)
@@ -114,14 +114,14 @@ steps({
   end,
   function(go)
     T.check("the right one gets in, and the chat moves on", prompt():find("Folder on box.net.ray", 1, true) ~= nil, true)
-    T.check("and is kept", users(), "aelita")
+    T.check("and is kept", users(), "alice")
     T.press("~ / p r o j RET")
     when(function() return serpis.chat.info(chat).cwd == home .. "/proj" end, go)
     return false
   end,
   function()
     T.check("the chat moved there", serpis.chat.info(chat).cwd, home .. "/proj")
-    T.check("tried as this account, bob, then aelita", sh("cat '" .. box .. "/logins'"), "box.net.ray\nbob@box.net.ray\naelita@box.net.ray\n")
+    T.check("tried as this account, bob, then alice", sh("cat '" .. box .. "/logins'"), "box.net.ray\nbob@box.net.ray\nalice@box.net.ray\n")
     serpis.command.run("remote-stop-node", "box.net.ray")
   end,
   function()

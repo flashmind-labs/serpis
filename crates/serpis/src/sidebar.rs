@@ -231,6 +231,10 @@ impl Editor {
 
     /// The repository around `dir` (cached for a few seconds).
     pub fn repo_of(&mut self, dir: &Path) -> Option<git::Repo> {
+        // A folder on another machine (`host:/path`): nothing to ask git here.
+        if remote_root(dir).is_some() {
+            return None;
+        }
         if let Some((t, r)) = self.sidebar.repos.get(dir) {
             if t.elapsed() < Duration::from_secs(3) {
                 return r.clone();
@@ -567,7 +571,7 @@ pub fn search(ed: &mut Editor, query: &str) -> Vec<Item> {
 /// `sidebar-git-refresh` seconds each.
 pub fn refresh_git(ed: &mut Editor, roots: &[PathBuf], force: bool) {
     let every = Duration::from_secs_f64(ed.var("sidebar-git-refresh").and_then(Value::as_f64).unwrap_or(5.0).max(0.5));
-    for root in roots {
+    for root in roots.iter().filter(|r| remote_root(r).is_none()) {
         if ed.sidebar.refreshing.contains(root) || (!force && ed.sidebar.git_at.get(root).is_some_and(|t| t.elapsed() < every)) {
             continue;
         }

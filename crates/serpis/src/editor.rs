@@ -239,6 +239,10 @@ pub struct Editor {
     pub sessions: crate::session_ui::Sessions,
     /// How long recent frames took (input, logic and drawing), in milliseconds, newest last.
     pub frame_times: std::collections::VecDeque<f32>,
+    /// Where this frame's time went so far (`Editor::timed`): logged when it is slow.
+    pub frame_parts: Vec<(String, f32)>,
+    /// The breakdowns of recent slow frames (perf-slow-frame-ms), newest last.
+    pub slow_frames: std::collections::VecDeque<(f32, Vec<(String, f32)>)>,
     /// Frames drawn so far (`serpis.debug.frames`: tests wait for input to be drawn).
     pub frames_drawn: u64,
     /// Where named controls were drawn last frame (`serpis.debug.rect`, for tests).
@@ -338,6 +342,8 @@ impl Editor {
             loaded_extensions: Vec::new(),
             remote: Default::default(),
             busy: Vec::new(),
+            frame_parts: Vec::new(),
+            slow_frames: Default::default(),
         }
     }
 
@@ -852,6 +858,19 @@ impl Editor {
         self.buffers.get(id)?.buf.as_ref()?.directory()
     }
 
+    /// Run `f`, noting how long it took as part `name` of this frame (slow frames say where their
+    /// time went). Parts under half a millisecond aren't noted.
+    pub fn timed<R>(&mut self, name: impl FnOnce(&Editor) -> String, f: impl FnOnce(&mut Editor) -> R) -> R {
+        let t = Instant::now();
+        let r = f(self);
+        let ms = t.elapsed().as_secs_f32() * 1000.0;
+        if ms >= 0.5 {
+            let n = name(self);
+            self.frame_parts.push((n, ms));
+        }
+        r
+    }
+
     /// Show `label` with a spinner until `busy_stop(key)`; a running `key` gets the new label.
     pub fn busy_start(&mut self, key: &str, label: &str) {
         match self.busy.iter_mut().find(|b| b.key == key) {
@@ -1196,15 +1215,19 @@ impl Editor {
 
     /// Per-frame work outside painting: queued tasks and buffer polling.
     pub fn tick(&mut self) {
-        while let Ok(task) = self.main_rx.try_recv() {
-            task(self);
-        }
-        for f in std::mem::take(&mut self.deferred) {
-            f(self);
-        }
+        self.timed(|_| "queued work".into(), |ed| {
+            while let Ok(task) = ed.main_rx.try_recv() {
+                task(ed);
+            }
+        });
+        self.timed(|_| "deferred work".into(), |ed| {
+            for f in std::mem::take(&mut ed.deferred) {
+                f(ed);
+            }
+        });
         let ids: Vec<BufferId> = self.buffers.keys().collect();
         for id in ids {
-            self.with_buffer(id, |b, ed| b.poll(ed));
+            self.timed(|ed| format!("poll {}", ed.buffer_display_name(id)), |ed| ed.with_buffer(id, |b, ed| b.poll(ed)));
         }
         // A lone prefix in a passthrough buffer (C-c in a terminal) reaches the program after
         // `prefix-passthrough-timeout` seconds.
@@ -1218,8 +1241,8 @@ impl Editor {
                 }
             }
         }
-        crate::sidebar::track(self);
-        crate::lua::poll_reload(self);
+        self.timed(|_| "sidebar tracking".into(), crate::sidebar::track);
+        self.timed(|_| "config reload check".into(), crate::lua::poll_reload);
         crate::minibuffer::notify_selection(self);
         // Report layout changes once per frame with the previous layout (winner-style undo).
         // Prompts preview layouts, so changes are only recorded outside the minibuffer.

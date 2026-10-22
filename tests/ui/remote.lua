@@ -19,7 +19,7 @@ local function write(path, text)
 end
 
 -- The other machine. By default a node on this one in a throwaway home of its own; with
--- SERPIS_TEST_REMOTE_HOST (e.g. aelita@slimbook.net.ray) a real machine over ssh, where the node
+-- SERPIS_TEST_REMOTE_HOST (e.g. alice@box.net.ray) a real machine over ssh, where the node
 -- runs in a throwaway /tmp directory and the mock provider runs next to it
 -- (SERPIS_TEST_REMOTE_MOCK: its path there). serpis installs its node there from
 -- SERPIS_TEST_NODE_BUILDS (a node store, as scripts/build-node.sh --store fills).

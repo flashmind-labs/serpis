@@ -31,6 +31,7 @@ fn command_chord(c: char) -> KeyChord {
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.frame_start = Some(std::time::Instant::now());
+        self.ed.frame_parts.clear();
         // Context menus are egui popups: let them see ESC so it closes them.
         let popup_open = egui::Popup::is_any_open(ctx);
         let ed = &mut self.ed;
@@ -121,8 +122,19 @@ impl eframe::App for App {
         self.ed.frames_drawn += 1;
         if let Some(t) = self.frame_start.take() {
             let ms = t.elapsed().as_secs_f32() * 1000.0;
-            if ms > 100.0 {
-                tracing::warn!(target: "serpis::perf", "slow frame: {ms:.0} ms");
+            let mut parts = std::mem::take(&mut self.ed.frame_parts);
+            let limit = self.ed.var("perf-slow-frame-ms").and_then(serde_json::Value::as_f64).unwrap_or(100.0) as f32;
+            if ms > limit {
+                // Where the time went, biggest first.
+                parts.sort_by(|a, b| b.1.total_cmp(&a.1));
+                parts.truncate(6);
+                let said: Vec<String> = parts.iter().map(|(n, t)| format!("{n}: {t:.0} ms")).collect();
+                tracing::warn!(target: "serpis::perf", "slow frame: {ms:.0} ms ({})", if said.is_empty() { "nothing measured stood out: input or painting".into() } else { said.join(", ") });
+                let slow = &mut self.ed.slow_frames;
+                slow.push_back((ms, parts));
+                if slow.len() > 50 {
+                    slow.pop_front();
+                }
             }
             let times = &mut self.ed.frame_times;
             times.push_back(ms);

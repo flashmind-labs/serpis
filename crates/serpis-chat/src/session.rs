@@ -431,7 +431,7 @@ mod tests {
     fn iso_dates() {
         let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_791_806_553_258);
         assert_eq!(iso(t), "2026-10-12T12:02:33.258Z");
-        assert_eq!(dir_for(Path::new("/Users/ivan/projects/pi-web")), "--Users-ivan-projects-pi-web--");
+        assert_eq!(dir_for(Path::new("/Users/me/projects/pi-web")), "--Users-me-projects-pi-web--");
     }
 
     #[test]

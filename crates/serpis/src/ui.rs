@@ -34,7 +34,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
         // Flush with the window edge, on the app background like a native sidebar.
         let side = Rect::from_min_max(full.min, egui::pos2(full.left() + w, full.bottom() - echo_h));
         body.min.x = side.right() + GAP / 2.0;
-        crate::sidebar::draw(ui, ed, side);
+        ed.timed(|_| "sidebar".into(), |ed| crate::sidebar::draw(ui, ed, side));
         crate::sidebar::draw_handle(ui, ed, Rect::from_min_max(egui::pos2(side.right(), side.top()), egui::pos2(body.left(), side.bottom())));
     } else {
         ed.sidebar.focused = false;
@@ -585,7 +585,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));
     child.set_clip_rect(body);
-    ed.with_buffer(id, |b, ed| b.ui(&mut child, body, focused, ed));
+    ed.timed(|ed| format!("draw {}", ed.buffer_display_name(id)), |ed| ed.with_buffer(id, |b, ed| b.ui(&mut child, body, focused, ed)));
     // The body is clipped square, so content backgrounds (a terminal's, a chat's) fill the
     // window's bottom corners: round them off again with what is behind the windows, and draw
     // the outline over the content.

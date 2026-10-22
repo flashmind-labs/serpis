@@ -69,7 +69,7 @@ pub fn machines(ed: &mut Editor) -> Vec<Machine> {
     let mut out = configured(ed);
     if ed.var("remote-rayfish").and_then(Value::as_bool).unwrap_or(true) {
         refresh_rayfish(ed);
-        // A configured machine replaces the peer it reaches (`aelita@box.net.ray` says which
+        // A configured machine replaces the peer it reaches (`alice@box.net.ray` says which
         // account to log in as, which rayfish can't know).
         let reached: Vec<String> = out.iter().filter_map(|o| ssh_host(&o.target)).collect();
         for m in &ed.remote.rayfish {
@@ -621,7 +621,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh, instead of the node serpis installs there (\"\": serpis's own, else serpis-node from PATH, ~/.local/bin or ~/.cargo/bin).");
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
     ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<target triple>/serpis-node (scripts/build-node.sh --store, and the install script, put them there).");
-    ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"aelita\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
+    ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"alice\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
     ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 

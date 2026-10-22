@@ -1440,6 +1440,11 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // Recent slow frames (perf-slow-frame-ms): {ms, parts = {{name, ms}, ...}}, newest last.
+    debug.set("slow_frames", lua.create_function(|lua, ()| {
+        let v = ed(|e| json!(e.slow_frames.iter().map(|(ms, parts)| json!({"ms": ms, "parts": parts.iter().map(|(n, t)| json!([n, t])).collect::<Vec<_>>()})).collect::<Vec<_>>()))?;
+        lua_of(lua, &v)
+    })?)?;
     // Frames drawn so far: injected input takes effect in the next frame, so a test waits for
     // this to grow instead of guessing a delay.
     debug.set("frames", lua.create_function(|_, ()| ed(|e| e.frames_drawn))?)?;
