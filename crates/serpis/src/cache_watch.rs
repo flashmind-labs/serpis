@@ -21,10 +21,13 @@ pub struct Sent {
     /// A hash of the system prompt.
     pub prompt: u64,
     pub retention: CacheRetention,
+    /// Compactions so far: the first request after one sends a new conversation.
+    pub compactions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cause {
+    Compacted,
     Model,
     Thinking,
     Tools,
@@ -38,6 +41,7 @@ impl Cause {
     /// One word, for hooks and scripts.
     pub fn word(&self) -> &'static str {
         match self {
+            Cause::Compacted => "compacted",
             Cause::Model => "model",
             Cause::Thinking => "thinking",
             Cause::Tools => "tools",
@@ -50,6 +54,7 @@ impl Cause {
 
     pub fn describe(&self) -> String {
         match self {
+            Cause::Compacted => "the conversation was compacted".into(),
             Cause::Model => "the model changed".into(),
             Cause::Thinking => "the thinking level changed".into(),
             Cause::Tools => "the tools changed".into(),
@@ -176,7 +181,9 @@ impl CacheWatch {
         let miss = (expected > 0 && short > MISS_SLACK.max(expected / 50)).then(|| {
             let last = self.last.as_ref().unwrap();
             let idle = started.saturating_duration_since(last.ended);
-            let cause = if last.sent.model != sent.model {
+            let cause = if last.sent.compactions != sent.compactions {
+                Cause::Compacted
+            } else if last.sent.model != sent.model {
                 Cause::Model
             } else if last.sent.thinking != sent.thinking {
                 Cause::Thinking
@@ -308,7 +315,7 @@ mod tests {
     }
 
     fn sent() -> Sent {
-        Sent { model: "p/m".into(), thinking: "off".into(), tools: vec!["read".into()], prompt: 1, retention: CacheRetention::Long }
+        Sent { model: "p/m".into(), thinking: "off".into(), tools: vec!["read".into()], prompt: 1, retention: CacheRetention::Long, compactions: 0 }
     }
 
     fn usage(input: u64, read: u64, write: u64) -> Usage {
@@ -349,6 +356,7 @@ mod tests {
             (Box::new(|s| s.thinking = "high".into()), "thinking"),
             (Box::new(|s| s.tools.push("bash".into())), "tools"),
             (Box::new(|s| s.prompt = 2), "prompt"),
+            (Box::new(|s| s.compactions = 1), "compacted"),
         ];
         for (change, word) in cases {
             let mut t = T::new();

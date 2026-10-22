@@ -124,13 +124,7 @@ async fn run_loop(
     h: &AgentHandle,
     emit: &EmitFn,
 ) -> anyhow::Result<()> {
-    let native = cfg.native_web_search && supports_native_web_search(&cfg.model);
-    let tools: Vec<ToolRef> = cfg
-        .tools
-        .iter()
-        .filter(|t| !(native && t.name() == "web_search"))
-        .cloned()
-        .collect();
+    let (native, tools) = offered_tools(cfg);
     let mut pending = prompts;
     pending.extend(std::mem::take(&mut *h.steering.lock().unwrap()));
     let mut first = true;
@@ -146,22 +140,7 @@ async fn run_loop(
                 emit(AgentEvent::MessageEnd(m.clone()));
                 messages.push(m);
             }
-            let ctx = Context {
-                system_prompt: cfg.system_prompt.clone(),
-                messages: messages.clone(),
-                tools: tools.iter().map(|t| t.declaration()).collect(),
-            };
-            let opts = StreamOptions {
-                api_key: cfg.api_key.clone(),
-                headers: cfg.headers.clone(),
-                reasoning: Some(cfg.reasoning),
-                max_tokens: cfg.max_tokens,
-                session_id: Some(cfg.session_id.clone()),
-                cache_retention: cfg.cache_retention,
-                cancel: h.cancel.child_token(),
-                native_web_search: native,
-                ..Default::default()
-            };
+            let (ctx, opts) = request(cfg, native, &tools, messages.clone(), h.cancel.child_token());
             emit(AgentEvent::MessageStart(Message::Assistant(AssistantMessage::empty(&cfg.model))));
             let mut rx = serpis_ai::stream(&cfg.model, &ctx, opts);
             let mut final_msg = None;
@@ -213,6 +192,53 @@ async fn run_loop(
         }
         pending = follow;
     }
+}
+
+/// Whether the provider searches the web itself, and the tools offered to the model.
+fn offered_tools(cfg: &AgentConfig) -> (bool, Vec<ToolRef>) {
+    let native = cfg.native_web_search && supports_native_web_search(&cfg.model);
+    let tools = cfg.tools.iter().filter(|t| !(native && t.name() == "web_search")).cloned().collect();
+    (native, tools)
+}
+
+/// A request exactly as the agent loop sends it. Anything else sent for the same chat
+/// (`complete`) goes through here, so it shares the chat's prompt cache.
+fn request(cfg: &AgentConfig, native: bool, tools: &[ToolRef], messages: Vec<Message>, cancel: CancellationToken) -> (Context, StreamOptions) {
+    let ctx = Context {
+        system_prompt: cfg.system_prompt.clone(),
+        messages,
+        tools: tools.iter().map(|t| t.declaration()).collect(),
+    };
+    let opts = StreamOptions {
+        api_key: cfg.api_key.clone(),
+        headers: cfg.headers.clone(),
+        reasoning: Some(cfg.reasoning),
+        max_tokens: cfg.max_tokens,
+        session_id: Some(cfg.session_id.clone()),
+        cache_retention: cfg.cache_retention,
+        cancel,
+        native_web_search: native,
+        ..Default::default()
+    };
+    (ctx, opts)
+}
+
+/// One model response to `messages`, sent as the agent loop would send it (same system prompt,
+/// tools and options) but without running tools: a side request that still reads the chat's
+/// prompt cache, such as a compaction summary.
+pub async fn complete(cfg: &AgentConfig, messages: Vec<Message>, cancel: CancellationToken) -> AssistantMessage {
+    let (native, tools) = offered_tools(cfg);
+    let (ctx, opts) = request(cfg, native, &tools, messages, cancel);
+    let mut rx = serpis_ai::stream(&cfg.model, &ctx, opts);
+    while let Some(ev) = rx.recv().await {
+        if let StreamEvent::Done(m) | StreamEvent::Error(m) = ev {
+            return m;
+        }
+    }
+    let mut m = AssistantMessage::empty(&cfg.model);
+    m.stop_reason = StopReason::Error;
+    m.error_message = Some("stream closed unexpectedly".into());
+    m
 }
 
 fn error_result(call: &ToolCall, text: String) -> ToolResultMessage {

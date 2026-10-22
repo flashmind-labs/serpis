@@ -4,7 +4,9 @@
 //!
 //! Each model gets a short conversation sent exactly as a chat sends it (serpis' adapters, a
 //! session id, 1-hour retention): a first request that writes the cache, a follow-up turn, a step
-//! with 12 parallel tool calls (past Anthropic's 20-block lookback), and another turn. Every
+//! with 12 parallel tool calls (past Anthropic's 20-block lookback), another turn, and a side
+//! request off the shared prefix (what a compaction summary request is): the conversation up to
+//! the tool step plus a new instruction. Every
 //! request also goes through serpis-testkit's simulator; where the simulator expects a cache read
 //! and the provider reports none, the simulator or serpis is wrong about that provider. For
 //! explicit caches (Anthropic, Gemini) that fails the test; for best-effort automatic caches it is
@@ -153,15 +155,26 @@ async fn real_providers_cache_like_the_simulator_says() {
         let mut sim = Simulator::new(Config::default());
         let mut history = vec![user("Reply with OK.")];
         let mut upstream: Option<String> = None;
-        let steps: [(&str, Option<usize>); 4] = [("first", None), ("next turn", None), ("12 parallel reads", Some(12)), ("another turn", None)];
+        let steps: [(&str, Option<usize>); 5] = [("first", None), ("next turn", None), ("12 parallel reads", Some(12)), ("another turn", None), ("side request", None)];
+        let mut before_reads = 0;
         for (k, (label, reads)) in steps.into_iter().enumerate() {
-            if k > 0 {
+            if k > 0 && k < 4 {
                 match reads {
-                    Some(n) => history.extend(read_step(&m, n)),
+                    Some(n) => {
+                        before_reads = history.len();
+                        history.extend(read_step(&m, n))
+                    }
                     None => history.push(user(&format!("Say OK again ({k})."))),
                 }
             }
-            let ctx = Context { system_prompt: system_prompt(&marker), messages: history.clone(), tools: tools() };
+            let messages = if k == 4 {
+                let mut side = history[..before_reads].to_vec();
+                side.push(user("Stop here and summarize the conversation in one line."));
+                side
+            } else {
+                history.clone()
+            };
+            let ctx = Context { system_prompt: system_prompt(&marker), messages, tools: tools() };
             let req = build_request(&m, &ctx, &o).expect("build request");
             let predicted = sim.request(Wire::ChatCompletions, &req.headers.clone().into_iter().collect::<Vec<_>>(), &req.body);
             let a = send(&m, &ctx, &o).await;
@@ -206,7 +219,9 @@ async fn real_providers_cache_like_the_simulator_says() {
                 }
             }
             upstream = a.upstream.clone().or(upstream);
-            history.push(Message::Assistant(a));
+            if k < 4 {
+                history.push(Message::Assistant(a));
+            }
             // Automatic caches take a moment to become readable.
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

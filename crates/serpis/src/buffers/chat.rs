@@ -113,6 +113,32 @@ pub struct ChatBuffer {
     request_started: Option<Instant>,
     /// chat-cache-indicator and chat-cache-status, as last read.
     show_cache: (bool, bool),
+    /// Each history message's entry id in the session file (None: not saved, or a summary).
+    entry_ids: Vec<Option<String>>,
+    /// A compaction in progress (cancelled by abort).
+    compacting: Option<serpis_ai::CancellationToken>,
+    /// Compactions so far: requests after one miss the cache for that reason.
+    compactions: u64,
+    /// A context overflow was already answered by compacting and retrying.
+    overflow_retried: bool,
+}
+
+/// Why a chat compacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactReason {
+    Manual,
+    Threshold,
+    Overflow,
+}
+
+impl CompactReason {
+    fn word(self) -> &'static str {
+        match self {
+            CompactReason::Manual => "manual",
+            CompactReason::Threshold => "threshold",
+            CompactReason::Overflow => "overflow",
+        }
+    }
 }
 
 const PREVIEW_LINES: usize = 10;
@@ -168,6 +194,10 @@ impl ChatBuffer {
             sent: None,
             request_started: None,
             show_cache: (true, true),
+            entry_ids: Vec::new(),
+            compacting: None,
+            compactions: 0,
+            overflow_retried: false,
         };
         if chat.model.is_none() {
             chat.entries.push(Entry::Info {
@@ -186,6 +216,9 @@ impl ChatBuffer {
         if let Some(a) = &self.agent {
             a.abort();
         }
+        if let Some(c) = &self.compacting {
+            c.cancel();
+        }
     }
 
     pub fn clear(&mut self) {
@@ -199,6 +232,8 @@ impl ChatBuffer {
         self.session = None;
         self.system_prompt = None;
         self.cache = Default::default();
+        self.entry_ids.clear();
+        self.compactions = 0;
         self.custom_entries.clear();
         self.dirty = true;
     }
@@ -250,6 +285,10 @@ impl ChatBuffer {
             ed.warn(reason);
             return false;
         }
+        if self.compacting.is_some() {
+            ed.message("The chat is compacting its history: send again when it's done");
+            return false;
+        }
         if !self.attachments.is_empty()
             && let Some(m) = self.model.as_ref().filter(|m| !m.input.iter().any(|i| i == "image"))
         {
@@ -279,9 +318,27 @@ impl ChatBuffer {
             self.dirty = true;
             return true;
         }
+        let Some(cfg) = self.agent_config(ed) else { return false };
+        if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
+            if cache_warning_applies(ed, "expired", cost) {
+                ed.message(format!(
+                    "The prompt cache expired {} ago: this message re-caches {} tokens ({})",
+                    crate::cache_watch::fmt_duration(ago),
+                    fmt_tokens(tokens),
+                    crate::cache_watch::fmt_cost(cost)
+                ));
+            }
+        }
+        self.start_agent(ed, cfg, vec![msg]);
+        true
+    }
+
+    /// What this chat's requests are sent with (model, tools, system prompt, options), also
+    /// noted for the cache bookkeeping. None (with an error shown) without a model.
+    fn agent_config(&mut self, ed: &mut Editor) -> Option<AgentConfig> {
         let Some(model) = self.model.clone() else {
             ed.error("No model selected (chat-select-model)");
-            return false;
+            return None;
         };
         if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
             self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd, &self.session_id));
@@ -298,18 +355,9 @@ impl ChatBuffer {
             tools: tools.iter().map(|t| crate::cache_watch::declaration_key(&t.declaration())).collect(),
             prompt: prompt_hash(&system_prompt),
             retention: cache_retention,
+            compactions: self.compactions,
         });
-        if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
-            if cache_warning_applies(ed, "expired", cost) {
-                ed.message(format!(
-                    "The prompt cache expired {} ago: this message re-caches {} tokens ({})",
-                    crate::cache_watch::fmt_duration(ago),
-                    fmt_tokens(tokens),
-                    crate::cache_watch::fmt_cost(cost)
-                ));
-            }
-        }
-        let cfg = AgentConfig {
+        Some(AgentConfig {
             api_key: ed.registry.api_key(&model.provider),
             headers: ed.registry.provider_headers(&model.provider),
             model,
@@ -323,7 +371,11 @@ impl ChatBuffer {
             cache_retention,
             hooks: Some(Arc::new(EditorToolHooks { main: ed.main_sender(), buffer: ed.this_buffer().map(crate::editor::buffer_id_to_u64) })),
             sequential_tools: false,
-        };
+        })
+    }
+
+    /// Run the agent on the history plus `prompts` (none: continue, e.g. after compacting).
+    fn start_agent(&mut self, ed: &mut Editor, cfg: AgentConfig, prompts: Vec<Message>) {
         let tx = self.tx.clone();
         let repaint = ed.main_sender();
         let emit: serpis_agent::EmitFn = Arc::new(move |ev| {
@@ -332,13 +384,146 @@ impl ChatBuffer {
         });
         let _guard = ed.rt.enter();
         self.last_error = None;
-        self.agent = Some(serpis_agent::run(self.history.clone(), vec![msg], cfg, emit));
+        self.agent = Some(serpis_agent::run(self.history.clone(), prompts, cfg, emit));
         self.started = Some(Instant::now());
         self.view.follow_tail = true;
         if let Some(id) = ed.this_buffer() {
             self.publish(ed, id);
         }
-        true
+    }
+
+    /// Replace the messages before a cut point with a summary (chat-compact, or automatically
+    /// near the context window). The summary is asked for in the conversation itself, so the
+    /// request reads the prompt cache; see `serpis_agent::compaction`.
+    pub fn compact(&mut self, ed: &mut Editor, reason: CompactReason, instructions: Option<String>) {
+        use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, instruction};
+        if self.running() || self.compacting.is_some() {
+            if reason == CompactReason::Manual {
+                ed.message("Wait for the agent to finish before compacting");
+            }
+            return;
+        }
+        let keep = ed.var("chat-compact-keep-tokens").and_then(Value::as_u64).unwrap_or(20_000);
+        let Some(cut) = cut_point(&self.history, keep) else {
+            if reason == CompactReason::Manual {
+                ed.message("Nothing to compact yet: the conversation is within chat-compact-keep-tokens");
+            }
+            return;
+        };
+        let tokens = context_tokens(&self.history).unwrap_or_else(|| self.history.iter().map(estimate_tokens).sum());
+        let Some(id) = ed.this_buffer() else { return };
+        let payload = serde_json::json!({"buffer": crate::editor::buffer_id_to_u64(id), "reason": reason.word(), "tokens": tokens, "messages": cut});
+        for r in ed.run_hook("before-compact", &payload) {
+            match r {
+                Value::Bool(false) => {
+                    ed.message("Compaction cancelled by a before-compact hook");
+                    return;
+                }
+                Value::Object(o) if o.get("summary").is_some_and(Value::is_string) => {
+                    let summary = o["summary"].as_str().unwrap_or_default().to_string();
+                    self.apply_compaction(ed, summary, cut, tokens, None);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let Some(mut cfg) = self.agent_config(ed) else { return };
+        let reserve = ed.var("chat-compact-reserve-tokens").and_then(Value::as_u64).unwrap_or(16_384);
+        cfg.max_tokens = Some((reserve * 4 / 5).min(cfg.model.max_tokens).max(1024));
+        let custom = instructions.or_else(|| ed.var_str("chat-compact-instructions"));
+        let mut msgs = self.history[..cut].to_vec();
+        msgs.push(instruction(custom.as_deref()));
+        let cancel = serpis_ai::CancellationToken::new();
+        self.compacting = Some(cancel.clone());
+        self.entries.push(Entry::Info { text: format!("Compacting: summarizing {cut} earlier messages…"), face: Face::Meta });
+        self.dirty = true;
+        self.publish(ed, id);
+        let main = ed.main_sender();
+        ed.rt.spawn(async move {
+            let a = serpis_agent::complete(&cfg, msgs, cancel).await;
+            main.send(move |ed| {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.finish_compaction(ed, a, cut, tokens, reason));
+            });
+        });
+    }
+
+    fn finish_compaction(&mut self, ed: &mut Editor, a: AssistantMessage, cut: usize, tokens: u64, reason: CompactReason) {
+        self.compacting = None;
+        add_usage(&mut self.totals, &a.usage);
+        let summary = a.text().trim().to_string();
+        let failure = match a.stop_reason {
+            StopReason::Aborted => Some("stopped".to_string()),
+            StopReason::Error => Some(a.error_message.clone().unwrap_or_else(|| "the request failed".into())),
+            StopReason::Length => Some("the summary was cut off (raise chat-compact-reserve-tokens)".into()),
+            _ if a.tool_calls().next().is_some() => Some("the model called a tool instead of summarizing".into()),
+            _ if summary.is_empty() => Some("the model returned no summary".into()),
+            _ => None,
+        };
+        if let Some(f) = failure {
+            self.entries.push(Entry::Info { text: format!("Compaction failed: {f}"), face: Face::Error });
+            self.dirty = true;
+            if let Some(id) = ed.this_buffer() {
+                self.publish(ed, id);
+            }
+            return;
+        }
+        self.apply_compaction(ed, summary, cut, tokens, Some(&a.usage));
+        if reason == CompactReason::Overflow {
+            // The turn that overflowed runs again on the compacted conversation.
+            if let Some(cfg) = self.agent_config(ed) {
+                self.start_agent(ed, cfg, Vec::new());
+            }
+        }
+    }
+
+    fn apply_compaction(&mut self, ed: &mut Editor, summary: String, cut: usize, tokens: u64, usage: Option<&Usage>) {
+        if let Some(first_kept) = self.entry_ids.get(cut).cloned().flatten() {
+            self.record(ed, |w| w.compaction(&summary, &first_kept, tokens).map(|_| ()));
+        }
+        let mut history = vec![serpis_agent::compaction::summary_message(&summary)];
+        history.extend(self.history.drain(cut..));
+        self.history = history;
+        let mut ids = vec![None];
+        ids.extend(self.entry_ids.drain(cut.min(self.entry_ids.len())..));
+        self.entry_ids = ids;
+        self.compactions += 1;
+        let summary_tokens = serpis_agent::compaction::estimate_tokens(&self.history[0]);
+        let mut text = format!("Compacted {cut} earlier messages ({} tokens of context) into a {}-token summary.", fmt_tokens(tokens), fmt_tokens(summary_tokens));
+        if let Some(u) = usage {
+            text.push_str(&format!(" The summary request read {} tokens from the prompt cache ({}).", fmt_tokens(u.cache_read), crate::cache_watch::fmt_cost(u.cost.total).trim_start_matches('~')));
+        }
+        self.entries.push(Entry::Info { text, face: Face::Meta });
+        self.dirty = true;
+        let id = ed.this_buffer();
+        let payload = serde_json::json!({"buffer": id.map(crate::editor::buffer_id_to_u64), "summary": summary, "tokens": tokens, "messages": cut, "cache_read": usage.map(|u| u.cache_read)});
+        ed.run_hook("chat-compacted", &payload);
+        if let Some(id) = id {
+            self.publish(ed, id);
+        }
+    }
+
+    /// After a run: compact when the context nears the window (chat-compact-auto), or when the
+    /// run failed on a context overflow, then retry it once.
+    fn compact_if_needed(&mut self, ed: &mut Editor) {
+        if !ed.var("chat-compact-auto").and_then(Value::as_bool).unwrap_or(true) {
+            return;
+        }
+        let Some(window) = self.model.as_ref().map(|m| m.context_window) else { return };
+        let last = self.history.iter().rev().find_map(|m| match m {
+            Message::Assistant(a) => Some(a.clone()),
+            _ => None,
+        });
+        if let Some(a) = last.filter(|a| serpis_ai::is_context_overflow(a, Some(window))) {
+            if a.stop_reason == StopReason::Error && !self.overflow_retried {
+                self.overflow_retried = true;
+                return self.compact(ed, CompactReason::Overflow, None);
+            }
+        }
+        self.overflow_retried = false;
+        let reserve = ed.var("chat-compact-reserve-tokens").and_then(Value::as_u64).unwrap_or(16_384);
+        if serpis_agent::compaction::context_tokens(&self.history).is_some_and(|t| serpis_agent::compaction::should_compact(t, window, reserve)) {
+            self.compact(ed, CompactReason::Threshold, None);
+        }
     }
 
     /// Context the conversation fills: the last response's tokens (what the next request sends,
@@ -465,6 +650,7 @@ impl ChatBuffer {
             tools: tools.iter().map(|t| declaration_key(&t.declaration())).collect(),
             prompt: prompt_hash(&prompt),
             retention,
+            compactions: self.compactions,
         };
         self.cache.resume(sent, &model, &last.usage, last.upstream.clone(), age);
         self.dirty = true;
@@ -544,6 +730,7 @@ impl ChatBuffer {
             model: self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
             thinking: self.thinking.as_str().to_string(),
             running: self.running(),
+            compacting: self.compacting.is_some(),
             usage: self.totals.clone(),
             title: self.title.clone(),
             cwd: self.cwd.to_string_lossy().into_owned(),
@@ -717,8 +904,13 @@ impl ChatBuffer {
                     });
                     ed.run_hook("assistant-message", &payload);
                 }
-                self.record(ed, |w| w.message(&m).map(|_| ()));
+                let mut entry = None;
+                self.record(ed, |w| {
+                    entry = Some(w.message(&m)?);
+                    Ok(())
+                });
                 self.history.push(m);
+                self.entry_ids.push(entry);
             }
             AgentEvent::ToolStart { id, name, args } => {
                 if self.tool_entry(&id).is_none() {
@@ -767,6 +959,7 @@ impl ChatBuffer {
                     self.publish(ed, id);
                 }
                 ed.run_hook("agent-finished", &serde_json::json!({"buffer": id.map(crate::editor::buffer_id_to_u64), "total": crate::chat_api::usage_json(&self.totals)}));
+                self.compact_if_needed(ed);
             }
             AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
         }
@@ -1047,6 +1240,7 @@ impl ChatBuffer {
         self.entries.clear();
         self.totals = Usage::default();
         self.history = l.messages.clone();
+        self.entry_ids = l.message_ids.clone();
         // Requests keep the session's id, so they route to the provider cache they warmed.
         if !l.id.is_empty() {
             self.session_id = l.id.clone();
@@ -2188,6 +2382,9 @@ impl Buffer for ChatBuffer {
     }
 
     fn activity(&self) -> Activity {
+        if self.compacting.is_some() {
+            return Activity::new(ActivityState::Working, "compacting");
+        }
         if self.running() {
             return Activity { since: self.started, ..Activity::new(ActivityState::Working, self.current_step()) };
         }

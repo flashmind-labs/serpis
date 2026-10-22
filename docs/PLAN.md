@@ -223,6 +223,21 @@ it ships, so there is no runtime hashing of prompts.
    opt-in, off-by-default preference for the chat's last upstream (`provider.order`, fallbacks
    allowed; it replaces OpenRouter's stickiness) is the fix.
 
+8. **Compaction** (*done*; serpis had none, so long chats failed at the context window): pi's
+   triggers (`chat-compact-auto`: near the window, leaving `chat-compact-reserve-tokens`; after a
+   context-overflow error, then the turn is retried once) and `chat-compact`, keeping
+   `chat-compact-keep-tokens` of recent messages; pi-format `compaction` session entries. Unlike
+   pi, which sends the old conversation re-serialized as text under its own system prompt (the
+   whole history at full input price), serpis asks for the summary in the conversation itself:
+   the messages before the cut plus one instruction, through `serpis_agent::complete`, the agent's
+   own request path. That request is a prefix of what the chat already sent, so it reads the cache
+   (about a tenth of the price) and fits even when the conversation no longer does. The next
+   request misses once, named "compacted". Hooks: `before-compact` (cancel, or supply a summary),
+   `chat-compacted`. Tests: `serpis_agent::compaction` units, an agent scenario on every venue,
+   `tests/ui/compact.lua` (manual, automatic, overflow and retry, resume after compaction), and a
+   side-request step in the live check. The simulator learned that a request no longer than the
+   previous one that branches off the shared prefix is not a miss.
+
 Deferred until usage data asks for them:
 
 - **Cache warmer** (pi 1.3's `cache-warmer.js`: refresh at 90% of the TTL when the expected saving

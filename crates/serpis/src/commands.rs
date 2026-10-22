@@ -781,6 +781,15 @@ pub fn install(ed: &mut Editor) {
             Ok(())
         },
     );
+    ed.define_command(
+        "chat-compact",
+        "Replace this chat's earlier messages with a summary, keeping the recent ones (chat-compact-keep-tokens). Param: what the summary should focus on. Chats also compact on their own near the context window (chat-compact-auto).",
+        o,
+        |ed, a| {
+            let instructions = a.str(0).map(str::to_string);
+            with_chat(ed, |c, ed| c.compact(ed, crate::buffers::chat::CompactReason::Manual, instructions))
+        },
+    );
     ed.define_command("chat-cache-report", "Show this chat's prompt cache: hit rate, whether it is warm, and its recent misses with their causes.", o, |ed, _| {
         let (rate, state, misses) = with_chat(ed, |c, _| {
             let rate = c.cache.hit_rate();

@@ -70,10 +70,15 @@ pub fn last_user_text(wire: Wire, body: &Value) -> Option<String> {
 }
 
 /// `READ <n>` reads f0.txt … f<n-1>.txt in one response, `SLEEP` runs `sleep 5`, `FAIL` answers
-/// with an error, anything else gets "ok"; after tool results the model says "done".
+/// with an error, `OVERFLOW` fails the first time with a context-overflow error, a compaction
+/// request gets a checkpoint summary, anything else gets "ok"; after tool results the model says
+/// "done".
 pub fn commands() -> Script {
-    Box::new(|wire, body| match last_user_text(wire, body) {
+    let mut overflowed = std::collections::HashSet::new();
+    Box::new(move |wire, body| match last_user_text(wire, body) {
         None => Reply::Text("done".into()),
+        Some(t) if t.contains("structured context checkpoint summary") => Reply::Text("## Goal\nKeep testing serpis.\n\n## Next Steps\n1. Carry on.".into()),
+        Some(t) if t.starts_with("OVERFLOW") && overflowed.insert(t.clone()) => Reply::Error(400, "prompt is too long: 250000 tokens > 200000 maximum".into()),
         Some(t) if t.starts_with("READ ") => {
             let n: usize = t[5..].trim().parse().unwrap_or(1);
             Reply::ToolCalls((0..n).map(|i| ("read".to_string(), json!({"path": format!("f{i}.txt")}))).collect())

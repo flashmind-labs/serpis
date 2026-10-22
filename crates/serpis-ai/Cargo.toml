@@ -20,6 +20,7 @@ base64.workspace = true
 sha2 = "0.10"
 rand = "0.9"
 url = "2"
+regex.workspace = true
 
 [dev-dependencies]
 serpis-testkit.workspace = true

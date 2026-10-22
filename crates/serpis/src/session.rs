@@ -137,6 +137,12 @@ impl SessionWriter {
         self.append("message", json!({"message": m}))
     }
 
+    /// Record a compaction (pi's format): the messages before `first_kept` are replaced by
+    /// `summary` when the session is loaded.
+    pub fn compaction(&mut self, summary: &str, first_kept: &str, tokens_before: u64) -> std::io::Result<String> {
+        self.append("compaction", json!({"summary": summary, "firstKeptEntryId": first_kept, "tokensBefore": tokens_before}))
+    }
+
     pub fn set_name(&mut self, name: &str) -> std::io::Result<String> {
         self.append("session_info", json!({"name": name}))
     }
@@ -149,6 +155,8 @@ pub struct Loaded {
     pub id: String,
     pub cwd: PathBuf,
     pub messages: Vec<Message>,
+    /// Each message's entry id in the file (None for a compaction summary).
+    pub message_ids: Vec<Option<String>>,
     /// (provider, model id) last in effect.
     pub model: Option<(String, String)>,
     pub thinking: Option<String>,
@@ -232,7 +240,8 @@ pub fn load(path: &Path) -> anyhow::Result<Loaded> {
         let kept = c.get("firstKeptEntryId").and_then(Value::as_str);
         start = kept.and_then(|k| path_entries.iter().position(|e| e.get("id").and_then(Value::as_str) == Some(k))).unwrap_or(ci + 1);
         if let Some(s) = c.get("summary").and_then(Value::as_str) {
-            out.messages.push(summary_message("The conversation history before this point was compacted into the following summary:", s));
+            out.messages.push(serpis_agent::compaction::summary_message(s));
+            out.message_ids.push(None);
         }
     }
     for (i, e) in path_entries.iter().enumerate() {
@@ -257,11 +266,13 @@ pub fn load(path: &Path) -> anyhow::Result<Loaded> {
                         out.model = Some((a.provider.clone(), a.model.clone()));
                     }
                     out.messages.push(m);
+                    out.message_ids.push(s("id"));
                 }
             }
             "branch_summary" if i >= start => {
                 if let Some(sm) = s("summary") {
                     out.messages.push(summary_message("The following is a summary of a branch that this conversation came back from:", &sm));
+                    out.message_ids.push(None);
                 }
             }
             _ => {}

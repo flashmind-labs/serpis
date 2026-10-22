@@ -143,6 +143,10 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("cache-warn-actions", json!(commands::CACHE_WARN_ACTIONS), "Actions cache-warn warns about: model, thinking, tools, refresh (chat-refresh-context), expired (sending after the cache expired).");
     ed.defvar("chat-resume-system-prompt", json!("warm"), "What a resumed or restored chat sends as its system prompt: \"warm\" keeps the one it was sent with while its prompt cache can still be alive (otherwise it is rebuilt from the current AGENTS.md / CLAUDE.md and settings, as keeping it would save nothing), \"always\" keeps it, \"never\" rebuilds it.");
     ed.defvar("chat-resume-system-prompt-notice", json!(true), "Say so when a resumed chat keeps its system prompt although the project's instructions or prompt settings changed since (chat-refresh-context picks them up).");
+    ed.defvar("chat-compact-auto", json!(true), "Compact a chat when its context nears the model's window (leaving chat-compact-reserve-tokens free), and after a context-overflow error (then retrying the turn once). The summary request reads the prompt cache.");
+    ed.defvar("chat-compact-reserve-tokens", json!(16384), "Tokens of the context window compaction keeps free for the next response; the summary may use up to 80% of them.");
+    ed.defvar("chat-compact-keep-tokens", json!(20000), "Recent tokens a compaction keeps as they are (the rest becomes the summary).");
+    ed.defvar("chat-compact-instructions", Value::Null, "What compaction summaries should focus on, besides pi's checkpoint format (goal, progress, decisions, next steps).");
     ed.defvar("agent-live-context", json!(false), "Rebuild the system prompt (AGENTS.md / CLAUDE.md, agent-guidelines, agent-append-system-prompt) for every message instead of keeping the one a chat started with. Any change then rewrites the chat's whole prompt cache; chat-refresh-context picks up changes once.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
@@ -207,7 +211,25 @@ pub fn bootstrap(ed: &mut Editor) {
     }
     session_ui::restore_open(ed);
     if let Some(script) = std::env::var_os("SERPIS_TEST_SCRIPT") {
-        lua::run_file(ed, std::path::Path::new(&script));
+        run_test_script_when_settled(ed, PathBuf::from(script), std::time::Instant::now(), None);
+    }
+}
+
+/// Run a test script once the native window has kept its size for a moment: the OS may resize
+/// a window just after it opens, and tests read window positions from their first step.
+fn run_test_script_when_settled(ed: &mut Editor, script: PathBuf, started: std::time::Instant, last: Option<(egui::Vec2, std::time::Instant)>) {
+    let size = ed.ctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
+    let now = std::time::Instant::now();
+    let steady = match (size, last) {
+        (Some(s), Some((prev, since))) if s == prev => Some((prev, since)),
+        (Some(s), _) => Some((s, now)),
+        (None, _) => None,
+    };
+    let settled = steady.is_some_and(|(_, since)| now - since >= std::time::Duration::from_millis(400) && ed.frames_drawn >= 3);
+    if settled || now - started > std::time::Duration::from_secs(5) {
+        lua::run_file(ed, &script);
+    } else {
+        ed.defer(move |ed| run_test_script_when_settled(ed, script, started, steady));
     }
 }
 

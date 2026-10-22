@@ -387,7 +387,7 @@ impl Simulator {
         let read = read_to.map(|q| cum[q]).unwrap_or(0);
 
         let miss = self.sessions.get(&session).and_then(|prev| {
-            let expected = prev.cached_to?;
+            let mut expected = prev.cached_to?;
             if read_to.is_some_and(|q| q >= expected) {
                 return None;
             }
@@ -395,6 +395,16 @@ impl Simulator {
                 return Some(Miss::Model);
             }
             let lcp = prev.blocks.iter().zip(&p.blocks).take_while(|(a, b)| a.segment == b.segment && a.json == b.json).count();
+            // A request no longer than the previous one that leaves it early is a side request off
+            // the shared prefix (a summary) or a rewind: it can read up to the last entry before
+            // the point where it leaves. A longer one that differs early changed bytes already sent.
+            if lcp <= expected && p.blocks.len() <= prev.blocks.len() && prev.params == p.params {
+                match (0..lcp.min(prev.hashes.len())).rev().find(|&i| self.store.contains_key(&(upstream.clone(), prev.hashes[i]))) {
+                    Some(i) if read_to.is_some_and(|q| q >= i) => return None,
+                    Some(i) => expected = i,
+                    None => return None,
+                }
+            }
             if lcp <= expected {
                 let first_message = p.blocks.iter().position(|b| b.segment == Segment::Messages).unwrap_or(p.blocks.len());
                 if prev.params != p.params && lcp >= first_message.min(prev.blocks.len()) {
@@ -489,6 +499,26 @@ mod tests {
         send(&mut s, &body("sys ", 2, &[]));
         let o = send(&mut s, &body("sys ", 2 + 20, &[1]));
         assert_eq!(o.miss, None);
+    }
+
+    #[test]
+    fn a_side_request_off_the_shared_prefix_is_not_a_miss_but_a_changed_one_is() {
+        // A shorter request that branches after message 2 (a summary request): it reads what was
+        // cached before the branch.
+        let mut s = sim();
+        send(&mut s, &body("sys ", 3, &[]));
+        send(&mut s, &body("sys ", 6, &[]));
+        let mut side = body("sys ", 4, &[2]);
+        side["messages"][3]["content"][0]["text"] = json!("summarize");
+        let o = send(&mut s, &side);
+        assert_eq!(o.miss, None, "{o:?}");
+        assert!(o.read > 0);
+        // A longer request whose early message changed is still a changed prefix.
+        let mut s = sim();
+        send(&mut s, &body("sys ", 3, &[]));
+        let mut changed = body("sys ", 6, &[]);
+        changed["messages"][1]["content"][0]["text"] = json!("edited");
+        assert!(matches!(send(&mut s, &changed).miss, Some(Miss::PrefixChanged { .. })));
     }
 
     #[test]

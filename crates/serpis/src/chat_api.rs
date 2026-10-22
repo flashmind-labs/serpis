@@ -19,6 +19,8 @@ pub struct ChatInfo {
     pub model: Option<String>,
     pub thinking: String,
     pub running: bool,
+    /// Summarizing its history (chat-compact).
+    pub compacting: bool,
     /// The whole session's usage (every message on the conversation).
     pub usage: Usage,
     pub title: String,
@@ -54,6 +56,7 @@ impl ChatInfo {
             "model": self.model,
             "thinking": self.thinking,
             "running": self.running,
+            "compacting": self.compacting,
             "usage": usage_json(&self.usage),
             "title": self.title,
             "cwd": self.cwd,

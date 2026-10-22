@@ -11,6 +11,7 @@ use serde_json::json;
 use serpis_agent::system_prompt::{PromptOptions, build_system_prompt};
 use serpis_agent::{AgentConfig, AgentEvent, AgentHandle, builtin_tools, run};
 use serpis_ai::*;
+use serpis_ai::CancellationToken;
 use serpis_testkit::{Config, Miss, Mock, commands};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -332,5 +333,40 @@ async fn the_same_conversation_is_sent_as_the_same_bytes() {
         let log = mock.log();
         let (x, y) = (&log[log.len() - 2].body, &log[log.len() - 1].body);
         assert_eq!(x.to_string(), y.to_string(), "{venue:?}: the same history serialized differently");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compaction_summary_reads_the_cache_and_costs_one_miss_after() {
+    use serpis_agent::compaction::{cut_point, instruction, summary_message};
+    for venue in VENUES {
+        let mock = venue.mock().await;
+        let mut chat = Chat::new(venue.model(&mock.base, ""));
+        chat.send("hello").await;
+        chat.send("READ 10").await;
+        chat.send("READ 3").await;
+        chat.send("next").await;
+        // The summary request: the messages before the cut plus the instruction, sent as the
+        // agent sends everything.
+        let cut = cut_point(&chat.history, 300).expect("something to compact");
+        let mut msgs = chat.history[..cut].to_vec();
+        msgs.push(instruction(None));
+        let summary = serpis_agent::complete(&chat.cfg, msgs, CancellationToken::new()).await;
+        assert!(summary.error_message.is_none(), "{venue:?}: {:?}", summary.error_message);
+        let o = mock.outcomes();
+        let s = o.last().unwrap();
+        assert!(s.miss.is_none() && s.read > 0, "{venue:?}: the summary request should read the cache\n{}", report(&mock));
+        assert!(s.write + s.input < 600, "{venue:?}: only the instruction is new\n{}", report(&mock));
+        // The chat continues from the summary and the kept messages: one miss, then hits.
+        let mut compacted = vec![summary_message("## Goal\nKeep testing.")];
+        compacted.extend(chat.history[cut..].iter().cloned());
+        chat.history = compacted;
+        let n = mock.log().len();
+        chat.send("after compaction").await;
+        chat.send("and again").await;
+        // The first request can't reuse the old conversation (a changed prefix, or a rewind the
+        // simulator doesn't count); the one after it hits.
+        let after: Vec<&str> = mock.log()[n..].iter().map(|e| e.outcome.as_ref().unwrap().miss.as_ref().map(kind).unwrap_or("none")).collect();
+        assert!(matches!(after[..], ["prefix" | "none", "none"]), "{venue:?}: {after:?}\n{}", report(&mock));
     }
 }
