@@ -124,7 +124,12 @@ steps({
     T.check("tried as this account, bob, then alice", sh("cat '" .. box .. "/logins'"), "box.net.ray\nbob@box.net.ray\nalice@box.net.ray\n")
     serpis.command.run("remote-stop-node", "box.net.ray")
   end,
-  function()
-    sh("rm -rf '" .. box .. "'")
+  -- The node is really gone before its folder is (or it would outlive the test).
+  function(go)
+    when(function() return sh("ls '" .. box .. "/node'"):find("node.sock", 1, true) == nil end, function()
+      sh("rm -rf '" .. box .. "'")
+      go()
+    end)
+    return false
   end,
 })

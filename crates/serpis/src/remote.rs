@@ -292,6 +292,7 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
                 let label = match s {
                     serpis_node::client::Stage::Building(system) => format!("Building serpis-node for {system} (once)…"),
                     serpis_node::client::Stage::Installing => format!("Installing serpis-node on {name}…"),
+                    serpis_node::client::Stage::Upgrading => format!("Updating serpis-node on {name}…"),
                 };
                 let key = key.clone();
                 main.send(move |ed| ed.busy_start(&key, &label));
@@ -347,6 +348,11 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
             // A machine with no models or keys can't run a chat: offer to copy this one's.
             if c.hello.setup.providers.is_empty() {
                 offer_setup(ed, machine, false);
+            }
+            // An older node a chat kept busy: it restarts on the new build once they are idle.
+            if c.hello.outdated {
+                ed.message(format!("{machine} runs an older serpis-node: it updates once its chats are idle"));
+                retry_upgrade(ed, machine);
             }
             ed.run_hook("remote-connected", &json!({"machine": machine, "host": c.hello.host, "serpis": c.hello.serpis}));
         }
@@ -572,6 +578,25 @@ fn schedule_reconnect(ed: &mut Editor, machine: &str, failures: u32) {
     ed.rt.spawn(async move {
         tokio::time::sleep(wait).await;
         main.send(move |ed| reconnect(ed, &name));
+    });
+}
+
+/// Ask an outdated node to restart on the new build every minute until it does (its chats then
+/// come back through the usual reconnect).
+fn retry_upgrade(ed: &mut Editor, machine: &str) {
+    let (main, m) = (ed.main_sender(), machine.to_string());
+    ed.rt.spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        main.send(move |ed| {
+            let Some(Conn::Up(c)) = ed.remote.conns.get(&m) else { return };
+            let c = c.clone();
+            let (main, m2) = (ed.main_sender(), m.clone());
+            ed.rt.spawn(async move {
+                if c.restart().await.is_err() {
+                    main.send(move |ed| retry_upgrade(ed, &m2));
+                }
+            });
+        });
     });
 }
 

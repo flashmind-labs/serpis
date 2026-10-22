@@ -84,6 +84,8 @@ pub enum Stage {
     Building(String),
     /// Copying the node to the machine.
     Installing,
+    /// Restarting an older node on the new build.
+    Upgrading,
 }
 
 pub struct Client {
@@ -105,6 +107,11 @@ pub struct Hello {
     pub home: String,
     /// What the machine has set up for chats (models, credentials).
     pub setup: serpis_proto::wire::NodeSetup,
+    /// The node's build (the SHA-256 of its binary).
+    pub build: String,
+    /// It runs a build this client didn't install, and couldn't restart on the new one yet (a
+    /// chat was mid-turn): ask again later ([`Client::restart`]).
+    pub outdated: bool,
 }
 
 impl Client {
@@ -124,7 +131,7 @@ impl Client {
         // At most: get a build, install it, connect.
         for _ in 0..3 {
             let Failed { stderr, error } = match Self::connect_once(&target, name).await {
-                Ok(c) => return Ok(c),
+                Ok(c) => return Self::upgrade(c, &target, name, &stage).await,
                 Err(f) => f,
             };
             let Target::Ssh { host, ssh, ssh_args, env, deploy, ask, .. } = &mut target else { return Err(error) };
@@ -149,6 +156,38 @@ impl Client {
         bail!("couldn't install serpis-node on {}", describe(&target))
     }
 
+    /// A node running a build this client doesn't carry (an older serpis installed it) is
+    /// restarted on the new one when none of its chats is mid-turn; otherwise the connection
+    /// to it is kept, marked outdated.
+    async fn upgrade(c: (Client, mpsc::UnboundedReceiver<Event>), target: &Target, name: &str, stage: &impl Fn(Stage)) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
+        let Target::Ssh { deploy, command: None, .. } = target else { return Ok(c) };
+        let (mut client, events) = c;
+        if deploy.is_empty() || client.hello.build.is_empty() || deploy.iter().any(|n| n.sha256 == client.hello.build) {
+            return Ok((client, events));
+        }
+        if client.restart().await.is_err() {
+            client.hello.outdated = true;
+            return Ok((client, events));
+        }
+        stage(Stage::Upgrading);
+        drop((client, events));
+        // The old node is on its way out: the new one starts when the agent finds its socket gone.
+        let mut last = None;
+        for i in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(150 * (i + 1).min(5))).await;
+            match Self::connect_once(target, name).await {
+                Ok(c) => return Ok(c),
+                Err(f) => last = Some(f.error),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("the node didn't come back")).context("restarting serpis-node on the new build"))
+    }
+
+    /// Ask the node to restart (on a newer build), which it does unless a chat is mid-turn.
+    pub async fn restart(&self) -> Result<()> {
+        self.call(Request::Restart).await.map(|_| ())
+    }
+
     async fn connect_once(target: &Target, name: &str) -> Result<(Client, mpsc::UnboundedReceiver<Event>), Failed> {
         let failed = |error: anyhow::Error| Failed { stderr: String::new(), error };
         let (mut client, events) = match target {
@@ -167,7 +206,7 @@ impl Client {
             Target::Command(argv) => Self::spawn(argv).map_err(failed)?,
         };
         match client.call(Request::Hello { version: wire::VERSION, client: name.to_string() }).await {
-            Ok(Response::Hello { host, serpis, home, setup, .. }) => client.hello = Hello { host, serpis, home, setup },
+            Ok(Response::Hello { host, serpis, home, setup, build, .. }) => client.hello = Hello { host, serpis, home, setup, build, outdated: false },
             Ok(other) => return Err(failed(anyhow!("the node answered hello with {other:?}"))),
             Err(e) => {
                 // What the far side said is the reason: wait for all of it.

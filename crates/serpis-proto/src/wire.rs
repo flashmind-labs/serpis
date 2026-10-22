@@ -88,6 +88,9 @@ pub enum Request {
     },
     /// Stop the node: its chats are aborted, their sessions kept to reopen when it starts again.
     Stop,
+    /// Stop the node so a newer build can start, unless a chat is mid-turn (then an error says
+    /// so): its open chats reopen in the new one.
+    Restart,
     /// Set the machine up with what the client sends: API keys by provider (auth.json entries),
     /// models.json's providers, and settings. Only what the machine doesn't have yet is added.
     Setup {
@@ -124,6 +127,9 @@ pub enum Response {
         /// What the machine has set up for chats.
         #[serde(default)]
         setup: NodeSetup,
+        /// This node's build: the SHA-256 of its binary (the name serpis installs it under).
+        #[serde(default)]
+        build: String,
     },
     Chats { chats: Vec<ChatSummary> },
     /// The chat a `New` or `Resume` made.

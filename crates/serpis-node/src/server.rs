@@ -79,6 +79,11 @@ impl Running {
 
 /// Start a node on `rt`: bind its socket, reopen the chats it had open, and serve.
 pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
+    // Its settings and open chats live here, wherever the socket is.
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&config.dir).with_context(|| format!("creating {}", config.dir.display()))?;
+    }
     let listener = {
         let _in_rt = rt.enter();
         bind(&config.socket)?
@@ -460,11 +465,12 @@ impl Node {
                 return false;
             }
         };
-        let stop = call.request == Request::Stop;
+        let stopping = matches!(call.request, Request::Stop | Request::Restart);
         let response = match self.answer(client, call.request) {
             Ok(r) => r,
             Err(message) => Response::Error { message },
         };
+        let stop = stopping && response == Response::Ok;
         self.reply(client, call.id, response);
         stop
     }
@@ -481,6 +487,7 @@ impl Node {
                     serpis: crate::VERSION.to_string(),
                     home: dirs::home_dir().unwrap_or_default().to_string_lossy().into_owned(),
                     setup: self.setup(),
+                    build: build_id().to_string(),
                 }
             }
             Request::List => Response::Chats { chats: self.chats.iter().map(|(id, s)| ChatSummary { chat: id.clone(), state: s.chat.state() }).collect() },
@@ -581,6 +588,13 @@ impl Node {
                 Response::Sessions { sessions }
             }
             Request::Stop => Response::Ok,
+            Request::Restart => {
+                let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();
+                if !busy.is_empty() {
+                    return Err(format!("busy: {} chat(s) mid-turn ({})", busy.len(), busy.join(", ")));
+                }
+                Response::Ok
+            }
             Request::Setup { auth, models, settings } => Response::Setup { added: self.apply_setup(auth, models, settings)? },
             Request::Dirs { path } => {
                 let dir = from_home(&path);
@@ -721,6 +735,15 @@ impl Node {
             self.open_written = open;
         }
     }
+}
+
+/// This node's build: the SHA-256 of its executable (`SERPIS_NODE_BUILD` overrides it, for
+/// tests of upgrades).
+pub fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        std::env::var("SERPIS_NODE_BUILD").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| std::env::current_exe().ok().and_then(|e| crate::deploy::sha256_file(&e).ok()).unwrap_or_default())
+    })
 }
 
 fn notice_level(l: Level) -> NoticeLevel {

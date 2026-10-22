@@ -88,5 +88,12 @@ steps({
     T.check("copying again adds nothing", said("already had all of it"), "box already had all of it")
     serpis.command.run("remote-stop-node", "box")
   end,
-  function() sh("rm -rf '" .. box .. "'") end,
+  -- The node is really gone before its folder is (or it would outlive the test).
+  function(go)
+    when(function() return sh("ls '" .. box .. "/node'"):find("node.sock", 1, true) == nil end, function()
+      sh("rm -rf '" .. box .. "'")
+      go()
+    end)
+    return false
+  end,
 })
