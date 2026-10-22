@@ -95,6 +95,26 @@ pub enum Hit {
     Miss,
 }
 
+impl From<Hit> for serpis_proto::CacheHit {
+    fn from(h: Hit) -> Self {
+        match h {
+            Hit::New => serpis_proto::CacheHit::New,
+            Hit::Hit(r) => serpis_proto::CacheHit::Hit(r),
+            Hit::Miss => serpis_proto::CacheHit::Miss,
+        }
+    }
+}
+
+impl From<serpis_proto::CacheHit> for Hit {
+    fn from(h: serpis_proto::CacheHit) -> Self {
+        match h {
+            serpis_proto::CacheHit::New => Hit::New,
+            serpis_proto::CacheHit::Hit(r) => Hit::Hit(r),
+            serpis_proto::CacheHit::Miss => Hit::Miss,
+        }
+    }
+}
+
 impl Hit {
     pub fn label(self) -> String {
         match self {
@@ -308,8 +328,15 @@ pub fn fmt_duration(d: Duration) -> String {
     }
 }
 
-fn fmt_tokens(n: u64) -> String {
-    crate::buffers::chat::fmt_tokens(n)
+/// `950`, `12.3k`, `1.2M`.
+pub fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1e6)
+    } else if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1e3)
+    } else {
+        n.to_string()
+    }
 }
 
 #[cfg(test)]

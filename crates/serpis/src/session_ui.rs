@@ -120,14 +120,14 @@ pub fn scan_then(ed: &mut Editor, force: bool, f: impl FnOnce(&mut Editor) + 'st
 pub fn chat_with_session(ed: &Editor, path: &Path) -> Option<BufferId> {
     ed.buffers.iter().find_map(|(id, s)| {
         let c = s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?;
-        (c.session.as_ref()?.path == path).then_some(id)
+        (c.chat.session.as_ref()?.path == path).then_some(id)
     })
 }
 
 /// The session file a chat records to, once it has one.
 pub fn session_of(ed: &Editor, id: BufferId) -> Option<PathBuf> {
     let c = ed.buffers.get(id)?.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?;
-    c.session.as_ref().filter(|w| w.exists()).map(|w| w.path.clone())
+    c.chat.session.as_ref().filter(|w| w.exists()).map(|w| w.path.clone())
 }
 
 /// Load session `path` into a chat without showing it: the chat that already has it, else the
@@ -138,7 +138,7 @@ pub fn restore(ed: &mut Editor, path: &Path, reuse: bool) -> anyhow::Result<Buff
     }
     let loaded = session::load(path)?;
     let cur = ed.current_buffer();
-    let empty = ed.buffers.get(cur).and_then(|s| s.buf.as_ref()).and_then(|b| b.as_any().downcast_ref::<ChatBuffer>()).is_some_and(|c| c.history.is_empty() && !c.running());
+    let empty = ed.buffers.get(cur).and_then(|s| s.buf.as_ref()).and_then(|b| b.as_any().downcast_ref::<ChatBuffer>()).is_some_and(|c| c.chat.history.is_empty() && !c.running());
     let id = if reuse && empty {
         cur
     } else {
@@ -370,7 +370,7 @@ pub fn install(ed: &mut Editor) {
                 return;
             }
             if let Some(id) = chat_with_session(ed, &path) {
-                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.session = None);
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat.session = None);
             }
             match std::fs::remove_file(&path) {
                 Ok(()) => {

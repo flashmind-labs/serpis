@@ -1,0 +1,11 @@
+[package]
+name = "serpis-proto"
+description = "What serpis nodes and their clients (the GUI, the iOS app) say to each other: chat transcripts and the framing they travel in"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serpis-ai.workspace = true
+serde.workspace = true
+serde_json.workspace = true

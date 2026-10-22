@@ -520,9 +520,12 @@ mod tests {
             }
         }
         read(&root, &mut sources);
+        // Chats run their hooks from serpis-chat, through the editor's `Host`.
+        read(&root.join("../../serpis-chat/src"), &mut sources);
         let documented: Vec<&str> = HOOKS.iter().map(|(n, _)| *n).collect();
         let mut missing = Vec::new();
-        for part in sources.split("run_hook(\"").skip(1) {
+        let calls = ["run_hook(\"", "host.hook(self, \""];
+        for part in calls.iter().flat_map(|c| sources.split(c).skip(1)) {
             let name = &part[..part.find('"').unwrap()];
             if !documented.contains(&name) && !missing.contains(&name) {
                 missing.push(name);
@@ -530,7 +533,7 @@ mod tests {
         }
         assert!(missing.is_empty(), "hooks missing from extend::HOOKS: {missing:?}");
         for d in documented {
-            assert!(sources.contains(&format!("run_hook(\"{d}\"")), "documented hook {d} is never run");
+            assert!(calls.iter().any(|c| sources.contains(&format!("{c}{d}\""))), "documented hook {d} is never run");
         }
     }
 }

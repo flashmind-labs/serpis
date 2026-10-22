@@ -260,3 +260,36 @@ Deferred until usage data asks for them:
 
 Sources: serpis' request path (2026-10-21), pi 1.3.0's `cache-warmer.js`, and Cloudflare's
 "obsessive inference optimization" post.
+
+## Chats and terminals on other machines, and the iOS app
+
+Goal: start chats and terminals on your laptop or on dedicated boxes, pick the machine from a
+list, move a chat (with its folder) between machines and resume it anywhere, and use a
+chat-only iOS app on the same chats, the way t3code does. Agreed 2026-10-22.
+
+| Topic | Decision |
+|---|---|
+| Where a chat runs | All of it runs on its machine: agent loop, LLM calls, tools, session file. Laptop sleeps, phone attaches: the chat keeps going. |
+| Engine | `serpis-chat`: a chat without a window (no egui; its dependency tree has no GUI crate). The desktop runs it in-process; boxes run it in `serpis-node`. |
+| What clients see | `serpis-proto`: the transcript as `Entry`s, sent as splices ("from entry N on, it is now these") plus a `ChatState`. The desktop chat already renders only from splices, local chats included, so one path is tested by every UI test. |
+| Daemon on boxes | `serpis-node`, headless and egui-free, built the way manymux builds its node: per user, owner-only Unix socket and nothing else, reached by `ssh <host> serpis-node agent` (stdio bridge), installed as a per-user service. |
+| Security | serpis authenticates nothing itself. sshd decides who gets in: rayfish mesh SSH (keyless, `ssh_allow`) or your SSH keys. API keys stay on each box (its own auth.json); none cross the wire. Optional strict mode per host, after pi-env: pinned host key, no forwarding. |
+| rayfish | The network and identity layer: mesh names, NAT traversal, keyless SSH, `ray status` for the machine list. No code dependency, so plain SSH works too (rayfish is pre-1.0 and unaudited). |
+| manymux | Remote terminals: its client library feeds the libghostty terminal; sessions survive disconnects. Chats are not manymux sessions: its sessions are PTYs repainted through an emulator, which doesn't fit structured chat sync. |
+| From pi-durable | Request ids on prompts (a retried send never runs twice; *done*), a snapshot instead of a backlog for a client that falls behind, running turns that survive a node restart, and parking a turn that keeps crashing. |
+| Moving a chat | The session file (pi JSONL) moves as is; the folder by git first (the branch plus a snapshot commit of uncommitted changes, into a worktree on the target), rsync over SSH otherwise; environment variables only from an allowlist setting. |
+| iOS | SwiftUI, with a Rust core over UniFFI (protocol client and SSH, its key in the Keychain / Secure Enclave). Reaches boxes over the Rayfish VPN or any SSH-reachable host. After the node works. |
+
+Steps:
+
+1. *Done*: the engine out of the chat buffer (`crates/serpis-chat`, with `session` and
+   `cache_watch`), the wire types and framing (`crates/serpis-proto`), and the chat buffer
+   rendering from splices. `crates/serpis-chat/tests/chat.rs` runs a real chat against the mock
+   provider with no window and checks that a client fed JSON splices shows exactly the same
+   transcript, that a retried request id doesn't run twice, and that the saved session resumes.
+2. `serpis-node`: the daemon, the protocol over its socket and over `ssh … agent`, a
+   machine picker and remote chats in the GUI, and the node's own settings (and later Lua)
+   standing in for `init.lua` hooks on boxes.
+3. Remote terminals through manymux.
+4. Moving and syncing chats; sessions of every machine in one list.
+5. The iOS app.

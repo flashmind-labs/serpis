@@ -1,0 +1,20 @@
+[package]
+name = "serpis-chat"
+description = "A serpis chat without a window: conversation, agent, session file, cache bookkeeping and compaction, shown through serpis-proto transcripts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serpis-ai.workspace = true
+serpis-agent.workspace = true
+serpis-proto.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+serpis-testkit.workspace = true

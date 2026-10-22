@@ -110,7 +110,7 @@ pub const CACHE_WARN_ACTIONS: [&str; 5] = ["model", "thinking", "tools", "refres
 /// "notice" says so after; a before-cache-invalidate handler can veto (false) or reword it.
 pub fn guard_cache(ed: &mut Editor, action: &'static str, what: &str, act: impl FnOnce(&mut Editor) + 'static) {
     let id = current_chat(ed);
-    let est = id.and_then(|id| ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.cache.invalidation(std::time::Instant::now()))).flatten();
+    let est = id.and_then(|id| ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat.cache.invalidation(std::time::Instant::now()))).flatten();
     let Some((tokens, cost)) = est.filter(|(_, cost)| crate::buffers::chat::cache_warning_applies(ed, action, *cost)) else {
         return act(ed);
     };
@@ -792,9 +792,9 @@ pub fn install(ed: &mut Editor) {
     );
     ed.define_command("chat-cache-report", "Show this chat's prompt cache: hit rate, whether it is warm, and its recent misses with their causes.", o, |ed, _| {
         let (rate, state, misses) = with_chat(ed, |c, _| {
-            let rate = c.cache.hit_rate();
-            let state = c.cache.state(std::time::Instant::now());
-            let misses: Vec<String> = c.cache.misses.iter().rev().map(|m| format!("- {}", m.notice())).collect();
+            let rate = c.chat.cache.hit_rate();
+            let state = c.chat.cache.state(std::time::Instant::now());
+            let misses: Vec<String> = c.chat.cache.misses.iter().rev().map(|m| format!("- {}", m.notice())).collect();
             (rate, state, misses)
         })?;
         let mut text = String::from("Prompt cache\n\n");
@@ -820,7 +820,7 @@ pub fn install(ed: &mut Editor) {
             return None;
         }
         let id = current_chat(ed)?;
-        let (tokens, cost) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.cache.invalidation(std::time::Instant::now())).flatten()?;
+        let (tokens, cost) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat.cache.invalidation(std::time::Instant::now())).flatten()?;
         if crate::buffers::chat::cache_warning_applies(ed, "tools", cost) {
             ed.message(format!("Changing the tools re-caches {} tokens on the next message ({})", crate::buffers::chat::fmt_tokens(tokens), crate::cache_watch::fmt_cost(cost)));
         }
@@ -837,7 +837,7 @@ pub fn install(ed: &mut Editor) {
         guard_cache(ed, "thinking", "Changing the thinking level", |ed| {
             if let Ok(lvl) = with_chat(ed, |c, _| {
                 c.cycle_thinking();
-                c.thinking
+                c.chat.thinking
             }) {
                 ed.message(format!("Thinking: {}", lvl.as_str()));
             }
@@ -856,8 +856,8 @@ pub fn install(ed: &mut Editor) {
             return Ok(());
         }
         let (levels, current) = with_chat(ed, |c, _| {
-            let levels = c.model.as_ref().map(serpis_ai::supported_thinking_levels).unwrap_or_else(|| serpis_ai::ThinkingLevel::ALL.to_vec());
-            (levels, c.thinking)
+            let levels = c.chat.model.as_ref().map(serpis_ai::supported_thinking_levels).unwrap_or_else(|| serpis_ai::ThinkingLevel::ALL.to_vec());
+            (levels, c.chat.thinking)
         })?;
         let cands = levels
             .iter()
@@ -875,7 +875,7 @@ pub fn install(ed: &mut Editor) {
             guard_cache(ed, "thinking", "Changing the thinking level", move |ed| {
                 let Ok(l) = with_chat(ed, |chat, _| {
                     chat.set_thinking(l);
-                    chat.thinking
+                    chat.chat.thinking
                 }) else { return };
                 ed.message(format!("Thinking: {}", l.as_str()));
             });
@@ -935,7 +935,7 @@ pub fn install(ed: &mut Editor) {
         ed.completing_read("Model: ", cands, true, move |ed, c, _| {
             let Some(c) = c else { return };
             let Some(m) = models.into_iter().find(|m| format!("{}/{}", m.provider, m.id) == c.value) else { return };
-            let same = with_chat(ed, |chat, _| chat.model.as_ref().is_some_and(|x| x.provider == m.provider && x.id == m.id)).unwrap_or(false);
+            let same = with_chat(ed, |chat, _| chat.chat.model.as_ref().is_some_and(|x| x.provider == m.provider && x.id == m.id)).unwrap_or(false);
             let change = move |ed: &mut Editor| {
                 ed.set_var("agent-model", Value::String(c.value.clone()));
                 let _ = with_chat(ed, |chat, _| chat.set_model(m));

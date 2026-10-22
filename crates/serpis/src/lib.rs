@@ -10,7 +10,7 @@
 pub mod app;
 pub mod buffer;
 pub mod buffers;
-pub mod cache_watch;
+pub use serpis_chat::cache_watch;
 pub mod chat_api;
 pub mod extend;
 pub mod frecency;
@@ -37,7 +37,7 @@ pub mod packages;
 pub mod pickers;
 pub mod plugins;
 pub mod project;
-pub mod session;
+pub use serpis_chat::session;
 pub mod session_ui;
 pub mod sidebar;
 pub mod text;

@@ -1408,7 +1408,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         ed(|e| {
             let id = buffer_id_from_u64(id);
             e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| {
-                c.cache.age(std::time::Duration::from_secs_f64(secs));
+                c.chat.cache.age(std::time::Duration::from_secs_f64(secs));
                 c.publish(ed, id);
             });
         })

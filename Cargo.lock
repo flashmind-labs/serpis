@@ -3323,6 +3323,8 @@ dependencies = [
  "serde_json",
  "serpis-agent",
  "serpis-ai",
+ "serpis-chat",
+ "serpis-proto",
  "slotmap",
  "syntect",
  "tokio",
@@ -3387,6 +3389,31 @@ name = "serpis-bin"
 version = "0.1.0"
 dependencies = [
  "serpis",
+]
+
+[[package]]
+name = "serpis-chat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "proptest",
+ "serde_json",
+ "serpis-agent",
+ "serpis-ai",
+ "serpis-proto",
+ "serpis-testkit",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "serpis-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serpis-ai",
 ]
 
 [[package]]

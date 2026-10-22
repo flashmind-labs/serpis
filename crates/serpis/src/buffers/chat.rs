@@ -1,18 +1,24 @@
 //! Agent chat buffer.
 //!
+//! The chat itself (conversation, agent, session file, cache bookkeeping, compaction) is a
+//! `serpis_chat::Chat`, which knows nothing of windows; this buffer shows its transcript and
+//! sends it what you type. The transcript arrives as `serpis_proto` splices, the same way a
+//! chat running on another machine reaches the window that shows it.
+//!
 //! The transcript is generated styled text (Emacs-style faces and blocks): messages, thinking,
 //! foldable tool cards and diff views. The prompt is an editable area pinned to the bottom.
 //! Both form one composite [`TextSurface`] (transcript lines first, then prompt lines), so
 //! motions, vim, search and yank move seamlessly between them.
 
 use std::ops::Range;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, Rect, Stroke, Vec2};
 use serde_json::Value;
-use serpis_agent::{AgentConfig, AgentEvent, AgentHandle, ToolGate, ToolHooks, ToolResult};
+use serpis_agent::{ToolGate, ToolHooks, ToolResult};
 use serpis_ai::*;
+use serpis_proto::{CacheHit, Entry, Tone};
 
 use crate::buffer::{Activity, ActivityState, Buffer, Modeline};
 use crate::editor::{Editor, MainSender};
@@ -20,40 +26,29 @@ use crate::impl_any;
 use crate::text::{Block, CursorShape, DocView, LineSource, Pos, StyledLine, TextArea, TextSurface, ViewOptions, char_len};
 use crate::theme::Face;
 
-#[derive(Debug, Clone)]
-enum Entry {
-    User {
-        text: String,
-        queued: bool,
-        images: Vec<crate::images::ImageRef>,
-    },
-    Assistant {
-        blocks: Vec<AssistantContent>,
-        model: String,
-        streaming: bool,
-        continuation: bool,
-        usage: Option<Usage>,
-        error: Option<String>,
-        /// Thinking folded by hand (click or TAB): Some(true) all of it, Some(false) only its
-        /// header; None follows chat-show-thinking.
-        thinking: Option<bool>,
-        /// How the response used the prompt cache (None: resumed, or not reported).
-        cache: Option<crate::cache_watch::Hit>,
-    },
-    Tool {
-        id: String,
-        name: String,
-        args: Value,
-        partial: Option<String>,
-        result: Option<ToolResultMessage>,
-        expanded: Option<bool>,
-        started: Option<Instant>,
-        elapsed: Option<Duration>,
-    },
-    Info {
-        text: String,
-        face: Face,
-    },
+pub use serpis_chat::{CompactReason, fmt_tokens};
+
+/// How this window shows a transcript entry: how it is folded, its images decoded, and when a
+/// running tool started (by this clock).
+#[derive(Debug, Clone, Default)]
+struct View {
+    /// Tool output folded by hand (None: the default for the tool).
+    expanded: Option<bool>,
+    /// Thinking folded by hand: Some(true) all of it, Some(false) only its header; None follows
+    /// chat-show-thinking.
+    thinking: Option<bool>,
+    images: Vec<crate::images::ImageRef>,
+    started: Option<Instant>,
+}
+
+impl View {
+    fn of(e: &Entry, now: Instant) -> View {
+        match e {
+            Entry::User { images, .. } => View { images: images.iter().filter_map(|i| crate::images::from_base64(&i.data)).collect(), ..View::default() },
+            Entry::Tool { running_ms: Some(ms), .. } => View { started: now.checked_sub(Duration::from_millis(*ms)), ..View::default() },
+            _ => View::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,8 +58,11 @@ pub enum Focus {
 }
 
 pub struct ChatBuffer {
+    /// The conversation and the agent working on it.
+    pub chat: serpis_chat::Chat,
+    /// The transcript as last received, and how each entry is shown here.
     entries: Vec<Entry>,
-    pub history: Vec<Message>,
+    views: Vec<View>,
     pub prompt: TextArea,
     lines: Vec<StyledLine>,
     line_entry: Vec<Option<usize>>,
@@ -75,69 +73,89 @@ pub struct ChatBuffer {
     dirty: bool,
     pub view: DocView,
     pub focus: Focus,
-    agent: Option<AgentHandle>,
-    tx: mpsc::Sender<AgentEvent>,
-    rx: mpsc::Receiver<AgentEvent>,
-    pub model: Option<Model>,
-    pub thinking: ThinkingLevel,
-    pub session_id: String,
-    pub cwd: std::path::PathBuf,
-    totals: Usage,
+    /// When the current run started.
     started: Option<Instant>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
-    /// Short title: the first prompt unless set (`chat-set-title`).
-    pub title: String,
-    /// Error of the last run, if it failed.
-    last_error: Option<String>,
     /// Width of the transcript's content column (tables are laid out for it).
     text_w: f32,
     /// Theme and font state the transcript was rendered with (cards carry its colors).
     style_key: u64,
     /// Where the composer's controls were drawn last frame (tests click them).
     pub composer_hits: Vec<(&'static str, Rect)>,
-    /// Custom session entries (pi's `custom` entries): (type, data), oldest first.
-    pub custom_entries: Vec<(String, Value)>,
     /// Images waiting in the composer, sent with the next message.
     pub attachments: Vec<Attachment>,
-    /// Where the conversation is recorded (created with the first prompt).
-    pub session: Option<crate::session::SessionWriter>,
-    session_failed: bool,
-    /// The system prompt this chat sends, built on its first message and kept so the provider can
-    /// reuse its cache: (tool names it was built for, prompt). `chat-refresh-context` drops it.
-    system_prompt: Option<(Vec<String>, String)>,
-    /// What the prompt cache is doing (reads, misses and their causes, warm or cold).
-    pub cache: crate::cache_watch::CacheWatch,
-    /// What the running agent's requests are sent with.
-    sent: Option<crate::cache_watch::Sent>,
-    request_started: Option<Instant>,
     /// chat-cache-indicator and chat-cache-status, as last read.
     show_cache: (bool, bool),
-    /// Each history message's entry id in the session file (None: not saved, or a summary).
-    entry_ids: Vec<Option<String>>,
-    /// A compaction in progress (cancelled by abort).
-    compacting: Option<serpis_ai::CancellationToken>,
-    /// Compactions so far: requests after one miss the cache for that reason.
-    compactions: u64,
-    /// A context overflow was already answered by compacting and retrying.
-    overflow_retried: bool,
 }
 
-/// Why a chat compacts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactReason {
-    Manual,
-    Threshold,
-    Overflow,
-}
+/// What a chat in this editor gets from it: variables, hooks, extension tools, the model
+/// registry, the runtime.
+struct EditorHost<'a>(&'a mut Editor);
 
-impl CompactReason {
-    fn word(self) -> &'static str {
-        match self {
-            CompactReason::Manual => "manual",
-            CompactReason::Threshold => "threshold",
-            CompactReason::Overflow => "overflow",
+impl serpis_chat::Host for EditorHost<'_> {
+    fn var(&self, name: &str) -> Option<Value> {
+        self.0.var(name).cloned()
+    }
+    fn hook(&mut self, chat: &serpis_chat::Chat, name: &str, payload: &Value) -> Vec<Value> {
+        // Handlers read the chat (`serpis.chat.info`) and abort it through what is published.
+        if let Some(id) = self.0.this_buffer() {
+            self.0.chats.insert(id, info_of(chat));
         }
+        self.0.run_hook(name, payload)
+    }
+    fn notify(&mut self, level: serpis_chat::Level, text: String) {
+        match level {
+            serpis_chat::Level::Info => self.0.message(text),
+            serpis_chat::Level::Warn => self.0.warn(text),
+            serpis_chat::Level::Error => self.0.error(text),
+        }
+    }
+    fn tools(&self) -> Vec<serpis_agent::ToolRef> {
+        agent_tools(self.0)
+    }
+    fn tool_hooks(&self) -> Option<Arc<dyn ToolHooks>> {
+        Some(Arc::new(EditorToolHooks { main: self.0.main_sender(), buffer: self.0.this_buffer().map(crate::editor::buffer_id_to_u64) }))
+    }
+    fn registry(&self) -> &Registry {
+        &self.0.registry
+    }
+    fn runtime(&self) -> tokio::runtime::Handle {
+        self.0.rt.clone()
+    }
+    fn chat_ref(&self) -> Value {
+        self.0.this_buffer().map(crate::editor::buffer_id_to_u64).into()
+    }
+    fn session_root(&self) -> std::path::PathBuf {
+        crate::session_ui::session_root(self.0)
+    }
+    fn session_created(&mut self, cwd: &std::path::Path) {
+        // A project you have chatted in stays in the sidebar with its sessions.
+        if self.0.var("project-remember").and_then(Value::as_bool).unwrap_or(true) {
+            if let Some(root) = self.0.project_root_of(cwd) {
+                crate::sidebar::add_project(self.0, &root);
+            }
+        }
+        crate::session_ui::rescan(self.0);
+    }
+}
+
+/// A chat as seen from outside (`Editor::chats`, `serpis.chat`).
+fn info_of(c: &serpis_chat::Chat) -> crate::chat_api::ChatInfo {
+    crate::chat_api::ChatInfo {
+        model: c.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
+        thinking: c.thinking.as_str().to_string(),
+        running: c.running(),
+        compacting: c.compacting(),
+        usage: c.totals.clone(),
+        title: c.title.clone(),
+        cwd: c.cwd.to_string_lossy().into_owned(),
+        session: c.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),
+        session_id: c.session_id.clone(),
+        entries: c.custom_entries.clone(),
+        agent: c.agent().cloned(),
+        context: c.context(),
+        cache: c.cache_json(),
     }
 }
 
@@ -146,21 +164,26 @@ const PREVIEW_LINES: usize = 10;
 impl ChatBuffer {
     /// A chat in `params.cwd`, else in the editor's directory.
     pub fn new(ed: &mut Editor, params: &Value) -> Self {
-        let (tx, rx) = mpsc::channel();
         let mut view = DocView::default();
         view.follow_tail = true;
         view.padding = egui::vec2(18.0, 12.0);
         let mut prompt = TextArea::new("");
         prompt.view.padding = egui::vec2(14.0, 10.0);
-        let model = default_model(ed);
         let thinking = ed
             .var_str("agent-thinking")
             .and_then(|s| ThinkingLevel::parse(&s))
             .or_else(|| pi_setting("defaultThinkingLevel").and_then(|s| ThinkingLevel::parse(&s)))
             .unwrap_or(ThinkingLevel::Medium);
+        let init = serpis_chat::ChatInit {
+            cwd: params.get("cwd").and_then(Value::as_str).map(crate::expand_home).unwrap_or_else(|| ed.cwd.clone()),
+            model: default_model(ed),
+            thinking,
+        };
+        let main = ed.main_sender();
         let mut chat = ChatBuffer {
+            chat: serpis_chat::Chat::new(init, Arc::new(move || main.repaint())),
             entries: Vec::new(),
-            history: Vec::new(),
+            views: Vec::new(),
             prompt,
             lines: Vec::new(),
             line_entry: Vec::new(),
@@ -169,89 +192,97 @@ impl ChatBuffer {
             dirty: true,
             view,
             focus: Focus::Prompt,
-            agent: None,
-            tx,
-            rx,
-            model,
-            thinking,
-            session_id: uuid::Uuid::now_v7().to_string(),
-            cwd: params.get("cwd").and_then(Value::as_str).map(crate::expand_home).unwrap_or_else(|| ed.cwd.clone()),
-            totals: Usage::default(),
             started: None,
             prompt_history: Vec::new(),
             history_index: None,
-            title: String::new(),
-            last_error: None,
             text_w: 0.0,
             style_key: 0,
             composer_hits: Vec::new(),
-            custom_entries: Vec::new(),
             attachments: Vec::new(),
-            session: None,
-            session_failed: false,
-            system_prompt: None,
-            cache: Default::default(),
-            sent: None,
-            request_started: None,
             show_cache: (true, true),
-            entry_ids: Vec::new(),
-            compacting: None,
-            compactions: 0,
-            overflow_retried: false,
         };
-        if chat.model.is_none() {
-            chat.entries.push(Entry::Info {
-                text: "No model configured. Run `chat-select-model` (C-c C-m) — models come from your pi/serpis models.json, auth.json and API key environment variables.".into(),
-                face: Face::Warning,
-            });
-        }
+        chat.sync();
         chat
     }
 
-    pub fn running(&self) -> bool {
-        self.agent.is_some()
+    /// Show what changed in the chat since the last time.
+    fn sync(&mut self) {
+        if let Some(s) = self.chat.take_splice() {
+            self.apply_splice(s);
+        }
+        match (self.chat.running(), self.started) {
+            (true, None) => self.started = Some(Instant::now()),
+            (false, Some(_)) => self.started = None,
+            _ => {}
+        }
     }
 
-    pub fn abort(&mut self) {
-        if let Some(a) = &self.agent {
-            a.abort();
+    /// Run `f` on the chat with this editor as its host, then show what it changed.
+    fn with_host<R>(&mut self, ed: &mut Editor, f: impl FnOnce(&mut serpis_chat::Chat, &mut EditorHost) -> R) -> R {
+        let r = f(&mut self.chat, &mut EditorHost(ed));
+        self.sync();
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
         }
-        if let Some(c) = &self.compacting {
-            c.cancel();
-        }
+        r
     }
 
-    pub fn clear(&mut self) {
-        self.abort();
-        self.entries.clear();
-        self.history.clear();
-        self.totals = Usage::default();
-        self.session_id = uuid::Uuid::now_v7().to_string();
-        self.title.clear();
-        self.last_error = None;
-        self.session = None;
-        self.system_prompt = None;
-        self.cache = Default::default();
-        self.entry_ids.clear();
-        self.compactions = 0;
-        self.custom_entries.clear();
+    /// Show a transcript splice. Entries that stay the same thing (the same tool call, the
+    /// same response) keep how they were folded here.
+    pub fn apply_splice(&mut self, s: serpis_proto::Splice) {
+        let from = s.from.min(self.entries.len());
+        let now = Instant::now();
+        let mut views: Vec<View> = s.entries.iter().map(|e| View::of(e, now)).collect();
+        for (i, v) in views.iter_mut().enumerate() {
+            let (Some(old), Some(was)) = (self.entries.get(from + i), self.views.get(from + i)) else { break };
+            match (&s.entries[i], old) {
+                (Entry::Tool { id, .. }, Entry::Tool { id: oid, .. }) if id == oid => {
+                    v.expanded = was.expanded;
+                    // The same running call keeps its clock (no jitter from splice to splice).
+                    if v.started.is_some() && was.started.is_some() {
+                        v.started = was.started;
+                    }
+                }
+                (Entry::Assistant { .. }, Entry::Assistant { .. }) => v.thinking = was.thinking,
+                _ => {}
+            }
+        }
+        self.entries.truncate(from);
+        self.views.truncate(from);
+        self.entries.extend(s.entries);
+        self.views.extend(views);
         self.dirty = true;
     }
 
+    /// The transcript as this window has it, for comparing with the chat's.
+    pub fn shown(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn running(&self) -> bool {
+        self.chat.running()
+    }
+
+    pub fn abort(&mut self) {
+        self.chat.abort();
+    }
+
+    pub fn clear(&mut self) {
+        self.chat.clear();
+        self.sync();
+    }
+
     pub fn set_model(&mut self, m: Model) {
-        self.thinking = clamp_thinking_level(&m, self.thinking);
-        self.model = Some(m);
+        self.chat.set_model(m);
         self.dirty = true;
     }
 
     pub fn cycle_thinking(&mut self) {
-        let levels = self.model.as_ref().map(supported_thinking_levels).unwrap_or_else(|| ThinkingLevel::ALL.to_vec());
-        let i = levels.iter().position(|l| *l == self.thinking).map(|i| (i + 1) % levels.len()).unwrap_or(0);
-        self.thinking = levels[i];
+        self.chat.cycle_thinking();
     }
 
     pub fn set_thinking(&mut self, level: ThinkingLevel) {
-        self.thinking = self.model.as_ref().map(|m| clamp_thinking_level(m, level)).unwrap_or(level);
+        self.chat.set_thinking(level);
         self.dirty = true;
     }
 
@@ -271,278 +302,32 @@ impl ChatBuffer {
         }
     }
 
-    /// Submit text as a user message (also used by Lua `serpis.agent.prompt`). Returns false
-    /// when a `before-prompt` hook refused it (`{block = "reason"}`).
+    /// Submit text as a user message (also used by Lua `serpis.agent.prompt`), with the images
+    /// waiting in the composer. Returns false when it was refused (a `before-prompt` hook's
+    /// `{block = "reason"}`, no model, a compaction running); the images stay attached then.
     pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) -> bool {
-        let model_spec = self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
-        let payload = serde_json::json!({
-            "buffer": ed.this_buffer().map(crate::editor::buffer_id_to_u64),
-            "text": text,
-            "model": model_spec,
-            "running": self.running(),
-        });
-        if let Some(reason) = ed.run_hook("before-prompt", &payload).iter().find_map(|r| r.get("block").map(|b| b.as_str().unwrap_or("blocked").to_string())) {
-            ed.warn(reason);
-            return false;
+        let images: Vec<serpis_proto::Image> = self.attachments.iter().map(|a| serpis_proto::Image { mime: a.encoded.mime.clone(), data: a.encoded.data.to_string() }).collect();
+        let ok = self.with_host(ed, |c, h| c.submit(h, text, images, follow_up, None)).is_ok();
+        if ok {
+            self.attachments.clear();
+            self.view.follow_tail = true;
         }
-        if self.compacting.is_some() {
-            ed.message("The chat is compacting its history: send again when it's done");
-            return false;
-        }
-        if !self.attachments.is_empty()
-            && let Some(m) = self.model.as_ref().filter(|m| !m.input.iter().any(|i| i == "image"))
-        {
-            ed.error(format!("{} doesn't take images (chat-select-model, or remove the attachments)", m.id));
-            return false;
-        }
-        if self.title.is_empty() {
-            self.title = if text.is_empty() { "Image".into() } else { title_from(&text) };
-        }
-        let mut content = Vec::new();
-        if !text.is_empty() {
-            content.push(UserContent::Text { text: text.clone() });
-        }
-        let attachments = std::mem::take(&mut self.attachments);
-        let images: Vec<crate::images::ImageRef> = attachments.iter().map(|a| a.image).collect();
-        for a in attachments {
-            content.push(UserContent::Image { data: a.encoded.data.to_string(), mime_type: a.encoded.mime });
-        }
-        let msg = Message::User { content, timestamp: serpis_ai::now_ms() };
-        if let Some(agent) = &self.agent {
-            if follow_up {
-                agent.follow_up(msg);
-            } else {
-                agent.steer(msg);
-            }
-            self.entries.push(Entry::User { text, queued: true, images });
-            self.dirty = true;
-            return true;
-        }
-        let Some(cfg) = self.agent_config(ed) else { return false };
-        if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
-            if cache_warning_applies(ed, "expired", cost) {
-                ed.message(format!(
-                    "The prompt cache expired {} ago: this message re-caches {} tokens ({})",
-                    crate::cache_watch::fmt_duration(ago),
-                    fmt_tokens(tokens),
-                    crate::cache_watch::fmt_cost(cost)
-                ));
-            }
-        }
-        self.start_agent(ed, cfg, vec![msg]);
-        true
+        ok
     }
 
-    /// What this chat's requests are sent with (model, tools, system prompt, options), also
-    /// noted for the cache bookkeeping. None (with an error shown) without a model.
-    fn agent_config(&mut self, ed: &mut Editor) -> Option<AgentConfig> {
-        let Some(model) = self.model.clone() else {
-            ed.error("No model selected (chat-select-model)");
-            return None;
-        };
-        if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
-            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd, &self.session_id));
-        }
-        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
-        self.record(ed, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
-        let tools = agent_tools(ed);
-        let system_prompt = self.system_prompt_for(ed, &tools);
-        let native = ed.var("agent-native-web-search").and_then(Value::as_bool).unwrap_or(true);
-        let cache_retention = model.cache_retention(cache_retention(ed, &model.provider));
-        self.sent = Some(crate::cache_watch::Sent {
-            model: format!("{}/{}", model.provider, model.id),
-            thinking: self.thinking.as_str().to_string(),
-            tools: tools.iter().map(|t| crate::cache_watch::declaration_key(&t.declaration())).collect(),
-            prompt: prompt_hash(&system_prompt),
-            retention: cache_retention,
-            compactions: self.compactions,
-        });
-        Some(AgentConfig {
-            api_key: ed.registry.api_key(&model.provider),
-            headers: ed.registry.provider_headers(&model.provider),
-            model,
-            reasoning: self.thinking,
-            tools,
-            system_prompt,
-            session_id: self.session_id.clone(),
-            cwd: self.cwd.clone(),
-            native_web_search: native,
-            max_tokens: None,
-            cache_retention,
-            hooks: Some(Arc::new(EditorToolHooks { main: ed.main_sender(), buffer: ed.this_buffer().map(crate::editor::buffer_id_to_u64) })),
-            sequential_tools: false,
-        })
-    }
-
-    /// Run the agent on the history plus `prompts` (none: continue, e.g. after compacting).
-    fn start_agent(&mut self, ed: &mut Editor, cfg: AgentConfig, prompts: Vec<Message>) {
-        let tx = self.tx.clone();
-        let repaint = ed.main_sender();
-        let emit: serpis_agent::EmitFn = Arc::new(move |ev| {
-            let _ = tx.send(ev);
-            repaint.repaint();
-        });
-        let _guard = ed.rt.enter();
-        self.last_error = None;
-        self.agent = Some(serpis_agent::run(self.history.clone(), prompts, cfg, emit));
-        self.started = Some(Instant::now());
-        self.view.follow_tail = true;
-        if let Some(id) = ed.this_buffer() {
-            self.publish(ed, id);
-        }
-    }
-
-    /// Replace the messages before a cut point with a summary (chat-compact, or automatically
-    /// near the context window). The summary is asked for in the conversation itself, so the
-    /// request reads the prompt cache; see `serpis_agent::compaction`.
+    /// Replace the messages before a cut point with a summary (chat-compact).
     pub fn compact(&mut self, ed: &mut Editor, reason: CompactReason, instructions: Option<String>) {
-        use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, summary_request};
-        if self.running() || self.compacting.is_some() {
-            if reason == CompactReason::Manual {
-                ed.message("Wait for the agent to finish before compacting");
-            }
-            return;
-        }
-        let keep = ed.var("chat-compact-keep-tokens").and_then(Value::as_u64).unwrap_or(20_000);
-        let Some(cut) = cut_point(&self.history, keep) else {
-            if reason == CompactReason::Manual {
-                ed.message("Nothing to compact yet: the conversation is within chat-compact-keep-tokens");
-            }
-            return;
-        };
-        let tokens = context_tokens(&self.history).unwrap_or_else(|| self.history.iter().map(estimate_tokens).sum());
-        let Some(id) = ed.this_buffer() else { return };
-        let payload = serde_json::json!({"buffer": crate::editor::buffer_id_to_u64(id), "reason": reason.word(), "tokens": tokens, "messages": cut});
-        for r in ed.run_hook("before-compact", &payload) {
-            match r {
-                Value::Bool(false) => {
-                    ed.message("Compaction cancelled by a before-compact hook");
-                    return;
-                }
-                Value::Object(o) if o.get("summary").is_some_and(Value::is_string) => {
-                    let summary = o["summary"].as_str().unwrap_or_default().to_string();
-                    self.apply_compaction(ed, summary, cut, tokens, None);
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let Some(mut cfg) = self.agent_config(ed) else { return };
-        let reserve = ed.var("chat-compact-reserve-tokens").and_then(Value::as_u64).unwrap_or(16_384);
-        cfg.max_tokens = Some((reserve * 4 / 5).min(cfg.model.max_tokens).max(1024));
-        let custom = instructions.or_else(|| ed.var_str("chat-compact-instructions"));
-        // The whole conversation extends the last request (every cache serves it); after an
-        // overflow only the part before the cut fits.
-        let msgs = summary_request(&self.history, cut, reason != CompactReason::Overflow, custom.as_deref());
-        let cancel = serpis_ai::CancellationToken::new();
-        self.compacting = Some(cancel.clone());
-        self.entries.push(Entry::Info { text: format!("Compacting: summarizing {cut} earlier messages…"), face: Face::Meta });
-        self.dirty = true;
-        self.publish(ed, id);
-        let main = ed.main_sender();
-        ed.rt.spawn(async move {
-            let a = serpis_agent::complete(&cfg, msgs, cancel).await;
-            main.send(move |ed| {
-                ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.finish_compaction(ed, a, cut, tokens, reason));
-            });
-        });
+        self.with_host(ed, |c, h| c.compact(h, reason, instructions));
     }
 
-    fn finish_compaction(&mut self, ed: &mut Editor, a: AssistantMessage, cut: usize, tokens: u64, reason: CompactReason) {
-        self.compacting = None;
-        add_usage(&mut self.totals, &a.usage);
-        let summary = a.text().trim().to_string();
-        let failure = match a.stop_reason {
-            StopReason::Aborted => Some("stopped".to_string()),
-            StopReason::Error => Some(a.error_message.clone().unwrap_or_else(|| "the request failed".into())),
-            StopReason::Length => Some("the summary was cut off (raise chat-compact-reserve-tokens)".into()),
-            _ if a.tool_calls().next().is_some() => Some("the model called a tool instead of summarizing".into()),
-            _ if summary.is_empty() => Some("the model returned no summary".into()),
-            _ => None,
-        };
-        if let Some(f) = failure {
-            self.entries.push(Entry::Info { text: format!("Compaction failed: {f}"), face: Face::Error });
-            self.dirty = true;
-            if let Some(id) = ed.this_buffer() {
-                self.publish(ed, id);
-            }
-            return;
-        }
-        self.apply_compaction(ed, summary, cut, tokens, Some(&a.usage));
-        if reason == CompactReason::Overflow {
-            // The turn that overflowed runs again on the compacted conversation.
-            if let Some(cfg) = self.agent_config(ed) {
-                self.start_agent(ed, cfg, Vec::new());
-            }
-        }
-    }
-
-    fn apply_compaction(&mut self, ed: &mut Editor, summary: String, cut: usize, tokens: u64, usage: Option<&Usage>) {
-        if let Some(first_kept) = self.entry_ids.get(cut).cloned().flatten() {
-            self.record(ed, |w| w.compaction(&summary, &first_kept, tokens).map(|_| ()));
-        }
-        let mut history = vec![serpis_agent::compaction::summary_message(&summary)];
-        history.extend(self.history.drain(cut..));
-        self.history = history;
-        let mut ids = vec![None];
-        ids.extend(self.entry_ids.drain(cut.min(self.entry_ids.len())..));
-        self.entry_ids = ids;
-        self.compactions += 1;
-        let summary_tokens = serpis_agent::compaction::estimate_tokens(&self.history[0]);
-        let mut text = format!("Compacted {cut} earlier messages ({} tokens of context) into a {}-token summary.", fmt_tokens(tokens), fmt_tokens(summary_tokens));
-        if let Some(u) = usage {
-            text.push_str(&format!(" The summary request read {} tokens from the prompt cache ({}).", fmt_tokens(u.cache_read), crate::cache_watch::fmt_cost(u.cost.total).trim_start_matches('~')));
-        }
-        self.entries.push(Entry::Info { text, face: Face::Meta });
-        self.dirty = true;
-        let id = ed.this_buffer();
-        let payload = serde_json::json!({"buffer": id.map(crate::editor::buffer_id_to_u64), "summary": summary, "tokens": tokens, "messages": cut, "cache_read": usage.map(|u| u.cache_read)});
-        ed.run_hook("chat-compacted", &payload);
-        if let Some(id) = id {
-            self.publish(ed, id);
-        }
-    }
-
-    /// After a run: compact when the context nears the window (chat-compact-auto), or when the
-    /// run failed on a context overflow, then retry it once.
-    fn compact_if_needed(&mut self, ed: &mut Editor) {
-        if !ed.var("chat-compact-auto").and_then(Value::as_bool).unwrap_or(true) {
-            return;
-        }
-        let Some(window) = self.model.as_ref().map(|m| m.context_window) else { return };
-        let last = self.history.iter().rev().find_map(|m| match m {
-            Message::Assistant(a) => Some(a.clone()),
-            _ => None,
-        });
-        if let Some(a) = last.filter(|a| serpis_ai::is_context_overflow(a, Some(window))) {
-            if a.stop_reason == StopReason::Error && !self.overflow_retried {
-                self.overflow_retried = true;
-                return self.compact(ed, CompactReason::Overflow, None);
-            }
-        }
-        self.overflow_retried = false;
-        let reserve = ed.var("chat-compact-reserve-tokens").and_then(Value::as_u64).unwrap_or(16_384);
-        if serpis_agent::compaction::context_tokens(&self.history).is_some_and(|t| serpis_agent::compaction::should_compact(t, window, reserve)) {
-            self.compact(ed, CompactReason::Threshold, None);
-        }
-    }
-
-    /// Context the conversation fills: the last response's tokens (what the next request sends,
-    /// roughly), and the model's window. None before any response.
     pub fn context(&self) -> (Option<u64>, u64) {
-        let used = self.history.iter().rev().find_map(|m| match m {
-            Message::Assistant(a) if !matches!(a.stop_reason, StopReason::Aborted | StopReason::Error) => {
-                Some(a.usage.input + a.usage.cache_read + a.usage.cache_write + a.usage.output)
-            }
-            _ => None,
-        });
-        (used, self.model.as_ref().map(|m| m.context_window).unwrap_or(0))
+        self.chat.context()
     }
 
     /// `↑12k ↓3.4k R1.2M W40k $1.234 45.2%/200k`, as pi's footer: the session's input, output,
     /// cache reads and writes, cost, then context used of the window.
     pub fn usage_label(&self) -> String {
-        let u = &self.totals;
+        let u = &self.chat.totals;
         let mut parts = vec![format!("↑{}", fmt_tokens(u.input)), format!("↓{}", fmt_tokens(u.output))];
         if u.cache_read > 0 {
             parts.push(format!("R{}", fmt_tokens(u.cache_read)));
@@ -563,157 +348,13 @@ impl ChatBuffer {
         self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 
-    /// The system prompt to send: the one this chat was started with, unless its tools changed
-    /// (that misses the cache anyway, so the prompt catches up for free) or `agent-live-context`
-    /// asks for a fresh one every time. Re-reading AGENTS.md / CLAUDE.md and the prompt vars on
-    /// every message would rewrite the whole cached conversation whenever one of them changed.
-    fn system_prompt_for(&mut self, ed: &mut Editor, tools: &[serpis_agent::ToolRef]) -> String {
-        let names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
-        let live = ed.var("agent-live-context").and_then(Value::as_bool).unwrap_or(false);
-        if let Some((n, p)) = &self.system_prompt {
-            if *n == names && !live {
-                return p.clone();
-            }
-        }
-        let prompt = self.build_system_prompt(ed, tools);
-        // Saved with the session, so a resumed chat can send the same prompt (and read its cache).
-        if self.system_prompt.as_ref().is_none_or(|(_, p)| *p != prompt) {
-            self.append_entry(ed, SYSTEM_PROMPT_ENTRY, serde_json::json!({"prompt": prompt, "tools": names}));
-        }
-        self.system_prompt = Some((names, prompt.clone()));
-        prompt
-    }
-
-    /// The system prompt as the project's instructions and settings make it now.
-    fn build_system_prompt(&self, ed: &Editor, tools: &[serpis_agent::ToolRef]) -> String {
-        let agent_dir = ed.registry.paths().agent_dir.clone();
-        let mut opts = serpis_agent::system_prompt::PromptOptions {
-            context_files: serpis_agent::system_prompt::load_context_files(&self.cwd, &agent_dir),
-            append: ed.var_str("agent-append-system-prompt"),
-            ..Default::default()
-        };
-        if let Some(Value::Array(g)) = ed.var("agent-guidelines") {
-            opts.guidelines = g.iter().filter_map(Value::as_str).map(str::to_string).collect();
-        }
-        serpis_agent::system_prompt::build_system_prompt(tools, &self.cwd, &opts)
-    }
-
-    /// On resume: keep the system prompt the session was sent with while its cache can still
-    /// be warm (chat-resume-system-prompt), say so when the instructions changed since
-    /// (chat-resume-system-prompt-notice), and carry the cache state on from the last response.
-    fn resume_system_prompt(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
-        use crate::cache_watch::{keep_prompt_on_resume, ttl};
-        let saved = l.entries.iter().rev().find(|(k, _)| k == SYSTEM_PROMPT_ENTRY).and_then(|(_, d)| {
-            let names: Vec<String> = d["tools"].as_array()?.iter().filter_map(Value::as_str).map(str::to_string).collect();
-            Some((names, d["prompt"].as_str()?.to_string()))
-        });
-        let last = l.messages.iter().rev().find_map(|m| match m {
-            Message::Assistant(a) if a.usage.input + a.usage.cache_read + a.usage.cache_write > 0 => Some(a),
-            _ => None,
-        });
-        let (Some((names, prompt)), Some(last), Some(model)) = (saved, last.cloned(), self.model.clone()) else { return };
-        let age = Duration::from_millis(serpis_ai::now_ms().saturating_sub(last.timestamp));
-        let retention = model.cache_retention(cache_retention(ed, &model.provider));
-        let mode = ed.var_str("chat-resume-system-prompt").unwrap_or_else(|| "warm".into());
-        if !keep_prompt_on_resume(&mode, age, ttl(retention)) {
-            return;
-        }
-        self.system_prompt = Some((names.clone(), prompt.clone()));
-        // Chats are restored while serpis starts, before extensions register their tools: compare
-        // tools and instructions once that is done.
-        let Some(id) = ed.this_buffer() else { return };
-        ed.defer(move |ed| {
-            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.finish_resume(ed, names, prompt, last, model, retention, age));
-        });
-    }
-
-    fn finish_resume(&mut self, ed: &mut Editor, names: Vec<String>, prompt: String, last: AssistantMessage, model: Model, retention: CacheRetention, age: Duration) {
-        use crate::cache_watch::{Sent, declaration_key, ttl};
-        let tools = agent_tools(ed);
-        let current: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
-        // With other tools the next request misses anyway, and the prompt is rebuilt for them.
-        if current == names {
-            let changed = self.build_system_prompt(ed, &tools) != prompt;
-            if changed && ed.var("chat-resume-system-prompt-notice").and_then(Value::as_bool).unwrap_or(true) {
-                let left = ttl(retention).saturating_sub(age);
-                self.entries.push(Entry::Info {
-                    text: format!(
-                        "Kept the system prompt this chat was sent with, so its prompt cache (warm for about {} more) can be read. AGENTS.md / CLAUDE.md or the prompt settings changed since: chat-refresh-context picks them up and rewrites the cache once.",
-                        crate::cache_watch::fmt_duration(left)
-                    ),
-                    face: Face::MetaWarn,
-                });
-            }
-        }
-        let sent = Sent {
-            model: format!("{}/{}", model.provider, model.id),
-            thinking: self.thinking.as_str().to_string(),
-            tools: tools.iter().map(|t| declaration_key(&t.declaration())).collect(),
-            prompt: prompt_hash(&prompt),
-            retention,
-            compactions: self.compactions,
-        };
-        self.cache.resume(sent, &model, &last.usage, last.upstream.clone(), age);
-        self.dirty = true;
-        if let Some(id) = ed.this_buffer() {
-            self.publish(ed, id);
-        }
-    }
-
     /// Rebuild the system prompt with the next message (AGENTS.md / CLAUDE.md, prompt vars).
     pub fn refresh_context(&mut self) {
-        self.system_prompt = None;
+        self.chat.refresh_context();
     }
 
-    /// Account for a response's cache use; a miss is announced (chat-cache-miss-notice) and
-    /// passed to the `cache-miss` hook.
-    fn observe_cache(&mut self, ed: &mut Editor, a: &AssistantMessage) -> Option<crate::cache_watch::Hit> {
-        let (sent, model) = (self.sent.clone()?, self.model.clone()?);
-        let started = self.request_started.take().unwrap_or_else(Instant::now);
-        let (hit, miss) = self.cache.observe(sent, &model, &a.usage, a.upstream.clone(), started, Instant::now());
-        if let Some(m) = miss {
-            let payload = serde_json::json!({
-                "buffer": ed.this_buffer().map(crate::editor::buffer_id_to_u64),
-                "cause": m.cause.word(),
-                "text": m.cause.describe(),
-                "tokens": m.tokens,
-                "cost": m.cost,
-            });
-            ed.run_hook("cache-miss", &payload);
-            match ed.var_str("chat-cache-miss-notice").as_deref().unwrap_or("inline") {
-                "off" => {}
-                "message" => ed.warn(m.notice()),
-                _ => self.entries.push(Entry::Info { text: m.notice(), face: Face::MetaWarn }),
-            }
-        }
-        Some(hit)
-    }
-
-    /// The cache as scripts see it (`serpis.chat.cache`).
     pub fn cache_json(&self) -> Value {
-        let now = Instant::now();
-        let (state, left) = match self.cache.state(now) {
-            Some(crate::cache_watch::State::Warm(d)) => (Some("warm"), d.as_secs()),
-            Some(crate::cache_watch::State::Cold) => (Some("cold"), 0),
-            None => (None, 0),
-        };
-        let misses: Vec<Value> = self
-            .cache
-            .misses
-            .iter()
-            .map(|m| serde_json::json!({"cause": m.cause.word(), "text": m.cause.describe(), "tokens": m.tokens, "cost": m.cost}))
-            .collect();
-        serde_json::json!({"hit_rate": self.cache.hit_rate(), "state": state, "left": left, "misses": misses})
-    }
-
-    /// The header's cache entry: "cache 94% · warm 41m" (None before anything was cached).
-    fn cache_status(&self) -> Option<String> {
-        let state = self.cache.state(Instant::now())?;
-        let rate = self.cache.hit_rate().map(|r| format!("cache {:.0}%", r * 100.0)).unwrap_or_else(|| "cache".into());
-        Some(match state {
-            crate::cache_watch::State::Warm(left) => format!("{rate} · warm {}", crate::cache_watch::fmt_duration(left)),
-            crate::cache_watch::State::Cold => format!("{rate} · cold"),
-        })
+        self.chat.cache_json()
     }
 
     /// Attach an image file to the next message.
@@ -727,21 +368,7 @@ impl ChatBuffer {
 
     /// This chat as seen from outside (`Editor::chats`, `serpis.chat`).
     pub fn info(&self) -> crate::chat_api::ChatInfo {
-        crate::chat_api::ChatInfo {
-            model: self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
-            thinking: self.thinking.as_str().to_string(),
-            running: self.running(),
-            compacting: self.compacting.is_some(),
-            usage: self.totals.clone(),
-            title: self.title.clone(),
-            cwd: self.cwd.to_string_lossy().into_owned(),
-            session: self.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),
-            session_id: self.session_id.clone(),
-            entries: self.custom_entries.clone(),
-            agent: self.agent.clone(),
-            context: self.context(),
-            cache: self.cache_json(),
-        }
+        info_of(&self.chat)
     }
 
     pub fn publish(&self, ed: &mut Editor, id: crate::BufferId) {
@@ -750,220 +377,23 @@ impl ChatBuffer {
 
     /// Record a custom entry in the session (created if needed) and keep it for resume.
     pub fn append_entry(&mut self, ed: &mut Editor, kind: &str, data: Value) {
-        if self.session.is_none() && ed.var("session-save").and_then(Value::as_bool).unwrap_or(true) {
-            self.session = Some(crate::session::SessionWriter::new(&crate::session_ui::session_root(ed), &self.cwd, &self.session_id));
-        }
-        let fields = serde_json::json!({"customType": kind, "data": data});
-        self.record(ed, |w| w.append("custom", fields).map(|_| ()));
-        self.custom_entries.push((kind.to_string(), data));
+        self.with_host(ed, |c, h| c.append_entry(h, kind, data));
     }
 
-    fn tool_entry(&mut self, id: &str) -> Option<&mut Entry> {
-        self.entries.iter_mut().rev().find(|e| matches!(e, Entry::Tool { id: i, .. } if i == id))
+    /// Name the session (`session_info`), e.g. after `buffer-set-title`.
+    pub fn set_session_name(&mut self, ed: &mut Editor, name: &str) {
+        self.with_host(ed, |c, h| c.set_session_name(h, name));
     }
 
-    fn last_assistant(&mut self) -> Option<&mut Entry> {
-        match self.entries.last_mut() {
-            Some(e @ Entry::Assistant { .. }) => Some(e),
-            _ => None,
+    /// Show a saved conversation and continue it: later messages append to the same file.
+    pub fn restore(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
+        self.with_host(ed, |c, h| c.restore(h, l));
+        for m in &l.messages {
+            if let Message::User { content, .. } = m {
+                self.prompt_history.push(serpis_chat::user_parts(content).0);
+            }
         }
-    }
-
-    fn ensure_text_segment(&mut self) {
-        if !matches!(self.entries.last(), Some(Entry::Assistant { .. })) {
-            let model = self.model.as_ref().map(|m| m.id.clone()).unwrap_or_default();
-            self.entries.push(Entry::Assistant {
-                blocks: Vec::new(),
-                model,
-                streaming: true,
-                continuation: true,
-                usage: None,
-                error: None,
-                thinking: None,
-                cache: None,
-            });
-        }
-    }
-
-    fn apply(&mut self, ev: AgentEvent, ed: &mut Editor) {
-        self.dirty = true;
-        match ev {
-            AgentEvent::MessageStart(Message::User { content, .. }) => {
-                let (text, images) = user_parts(&content);
-                // A queued (steering) message is already shown; un-queue it.
-                if let Some(Entry::User { queued, .. }) = self.entries.iter_mut().find(|e| matches!(e, Entry::User { text: t, queued: true, .. } if *t == text)) {
-                    *queued = false;
-                    return;
-                }
-                self.entries.push(Entry::User { text, queued: false, images });
-            }
-            AgentEvent::MessageStart(Message::Assistant(m)) => {
-                // The agent sends a request right before the response starts.
-                self.request_started = Some(Instant::now());
-                self.entries.push(Entry::Assistant {
-                    blocks: Vec::new(),
-                    model: m.model,
-                    streaming: true,
-                    continuation: false,
-                    usage: None,
-                    error: None,
-                    thinking: None,
-                    cache: None,
-                })
-            }
-            AgentEvent::MessageStart(Message::ToolResult(_)) => {}
-            AgentEvent::MessageDelta(d) => match d {
-                StreamEvent::TextStart { .. } => {
-                    self.ensure_text_segment();
-                    if let Some(Entry::Assistant { blocks, .. }) = self.last_assistant() {
-                        blocks.push(AssistantContent::Text {
-                            text: String::new(),
-                            text_signature: None,
-                        });
-                    }
-                }
-                StreamEvent::TextDelta { delta, .. } => {
-                    if let Some(Entry::Assistant { blocks, .. }) = self.last_assistant() {
-                        if let Some(AssistantContent::Text { text, .. }) = blocks.last_mut() {
-                            text.push_str(&delta);
-                        }
-                    }
-                }
-                StreamEvent::ThinkingStart { .. } => {
-                    self.ensure_text_segment();
-                    if let Some(Entry::Assistant { blocks, .. }) = self.last_assistant() {
-                        blocks.push(AssistantContent::Thinking {
-                            thinking: String::new(),
-                            thinking_signature: None,
-                            redacted: false,
-                        });
-                    }
-                }
-                StreamEvent::ThinkingDelta { delta, .. } => {
-                    if let Some(Entry::Assistant { blocks, .. }) = self.last_assistant() {
-                        if let Some(AssistantContent::Thinking { thinking, .. }) = blocks.last_mut() {
-                            thinking.push_str(&delta);
-                        }
-                    }
-                }
-                StreamEvent::ToolCallStart { id, name, .. } => self.entries.push(Entry::Tool {
-                    id,
-                    name,
-                    args: Value::Object(Default::default()),
-                    partial: None,
-                    result: None,
-                    expanded: None,
-                    started: None,
-                    elapsed: None,
-                }),
-                StreamEvent::ToolCallDelta { index: _, arguments, .. } => {
-                    if let Some(Entry::Tool { args, .. }) = self.entries.iter_mut().rev().find(|e| matches!(e, Entry::Tool { result: None, started: None, .. })) {
-                        *args = arguments;
-                    }
-                }
-                StreamEvent::ToolCallEnd { tool_call, .. } => {
-                    if let Some(Entry::Tool { args, .. }) = self.tool_entry(&tool_call.id) {
-                        *args = tool_call.arguments;
-                    }
-                }
-                _ => {}
-            },
-            AgentEvent::MessageEnd(m) => {
-                if let Message::Assistant(a) = &m {
-                    add_usage(&mut self.totals, &a.usage);
-                    let observed = self.observe_cache(ed, a);
-                    let failed = matches!(a.stop_reason, StopReason::Error | StopReason::Aborted);
-                    for e in self.entries.iter_mut().rev() {
-                        if let Entry::Assistant { streaming, usage, error, continuation, cache, .. } = e {
-                            *streaming = false;
-                            if !*continuation {
-                                *usage = Some(a.usage.clone());
-                                *cache = observed;
-                                if failed {
-                                    let msg = a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason));
-                                    if a.stop_reason == StopReason::Error {
-                                        self.last_error = Some(msg.clone());
-                                    }
-                                    *error = Some(msg);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    let id = ed.this_buffer();
-                    if let Some(id) = id {
-                        self.publish(ed, id);
-                    }
-                    let payload = serde_json::json!({
-                        "buffer": id.map(crate::editor::buffer_id_to_u64),
-                        "text": a.text(),
-                        "stopReason": format!("{:?}", a.stop_reason),
-                        "model": format!("{}/{}", a.provider, a.model),
-                        "upstream": a.upstream,
-                        "usage": crate::chat_api::usage_json(&a.usage),
-                        "total": crate::chat_api::usage_json(&self.totals),
-                    });
-                    ed.run_hook("assistant-message", &payload);
-                }
-                let mut entry = None;
-                self.record(ed, |w| {
-                    entry = Some(w.message(&m)?);
-                    Ok(())
-                });
-                self.history.push(m);
-                self.entry_ids.push(entry);
-            }
-            AgentEvent::ToolStart { id, name, args } => {
-                if self.tool_entry(&id).is_none() {
-                    self.entries.push(Entry::Tool {
-                        id: id.clone(),
-                        name,
-                        args: args.clone(),
-                        partial: None,
-                        result: None,
-                        expanded: None,
-                        started: None,
-                        elapsed: None,
-                    });
-                }
-                if let Some(Entry::Tool { started, args: a, .. }) = self.tool_entry(&id) {
-                    *started = Some(Instant::now());
-                    *a = args;
-                }
-            }
-            AgentEvent::ToolUpdate { id, partial } => {
-                if let Some(Entry::Tool { partial: p, .. }) = self.tool_entry(&id) {
-                    *p = Some(partial.text_content());
-                }
-            }
-            AgentEvent::ToolEnd { id, result, .. } => {
-                let payload = serde_json::json!({"buffer": ed.this_buffer().map(crate::editor::buffer_id_to_u64), "name": result.tool_name, "isError": result.is_error});
-                if let Some(Entry::Tool { result: r, started, elapsed, .. }) = self.tool_entry(&id) {
-                    *elapsed = started.map(|s| s.elapsed());
-                    *r = Some(result);
-                }
-                ed.run_hook("tool-finished", &payload);
-            }
-            AgentEvent::AgentEnd { error } => {
-                self.agent = None;
-                if let Some(e) = error {
-                    self.last_error = Some(e.clone());
-                    self.entries.push(Entry::Info { text: e, face: Face::Error });
-                }
-                for e in &mut self.entries {
-                    if let Entry::User { queued, .. } = e {
-                        *queued = false;
-                    }
-                }
-                let id = ed.this_buffer();
-                if let Some(id) = id {
-                    self.publish(ed, id);
-                }
-                ed.run_hook("agent-finished", &serde_json::json!({"buffer": id.map(crate::editor::buffer_id_to_u64), "total": crate::chat_api::usage_json(&self.totals)}));
-                self.compact_if_needed(ed);
-            }
-            AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
-        }
+        self.view.follow_tail = true;
     }
 
     // ------------------------------------------------------------------
@@ -983,10 +413,11 @@ impl ChatBuffer {
             owner.push(e);
         };
         let mut prev_tool = false;
-        for (ei, e) in self.entries.iter().enumerate() {
+        for (ei, (e, v)) in self.entries.iter().zip(&self.views).enumerate() {
             let is_tool = matches!(e, Entry::Tool { .. });
             match e {
-                Entry::User { text, queued, images } => {
+                Entry::User { text, queued, .. } => {
+                    let images = &v.images;
                     // A bubble on the right, as wide as its text (or its images).
                     let blk = Block::new(t.user_bg).shrink(0.82);
                     let mut lines: Vec<StyledLine> = Vec::new();
@@ -1023,7 +454,8 @@ impl ChatBuffer {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
-                Entry::Assistant { blocks, model, streaming, continuation, usage, error, thinking: fold, cache } => {
+                Entry::Assistant { blocks, model, streaming, continuation, usage, error, cache } => {
+                    let fold = &v.thinking;
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
                     if !continuation && (has_content || *streaming || error.is_some()) {
@@ -1093,13 +525,14 @@ impl ChatBuffer {
                         if u.total_tokens > 0 {
                             let mut line = StyledLine::new(format_usage(u), Face::Meta).gap(8.0 * k);
                             if let Some(h) = cache.filter(|_| self.show_cache.0) {
+                                let label = crate::cache_watch::Hit::from(h).label();
                                 line.text.push_str(" · ");
                                 let start = line.text.len();
-                                line.text.push_str(&h.label());
+                                line.text.push_str(&label);
                                 let face = match h {
-                                    crate::cache_watch::Hit::Miss => Face::MetaWarn,
-                                    crate::cache_watch::Hit::Hit(_) => Face::MetaGood,
-                                    crate::cache_watch::Hit::New => Face::Meta,
+                                    CacheHit::Miss => Face::MetaWarn,
+                                    CacheHit::Hit(_) => Face::MetaGood,
+                                    CacheHit::New => Face::Meta,
                                 };
                                 line.spans.push((start..line.text.len(), face));
                             }
@@ -1107,14 +540,19 @@ impl ChatBuffer {
                         }
                     }
                 }
-                Entry::Tool { name, args, partial, result, expanded, started, elapsed, .. } => {
+                Entry::Tool { name, args, partial, result, elapsed_ms, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
-                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), *expanded, *started, *elapsed, t, gap) {
+                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
-                Entry::Info { text, face } => {
-                    let face = if *face == Face::Dim { Face::Meta } else { *face };
+                Entry::Info { text, tone } => {
+                    let face = match tone {
+                        Tone::Meta => Face::Meta,
+                        Tone::MetaWarn => Face::MetaWarn,
+                        Tone::Warning => Face::Warning,
+                        Tone::Error => Face::Error,
+                    };
                     for (i, l) in text.lines().enumerate() {
                         push(&mut out, &mut owner, StyledLine::new(l, face).gap(if i == 0 { 12.0 * k } else { 0.0 }), Some(ei));
                     }
@@ -1137,8 +575,8 @@ impl ChatBuffer {
 
     /// Whether entry `ei`'s thinking is shown in full.
     fn thinking_full(&self, ei: usize) -> bool {
-        let Some(Entry::Assistant { blocks, streaming, thinking, .. }) = self.entries.get(ei) else { return false };
-        thinking.unwrap_or_else(|| {
+        let Some(Entry::Assistant { blocks, streaming, .. }) = self.entries.get(ei) else { return false };
+        self.views[ei].thinking.unwrap_or_else(|| {
             let lines = blocks.iter().map(|b| match b {
                 AssistantContent::Thinking { thinking, .. } => thinking.trim().lines().filter(|l| !l.trim().is_empty()).count(),
                 _ => 0,
@@ -1152,15 +590,16 @@ impl ChatBuffer {
         let Some(Some(ei)) = self.line_entry.get(line).copied() else { return false };
         if self.thinking_lines.binary_search(&line).is_ok() {
             let full = self.thinking_full(ei);
-            if let Some(Entry::Assistant { thinking, .. }) = self.entries.get_mut(ei) {
-                *thinking = Some(!full);
+            if let Some(Entry::Assistant { .. }) = self.entries.get(ei) {
+                self.views[ei].thinking = Some(!full);
                 self.dirty = true;
                 return true;
             }
         }
-        if let Some(Entry::Tool { expanded, name, result, .. }) = self.entries.get_mut(ei) {
+        if let Some(Entry::Tool { name, result, .. }) = self.entries.get(ei) {
             let default = default_expanded(name, result.as_ref());
-            *expanded = Some(!expanded.unwrap_or(default));
+            let v = &mut self.views[ei];
+            v.expanded = Some(!v.expanded.unwrap_or(default));
             self.dirty = true;
             return true;
         }
@@ -1206,153 +645,6 @@ impl ChatBuffer {
         self.lines.len()
     }
 
-    /// Write to the session file; the first failure is reported, later ones are silent.
-    fn record(&mut self, ed: &mut Editor, f: impl FnOnce(&mut crate::session::SessionWriter) -> std::io::Result<()>) {
-        let Some(w) = self.session.as_mut() else { return };
-        let existed = w.exists();
-        if let Err(e) = f(w) {
-            if !self.session_failed {
-                self.session_failed = true;
-                ed.warn(format!("session {}: {e}", w.path.display()));
-            }
-        }
-        if !existed && w.exists() {
-            // A project you have chatted in stays in the sidebar with its sessions.
-            if ed.var("project-remember").and_then(Value::as_bool).unwrap_or(true) {
-                let cwd = self.cwd.clone();
-                if let Some(root) = ed.project_root_of(&cwd) {
-                    crate::sidebar::add_project(ed, &root);
-                }
-            }
-            crate::session_ui::rescan(ed);
-        }
-    }
-
-    /// Name the session (`session_info`), e.g. after `buffer-set-title`.
-    pub fn set_session_name(&mut self, ed: &mut Editor, name: &str) {
-        if self.session.as_ref().is_some_and(|w| w.exists()) {
-            self.record(ed, |w| w.set_name(name).map(|_| ()));
-        }
-    }
-
-    /// Show a saved conversation and continue it: later messages append to the same file.
-    pub fn restore(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
-        self.abort();
-        self.entries.clear();
-        self.totals = Usage::default();
-        self.history = l.messages.clone();
-        self.entry_ids = l.message_ids.clone();
-        // Requests keep the session's id, so they route to the provider cache they warmed.
-        if !l.id.is_empty() {
-            self.session_id = l.id.clone();
-        }
-        if l.cwd.is_dir() {
-            self.cwd = l.cwd.clone();
-        }
-        if let Some((p, id)) = &l.model {
-            match ed.registry.find(p, id) {
-                Some(m) => self.set_model(m),
-                None => self.entries.push(Entry::Info { text: format!("Model {p}/{id} of this session isn't available; using the current one."), face: Face::Warning }),
-            }
-        }
-        if let Some(t) = l.thinking.as_deref().and_then(ThinkingLevel::parse) {
-            self.thinking = self.model.as_ref().map(|m| clamp_thinking_level(m, t)).unwrap_or(t);
-        }
-        for m in &l.messages {
-            match m {
-                Message::User { content, .. } => {
-                    let (text, images) = user_parts(content);
-                    self.prompt_history.push(text.clone());
-                    self.entries.push(Entry::User { text, queued: false, images });
-                }
-                Message::Assistant(a) => {
-                    add_usage(&mut self.totals, &a.usage);
-                    let failed = matches!(a.stop_reason, StopReason::Error | StopReason::Aborted);
-                    self.entries.push(Entry::Assistant {
-                        blocks: a.content.clone(),
-                        model: a.model.clone(),
-                        streaming: false,
-                        continuation: false,
-                        usage: Some(a.usage.clone()),
-                        error: failed.then(|| a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason))),
-                        thinking: None,
-                        cache: None,
-                    });
-                    for tc in a.tool_calls() {
-                        self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, expanded: None, started: None, elapsed: None });
-                    }
-                }
-                Message::ToolResult(r) => {
-                    let id = r.tool_call_id.clone();
-                    if let Some(Entry::Tool { result, .. }) = self.tool_entry(&id) {
-                        *result = Some(r.clone());
-                    }
-                }
-            }
-        }
-        self.title = l.name.clone().unwrap_or_else(|| {
-            let first = self.prompt_history.first().cloned().unwrap_or_default();
-            title_from(&first)
-        });
-        let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| crate::sidebar::fmt_age(d) + " ago").unwrap_or_default();
-        self.entries.push(Entry::Info { text: format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), face: Face::Dim });
-        self.custom_entries = l.entries.clone();
-        self.system_prompt = None;
-        self.cache = crate::cache_watch::CacheWatch::from_usages(l.messages.iter().filter_map(|m| match m {
-            Message::Assistant(a) => Some(&a.usage),
-            _ => None,
-        }));
-        self.resume_system_prompt(ed, l);
-        self.session = Some(crate::session::SessionWriter::resume(l));
-        self.session_failed = false;
-        self.last_error = None;
-        self.view.follow_tail = true;
-        self.dirty = true;
-    }
-
-    /// What the running agent is doing right now.
-    fn current_step(&self) -> String {
-        for e in self.entries.iter().rev() {
-            match e {
-                Entry::Tool { name, args, result: None, .. } => {
-                    let s = tool_summary(name, args);
-                    return if s.is_empty() { name.clone() } else { format!("{name} {s}") };
-                }
-                Entry::Assistant { blocks, streaming: true, .. } => {
-                    return match blocks.last() {
-                        Some(AssistantContent::Thinking { .. }) | None => "thinking".into(),
-                        _ => "writing".into(),
-                    };
-                }
-                Entry::Tool { .. } | Entry::Assistant { .. } => break,
-                _ => {}
-            }
-        }
-        "working".into()
-    }
-}
-
-/// A chat title from its first prompt: the first line, cut at a word near 48 characters.
-fn title_from(text: &str) -> String {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    if line.chars().count() <= 48 {
-        return line.to_string();
-    }
-    let cut: String = line.chars().take(48).collect();
-    let cut = match cut.rfind(' ') {
-        Some(i) if i > 24 => &cut[..i],
-        _ => &cut,
-    };
-    format!("{}…", cut.trim_end())
-}
-
-fn add_usage(total: &mut Usage, u: &Usage) {
-    total.input += u.input;
-    total.output += u.output;
-    total.cache_read += u.cache_read;
-    total.cache_write += u.cache_write;
-    total.total_tokens += u.total_tokens;
-    total.cost.total += u.cost.total;
 }
 
 fn short_model(id: &str) -> &str {
@@ -1367,16 +659,6 @@ pub fn fmt_duration(d: Duration, tenths: bool) -> String {
         0..=59 => format!("{s}s"),
         60..=3599 => format!("{}m {:02}s", s / 60, s % 60),
         _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
-    }
-}
-
-pub fn fmt_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
-    } else if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1e3)
-    } else {
-        n.to_string()
     }
 }
 
@@ -1783,39 +1065,6 @@ fn arg<'a>(args: &'a Value, k: &str) -> &'a str {
     args.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
-fn tool_summary(name: &str, args: &Value) -> String {
-    match name {
-        "bash" => arg(args, "command").lines().next().unwrap_or("").to_string(),
-        "read" => {
-            let mut s = arg(args, "path").to_string();
-            if let Some(o) = args.get("offset").and_then(Value::as_u64) {
-                s.push_str(&format!(":{o}"));
-            }
-            if let Some(l) = args.get("limit").and_then(Value::as_u64) {
-                s.push_str(&format!(" (+{l})"));
-            }
-            s
-        }
-        "edit" | "write" | "ls" => arg(args, "path").to_string(),
-        "grep" => format!("/{}/ {}", arg(args, "pattern"), arg(args, "path")),
-        "find" => format!("{} {}", arg(args, "pattern"), arg(args, "path")),
-        "web_search" => {
-            let mut q: Vec<String> = Vec::new();
-            if !arg(args, "query").is_empty() {
-                q.push(arg(args, "query").to_string());
-            }
-            if let Some(a) = args.get("queries").and_then(Value::as_array) {
-                q.extend(a.iter().filter_map(Value::as_str).map(str::to_string));
-            }
-            q.join(" | ")
-        }
-        _ => {
-            let s = args.to_string();
-            if s == "{}" { String::new() } else { s }
-        }
-    }
-}
-
 /// A tool call as a card: a header row (status, name, what it acts on, time), a hairline,
 /// then its output or diff.
 #[allow(clippy::too_many_arguments)]
@@ -1844,7 +1093,7 @@ fn tool_lines(
     let s0 = header.len();
     header.push_str(name);
     spans.push((s0..header.len(), Face::ToolHeader));
-    let summary = tool_summary(name, args);
+    let summary = serpis_chat::tool_summary(name, args);
     if !summary.is_empty() {
         header.push_str("  ");
         let s1 = header.len();
@@ -1982,19 +1231,6 @@ fn tool_text(r: &ToolResultMessage) -> String {
         .join("\n")
 }
 
-/// A user message's text and images (decoded into the image store).
-fn user_parts(content: &[UserContent]) -> (String, Vec<crate::images::ImageRef>) {
-    let mut text = Vec::new();
-    let mut images = Vec::new();
-    for c in content {
-        match c {
-            UserContent::Text { text: t } => text.push(t.clone()),
-            UserContent::Image { data, .. } => images.extend(crate::images::from_base64(data)),
-        }
-    }
-    (text.join("\n"), images)
-}
-
 /// An image waiting in the composer.
 #[derive(Debug, Clone)]
 pub struct Attachment {
@@ -2099,12 +1335,7 @@ impl Buffer for ChatBuffer {
     }
 
     fn poll(&mut self, ed: &mut Editor) {
-        while let Ok(ev) = self.rx.try_recv() {
-            self.apply(ev, ed);
-        }
-        if let Some(id) = ed.this_buffer() {
-            self.publish(ed, id);
-        }
+        self.with_host(ed, |c, h| c.poll(h));
         if self.running() {
             // Keep elapsed timers ticking.
             self.dirty = true;
@@ -2118,7 +1349,7 @@ impl Buffer for ChatBuffer {
             self.show_cache = show;
             self.dirty = true;
         }
-        if show.1 && matches!(self.cache.state(Instant::now()), Some(crate::cache_watch::State::Warm(_))) {
+        if show.1 && matches!(self.chat.cache.state(Instant::now()), Some(crate::cache_watch::State::Warm(_))) {
             ui.ctx().request_repaint_after(Duration::from_secs(30));
         }
         // A centered reading column; tables are laid out for its width.
@@ -2133,10 +1364,8 @@ impl Buffer for ChatBuffer {
         if ed.var_bool("chat-show-thinking") != self.show_thinking {
             // C-t (chat-toggle-thinking) shows or hides all of it, including what was folded by hand.
             self.show_thinking = !self.show_thinking;
-            for e in &mut self.entries {
-                if let Entry::Assistant { thinking, .. } = e {
-                    *thinking = None;
-                }
+            for v in &mut self.views {
+                v.thinking = None;
             }
         }
         let show_thinking = self.show_thinking as u64;
@@ -2272,12 +1501,12 @@ impl Buffer for ChatBuffer {
             crate::chrome::text(&painter, egui::pos2(tx, cy), label, small.clone(), if resp.hovered() { theme.fg } else { theme.fg_dim }, w);
             (r, resp.clicked())
         };
-        let model = self.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
+        let model = self.chat.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
         let (mr, clicked) = pill(ui, bar.left(), "model", &model, "Model (chat-select-model)", Some(theme.accent));
         if clicked {
             run = Some("chat-select-model");
         }
-        let thinking = format!("Thinking · {}", self.thinking.as_str());
+        let thinking = format!("Thinking · {}", self.chat.thinking.as_str());
         let (tr, clicked) = pill(ui, mr.right() + 2.0 * k, "thinking", &thinking, "Thinking level (chat-select-thinking)", None);
         if clicked {
             run = Some("chat-select-thinking");
@@ -2371,28 +1600,28 @@ impl Buffer for ChatBuffer {
 
     fn modeline(&self) -> Modeline {
         // The model: clicking it chooses another, as the composer's model pill does.
-        let model = self.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
+        let model = self.chat.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
         let mut status = vec![model];
         let mut status_commands = vec![Some("chat-select-model".into())];
         // The cache: clicking it lists its recent misses.
-        if let Some(c) = self.cache_status().filter(|_| self.show_cache.1) {
+        if let Some(c) = self.chat.cache_status().filter(|_| self.show_cache.1) {
             status.insert(0, c);
             status_commands.insert(0, Some("chat-cache-report".into()));
         }
-        Modeline { title: self.title.clone(), status, status_commands, busy: self.running() }
+        Modeline { title: self.chat.title.clone(), status, status_commands, busy: self.running() }
     }
 
     fn activity(&self) -> Activity {
-        if self.compacting.is_some() {
+        if self.chat.compacting() {
             return Activity::new(ActivityState::Working, "compacting");
         }
         if self.running() {
-            return Activity { since: self.started, ..Activity::new(ActivityState::Working, self.current_step()) };
+            return Activity { since: self.started, ..Activity::new(ActivityState::Working, self.chat.current_step()) };
         }
-        match &self.last_error {
+        match &self.chat.last_error {
             Some(e) => Activity::new(ActivityState::Error, e.lines().next().unwrap_or("")),
             // Idle chats say which model they talk to.
-            None => Activity::new(ActivityState::Idle, self.model.as_ref().map(|m| short_model(&m.id)).unwrap_or("no model")),
+            None => Activity::new(ActivityState::Idle, self.chat.model.as_ref().map(|m| short_model(&m.id)).unwrap_or("no model")),
         }
     }
 
@@ -2401,7 +1630,7 @@ impl Buffer for ChatBuffer {
     }
 
     fn directory(&self) -> Option<std::path::PathBuf> {
-        Some(self.cwd.clone())
+        Some(self.chat.cwd.clone())
     }
 
     fn parts(&self) -> usize {
@@ -2531,16 +1760,6 @@ impl TextSurface for ChatBuffer {
     }
 }
 
-/// The session entry holding the system prompt a chat sends.
-const SYSTEM_PROMPT_ENTRY: &str = "serpis-system-prompt";
-
-fn prompt_hash(prompt: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    prompt.hash(&mut h);
-    h.finish()
-}
-
 /// The tools a chat's agent gets: the built-in ones, then extension tools (which replace
 /// built-ins of the same name), minus agent-disabled-tools.
 fn agent_tools(ed: &Editor) -> Vec<serpis_agent::ToolRef> {
@@ -2560,28 +1779,8 @@ fn agent_tools(ed: &Editor) -> Vec<serpis_agent::ToolRef> {
 
 /// Whether to warn about `action` throwing away a cache worth `cost` dollars (cache-warn,
 /// cache-warn-actions, cache-warn-threshold).
-pub fn cache_warning_applies(ed: &Editor, action: &str, cost: f64) -> bool {
-    if ed.var_str("cache-warn").as_deref() == Some("off") {
-        return false;
-    }
-    let listed = ed.var("cache-warn-actions").and_then(Value::as_array).is_none_or(|a| a.iter().any(|x| x.as_str() == Some(action)));
-    let threshold = ed.var("cache-warn-threshold").and_then(Value::as_f64).unwrap_or(0.10);
-    listed && cost >= threshold
-}
-
-/// `agent-cache-retention` for `provider`: a level, or {"default": level, "<provider>": level}.
-fn cache_retention(ed: &Editor, provider: &str) -> serpis_ai::CacheRetention {
-    let v = ed.var("agent-cache-retention");
-    let level = match &v {
-        Some(Value::Object(o)) => o.get(provider).or_else(|| o.get("default")).and_then(Value::as_str),
-        Some(v) => v.as_str(),
-        None => None,
-    };
-    match level {
-        Some("none") => serpis_ai::CacheRetention::None,
-        Some("short") => serpis_ai::CacheRetention::Short,
-        _ => serpis_ai::CacheRetention::Long,
-    }
+pub fn cache_warning_applies(ed: &mut Editor, action: &str, cost: f64) -> bool {
+    serpis_chat::cache_warning_applies(&EditorHost(ed), action, cost)
 }
 
 #[cfg(test)]
