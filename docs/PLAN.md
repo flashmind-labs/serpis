@@ -191,6 +191,13 @@ it ships, so there is no runtime hashing of prompts.
    the key only from the environment: the test suites never touch real providers. A per-request
    debug log was dropped: sessions already keep each response's cache usage and upstream, and the
    chat flags unexplained misses itself.
+   First run (2026-10-22): Claude Haiku 5.5 (via Vertex) read everything the previous request
+   cached on every request, the 12-parallel-call step included; GPT-5 mini (via Azure) and
+   DeepSeek v3.1 accept `prompt_cache_retention: "24h"`; OpenAI reads come in 128-token blocks
+   (the chat allows for it); OpenRouter moved DeepSeek between upstreams despite the session id
+   and it still read the cache (the simulator would have predicted a miss: re-check before
+   changing its rule). Gemini was not checked: the account's zero-data-retention setting excludes
+   Google's endpoints (now reported as skipped).
 
 Deferred until usage data asks for them:
 

@@ -175,7 +175,14 @@ async fn real_providers_cache_like_the_simulator_says() {
                 a.upstream.as_deref().unwrap_or("-")
             );
             if a.stop_reason == StopReason::Error {
-                failures.push(format!("{id} {label}: rejected: {}", a.error_message.unwrap_or_default()));
+                let err = a.error_message.unwrap_or_default();
+                // OpenRouter refuses models the account's privacy settings exclude (zero data
+                // retention, data policy): that says nothing about caching.
+                if err.contains("guardrail restrictions and data policy") {
+                    println!("  skipped: the account's OpenRouter privacy settings exclude every endpoint for this model");
+                } else {
+                    failures.push(format!("{id} {label}: rejected: {err}"));
+                }
                 break;
             }
             if let Ok(p) = &predicted {
