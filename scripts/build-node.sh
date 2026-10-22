@@ -9,11 +9,13 @@
 #       zig is already a serpis build dependency) and `rustup target add` for it
 #   SERPIS_BUILD_PACKAGES="serpis-node serpis-testkit" ...   # also the mock provider (tests)
 #   scripts/build-node.sh --store [target]   # and keep it where serpis installs nodes from
-#       (~/.serpis/nodes/<target>/serpis-node, or $SERPIS_NODE_STORE)
+#       (~/.serpis/nodes/<version>/<target>/serpis-node, or $SERPIS_NODE_STORE/<target>/...);
+#       serpis does this itself the first time a machine of that system needs one
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 store=""
-if [[ "${1:-}" == "--store" ]]; then store="${SERPIS_NODE_STORE:-$HOME/.serpis/nodes}"; shift; fi
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
+if [[ "${1:-}" == "--store" ]]; then store="${SERPIS_NODE_STORE:-$HOME/.serpis/nodes/$version}"; shift; fi
 # The workspace links std dynamically for the desktop's plugins (.cargo/config.toml); the node
 # loads none. RUSTFLAGS replaces the config's flags (a --config array would add to them), and a
 # target directory of its own keeps the two kinds of build from rebuilding each other.

@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Build Serpis.app and install it to ~/Applications, with a `serpis` command in ~/.local/bin.
 # Run it again to update. Overrides: SERPIS_APP_DIR, SERPIS_BIN_DIR.
-#
-# It also builds the node serpis installs on other machines (~/.serpis/nodes): for this Mac,
-# and for Linux x86-64 and arm64 when cargo-zigbuild and their Rust targets are installed
-# (SERPIS_NODE_TARGETS overrides the list).
+
 #
 # The release binary links serpis' core (libserpis.dylib, a dylib so Rust plugins can load into
 # it) from target/ and Rust's standard library from the toolchain, by path. The bundle carries
@@ -90,21 +87,6 @@ if [ -n "\$1" ]; then cd "\$1" || exit 1; shift; fi
 nohup "$app_dir/Serpis.app/Contents/MacOS/serpis" "\$@" >/dev/null 2>&1 &
 SHIM
 chmod +x "$bin_dir/serpis"
-
-# The node for other machines: serpis installs it there on first connect (remote-deploy).
-echo "Building serpis-node for other machines…"
-"$root/scripts/build-node.sh" --store >/dev/null
-nodes=("$(rustc -vV | sed -n 's/^host: //p')")
-for t in ${SERPIS_NODE_TARGETS:-x86_64-unknown-linux-gnu.2.28 aarch64-unknown-linux-gnu.2.28}; do
-  if ! command -v cargo-zigbuild >/dev/null; then
-    echo "  skipped $t: needs cargo-zigbuild (cargo install cargo-zigbuild)"
-  elif ! rustup target list --installed | grep -qx "${t%.2.*}"; then
-    echo "  skipped $t: needs rustup target add ${t%.2.*}"
-  else
-    "$root/scripts/build-node.sh" --store "$t" >/dev/null && nodes+=("${t%.2.*}")
-  fi
-done
-echo "Nodes for other machines (${SERPIS_NODE_STORE:-$HOME/.serpis/nodes}): ${nodes[*]}"
 
 echo "Installed $app_dir/Serpis.app (v$version)"
 echo "Command: $bin_dir/serpis [dir]"

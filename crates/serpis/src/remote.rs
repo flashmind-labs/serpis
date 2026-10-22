@@ -88,6 +88,8 @@ fn node_builds(ed: &mut Editor) -> Vec<serpis_node::deploy::NodeBinary> {
         return Vec::new();
     }
     let dir = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into()));
+    // One directory per serpis version: a node is installed with the serpis it belongs to.
+    let dir = dir.join(serpis_node::VERSION);
     let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
     if let Some((d, m, builds)) = &ed.remote.builds
         && *d == dir
@@ -98,6 +100,56 @@ fn node_builds(ed: &mut Editor) -> Vec<serpis_node::deploy::NodeBinary> {
     let builds = serpis_node::deploy::scan(&dir);
     ed.remote.builds = Some((dir, modified, builds.clone()));
     builds
+}
+
+/// This serpis's source tree, when it runs from one (a checkout built with cargo): it can then
+/// build the node for any system it meets. Installed serpis has none, and finds or downloads it.
+fn source_root() -> Option<std::path::PathBuf> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?.to_path_buf();
+    root.join("scripts/build-node.sh").is_file().then_some(root)
+}
+
+/// How serpis gets a node build for a system it has none for yet: from its source, into
+/// remote-node-builds (None when it can't, or remote-deploy is off).
+fn obtain(ed: &Editor) -> Option<serpis_node::client::Obtain> {
+    if !ed.var("remote-deploy").and_then(Value::as_bool).unwrap_or(true) {
+        return None;
+    }
+    let root = source_root()?;
+    let store = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into())).join(serpis_node::VERSION);
+    Some(Arc::new(move |system: String| {
+        let (root, store) = (root.clone(), store.clone());
+        Box::pin(async move { build_node(&root, &store, &system).await })
+    }))
+}
+
+/// Build the node for `system` (`uname -sm`) with scripts/build-node.sh into `store`.
+async fn build_node(root: &std::path::Path, store: &std::path::Path, system: &str) -> anyhow::Result<serpis_node::deploy::NodeBinary> {
+    use anyhow::{Context, bail};
+    let triple = serpis_node::deploy::triple_for(system).with_context(|| format!("serpis can't build for {system}"))?;
+    let here = tokio::process::Command::new("uname").arg("-sm").output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let mut cmd = tokio::process::Command::new(root.join("scripts/build-node.sh"));
+    cmd.arg("--store").env("SERPIS_NODE_STORE", store);
+    if here != system {
+        // Another system: cross-compiled with zig, which needs these two.
+        // (`cargo zigbuild --version` is an error: the binary answers for itself.)
+        let zigbuild = tokio::process::Command::new("cargo-zigbuild").arg("--version").output().await.is_ok_and(|o| o.status.success());
+        if !zigbuild {
+            bail!("building it for {system} needs cargo-zigbuild: cargo install cargo-zigbuild");
+        }
+        let base = triple.split(".2.").next().unwrap_or(triple);
+        let targets = tokio::process::Command::new("rustup").args(["target", "list", "--installed"]).output().await.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        if !targets.lines().any(|t| t.trim() == base) {
+            bail!("building it for {system} needs its Rust target: rustup target add {base}");
+        }
+        cmd.arg(triple);
+    }
+    let out = cmd.output().await.context("running scripts/build-node.sh")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("building it for {system} failed: {}", err.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    serpis_node::deploy::scan(store).into_iter().find(|n| n.os_arch == system).with_context(|| format!("the build for {system} isn't in {}", store.display()))
 }
 
 /// The host an ssh target reaches, without its user.
@@ -227,14 +279,23 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
     ed.busy_start(&key, &format!("Connecting to {machine}…"));
     tracing::info!("connecting to {machine}");
     let target = target_of(ed, machine);
+    let obtain = obtain(ed);
     let (main, name) = (ed.main_sender(), machine.to_string());
     ed.rt.spawn(async move {
-        // The first connect to a machine installs its node there, which takes a few seconds.
-        let installing = {
+        // The first connect to a machine installs its node there, which takes a few seconds, and
+        // the first to a new kind of system builds the node for it first, which takes minutes.
+        let stage = {
             let (main, name, key) = (main.clone(), name.clone(), key.clone());
-            move || main.send(move |ed| ed.busy_start(&key, &format!("Installing serpis-node on {name}…")))
+            move |s: serpis_node::client::Stage| {
+                let label = match s {
+                    serpis_node::client::Stage::Building(system) => format!("Building serpis-node for {system} (once)…"),
+                    serpis_node::client::Stage::Installing => format!("Installing serpis-node on {name}…"),
+                };
+                let key = key.clone();
+                main.send(move |ed| ed.busy_start(&key, &label));
+            }
         };
-        let result = Client::connect_reporting(&target, "serpis", installing).await;
+        let result = Client::connect_with(&target, "serpis", obtain, stage).await;
         let (client, events) = match result {
             Ok((c, e)) => (Ok(Arc::new(c)), Some(e)),
             Err(e) => (Err(format!("{e:#}")), None),
@@ -620,7 +681,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-rayfish-command", json!(""), "The ray command for remote-rayfish (\"\": ray on PATH, else the one in /Applications/Rayfish.app).");
     ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh, instead of the node serpis installs there (\"\": serpis's own, else serpis-node from PATH, ~/.local/bin or ~/.cargo/bin).");
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
-    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<target triple>/serpis-node (scripts/build-node.sh --store, and the install script, put them there).");
+    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<serpis version>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (from serpis's source, when it runs from a checkout), or by scripts/build-node.sh --store.");
     ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"alice\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
     ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");

@@ -18,6 +18,9 @@ use sha2::{Digest, Sha256};
 /// What the far side writes to stderr when it needs the node with this checksum.
 pub const MARKER: &str = "SERPIS-DEPLOY ";
 
+/// What the far side writes to stderr when serpis has no build for its system (`uname -sm`).
+pub const SYSTEM_MARKER: &str = "SERPIS-SYSTEM ";
+
 /// A node build serpis can install.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeBinary {
@@ -25,6 +28,18 @@ pub struct NodeBinary {
     pub os_arch: String,
     pub path: PathBuf,
     pub sha256: String,
+}
+
+/// The target triple to build for a system (`uname -sm`): Linux builds against glibc 2.28, so
+/// they run on distributions from 2018 on.
+pub fn triple_for(os_arch: &str) -> Option<&'static str> {
+    Some(match os_arch {
+        "Linux x86_64" => "x86_64-unknown-linux-gnu.2.28",
+        "Linux aarch64" => "aarch64-unknown-linux-gnu.2.28",
+        "Darwin arm64" => "aarch64-apple-darwin",
+        "Darwin x86_64" => "x86_64-apple-darwin",
+        _ => return None,
+    })
 }
 
 /// `uname -sm` for a Rust target triple (a glibc version suffix is ignored).
@@ -70,12 +85,14 @@ pub fn scan(dir: &Path) -> Vec<NodeBinary> {
 /// non-interactive ssh session often has a short PATH (no `~/.local/bin`).
 const LOOKUP: &str = r#"for p in serpis-node "$HOME/.local/bin/serpis-node" "$HOME/.cargo/bin/serpis-node"; do command -v "$p" >/dev/null 2>&1 && exec "$p" agent; done; echo "serpis-node is not installed on $(hostname) (not on PATH, nor in ~/.local/bin or ~/.cargo/bin), and serpis has no build for $(uname -sm)" >&2; exit 127"#;
 
-/// What runs on a machine to reach its node: the build of `nodes` for its system, checked,
-/// else a serpis-node found there. One `sh -c`, so it works under any login shell (fish too).
-/// Nothing in it may contain a single quote.
-pub fn agent_command(nodes: &[NodeBinary]) -> String {
+/// What runs on a machine to reach its node: the build of `nodes` for its system, checked. For
+/// another system it says which ([`SYSTEM_MARKER`]) when `ask` (serpis may get a build for it),
+/// else runs a serpis-node found there. One `sh -c`, so it works under any login shell (fish
+/// too). Nothing in it may contain a single quote.
+pub fn agent_command(nodes: &[NodeBinary], ask: bool) -> String {
+    let otherwise = if ask { format!("echo \"{SYSTEM_MARKER}$(uname -sm)\" >&2; exit 125") } else { LOOKUP.to_string() };
     if nodes.is_empty() {
-        return format!("sh -c '{LOOKUP}'");
+        return format!("sh -c '{otherwise}'");
     }
     let mut cases = String::new();
     for n in nodes {
@@ -88,11 +105,11 @@ pub fn agent_command(nodes: &[NodeBinary]) -> String {
             "if [ -x \"$b\" ]; then s=$( (sha256sum \"$b\" || shasum -a 256 \"$b\") 2>/dev/null | cut -d\" \" -f1); ",
             "[ \"$s\" = \"$h\" ] && exec \"$b\" agent; ",
             "[ -n \"$s\" ] || {{ echo \"serpis: neither sha256sum nor shasum is installed on $(hostname), so $b cant be checked\" >&2; exit 126; }}; ",
-            "rm -f \"$b\"; fi; echo \"{marker}$h\" >&2; exit 125; fi; {lookup}'"
+            "rm -f \"$b\"; fi; echo \"{marker}$h\" >&2; exit 125; fi; {otherwise}'"
         ),
         cases = cases,
         marker = MARKER,
-        lookup = LOOKUP
+        otherwise = otherwise
     )
 }
 
@@ -106,6 +123,11 @@ pub fn install_command(sha256: &str) -> String {
 /// The checksum a failed connect asked for, from what the far side wrote to stderr.
 pub fn wanted(stderr: &str) -> Option<&str> {
     stderr.lines().find_map(|l| l.trim().strip_prefix(MARKER)).map(str::trim)
+}
+
+/// The system a failed connect said serpis has no build for.
+pub fn wanted_system(stderr: &str) -> Option<&str> {
+    stderr.lines().find_map(|l| l.trim().strip_prefix(SYSTEM_MARKER)).map(str::trim)
 }
 
 /// Upload `node` through `ssh` (program and fixed arguments), `ssh_args`, to `host`, run with
@@ -150,11 +172,13 @@ mod tests {
     #[test]
     fn the_far_side_script_is_one_quoted_word() {
         let n = NodeBinary { os_arch: "Linux x86_64".into(), path: "x".into(), sha256: "ab12".into() };
-        for cmd in [agent_command(&[n]), agent_command(&[]), install_command("ab12")] {
+        for cmd in [agent_command(&[n.clone()], true), agent_command(&[n], false), agent_command(&[], true), agent_command(&[], false), install_command("ab12")] {
             assert!(cmd.starts_with("sh -c '") && cmd.ends_with('\''), "{cmd}");
             assert_eq!(cmd.matches('\'').count(), 2, "nothing inside may close the quote: {cmd}");
         }
         assert_eq!(wanted("Warning: added host key\nSERPIS-DEPLOY ab12\n"), Some("ab12"));
         assert_eq!(wanted("Permission denied"), None);
+        assert_eq!(wanted_system("SERPIS-SYSTEM Linux x86_64\n"), Some("Linux x86_64"));
+        assert_eq!(triple_for("Linux aarch64").and_then(os_arch_of), Some("Linux aarch64"));
     }
 }

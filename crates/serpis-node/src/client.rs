@@ -34,6 +34,9 @@ pub enum Target {
         command: Option<String>,
         /// The node builds serpis can install there.
         deploy: Vec<crate::deploy::NodeBinary>,
+        /// Ask for a build for a system there isn't one for (see [`Client::connect_with`]),
+        /// rather than running a serpis-node found there.
+        ask: bool,
     },
     /// Any program that speaks the protocol on its stdin and stdout.
     Command(Vec<String>),
@@ -51,6 +54,7 @@ impl Target {
             env: Vec::new(),
             command: None,
             deploy: Vec::new(),
+            ask: false,
         }
     }
 }
@@ -69,6 +73,18 @@ fn shell_word(s: &str) -> String {
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
+
+/// Gets a node build for a system (`uname -sm`) serpis has none for yet: builds or downloads it.
+pub type Obtain = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::deploy::NodeBinary>> + Send>> + Send + Sync>;
+
+/// What a connect is doing, for whoever shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stage {
+    /// Getting a node build for this system (`uname -sm`).
+    Building(String),
+    /// Copying the node to the machine.
+    Installing,
+}
 
 pub struct Client {
     out: mpsc::UnboundedSender<Vec<u8>>,
@@ -93,22 +109,42 @@ impl Client {
     /// Connect and greet the node, installing it first if the machine asks for it. Must be
     /// called on a tokio runtime.
     pub async fn connect(target: &Target, name: &str) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
-        Self::connect_reporting(target, name, || {}).await
+        Self::connect_with(target, name, None, |_| {}).await
     }
 
-    /// [`Client::connect`], calling `installing` when it starts installing the node there (which
-    /// takes a while: the node is megabytes).
-    pub async fn connect_reporting(target: &Target, name: &str, installing: impl FnOnce()) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
-        match Self::connect_once(target, name).await {
-            Err(Failed { stderr, error }) => {
-                let Target::Ssh { host, ssh, ssh_args, env, deploy, .. } = target else { return Err(error) };
-                let Some(node) = crate::deploy::wanted(&stderr).and_then(|h| deploy.iter().find(|n| n.sha256 == h)) else { return Err(error) };
-                installing();
-                crate::deploy::upload(ssh, ssh_args, host, &env_prefix(env), node).await?;
-                Self::connect_once(target, name).await.map_err(|f| f.error)
-            }
-            ok => ok.map_err(|f| f.error),
+    /// [`Client::connect`], getting a node build with `obtain` for a system serpis has none for,
+    /// and telling `stage` what takes time (building, copying: the node is megabytes).
+    pub async fn connect_with(target: &Target, name: &str, obtain: Option<Obtain>, stage: impl Fn(Stage)) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
+        let mut target = target.clone();
+        if let Target::Ssh { ask, .. } = &mut target {
+            *ask = obtain.is_some();
         }
+        // At most: get a build, install it, connect.
+        for _ in 0..3 {
+            let Failed { stderr, error } = match Self::connect_once(&target, name).await {
+                Ok(c) => return Ok(c),
+                Err(f) => f,
+            };
+            let Target::Ssh { host, ssh, ssh_args, env, deploy, ask, .. } = &mut target else { return Err(error) };
+            if let Some(node) = crate::deploy::wanted(&stderr).and_then(|h| deploy.iter().find(|n| n.sha256 == h)).cloned() {
+                stage(Stage::Installing);
+                crate::deploy::upload(ssh, ssh_args, host, &env_prefix(env), &node).await?;
+            } else if let (Some(system), Some(obtain)) = (crate::deploy::wanted_system(&stderr), &obtain) {
+                stage(Stage::Building(system.to_string()));
+                match obtain(system.to_string()).await {
+                    Ok(node) => deploy.push(node),
+                    Err(e) => {
+                        // No build to be had: a serpis-node installed there may still do.
+                        tracing::warn!("no serpis-node for {system}: {e:#}");
+                        *ask = false;
+                        return Self::connect_once(&target, name).await.map_err(|f| f.error.context(format!("serpis has no serpis-node for {system}: {e:#}")));
+                    }
+                }
+            } else {
+                return Err(error);
+            }
+        }
+        bail!("couldn't install serpis-node on {}", describe(&target))
     }
 
     async fn connect_once(target: &Target, name: &str) -> Result<(Client, mpsc::UnboundedReceiver<Event>), Failed> {
@@ -119,10 +155,10 @@ impl Client {
                 let (r, w) = s.into_split();
                 Self::over(r, w, None)
             }
-            Target::Ssh { host, ssh, ssh_args, env, command, deploy } => {
+            Target::Ssh { host, ssh, ssh_args, env, command, deploy, ask } => {
                 let mut argv = ssh.clone();
                 argv.extend(ssh_args.iter().cloned());
-                let run = command.clone().unwrap_or_else(|| crate::deploy::agent_command(deploy));
+                let run = command.clone().unwrap_or_else(|| crate::deploy::agent_command(deploy, *ask));
                 argv.extend([host.clone(), "--".into(), format!("{}{run}", env_prefix(env))]);
                 Self::spawn(&argv).map_err(failed)?
             }

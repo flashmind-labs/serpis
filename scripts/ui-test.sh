@@ -12,6 +12,8 @@ tmp="$(mktemp -d)"
 # must not depend on the hostname or the checkout's folder name, which can push a command line
 # past the terminal's width and wrap it.
 new_home() { mkdir -p "$1"; echo "PROMPT='%# '" > "$1/.zshrc"; }
+# Rust's own tools stay where they are (serpis builds its node with them when a machine needs one).
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; done
 # A local model (tests/ui/mock_llm.py) for tests that run agents end to end.
 python3 "$root/tests/ui/mock_llm.py" "$tmp/mock.port" "$tmp/mock.log" &
@@ -32,7 +34,7 @@ for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sid
     [[ -d "$tmp/home-$state" ]] || new_home "$tmp/home-$state"
     SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \
       SERPIS_CONFIG_DIR="$tmp/cfg-$state" SERPIS_AGENT_DIR="$tmp/agent-$state" HOME="$tmp/home-$state" \
-      timeout 60 "$root/target/debug/serpis" >"$tmp/$name.log" 2>&1 || true
+      timeout "${SERPIS_TEST_TIMEOUT:-60}" "$root/target/debug/serpis" >"$tmp/$name.log" 2>&1 || true
     if [[ ! -s "$out" ]]; then echo "FAIL $name (no results; see $tmp/$name.log)"; fail=1; continue; fi
     sed "s/^/[$name] /" "$out"
     grep -q '^FAIL' "$out" && fail=1

@@ -100,7 +100,8 @@ steps({
   end,
   function(go)
     T.press("b o x RET")
-    when(function() return (d.minibuffer() or ""):find("Folder on box", 1, true) ~= nil end, go)
+    -- A real machine may need its node built first (minutes, when nothing is cached).
+    when(function() return (d.minibuffer() or ""):find("Folder on box", 1, true) ~= nil end, go, remote and -2000 or 0)
     return false
   end,
   function(go)

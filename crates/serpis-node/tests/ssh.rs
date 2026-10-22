@@ -70,7 +70,7 @@ fn a_node_over_real_ssh() {
     far(&host, &ssh_args, &format!("printf '%s' {} > {dir}/agent/models.json && printf '{{}}' > {dir}/agent/auth.json && printf '%s' {} > {dir}/node/settings.json", quote(&models.to_string()), quote(&settings.to_string())));
 
     let env = [("HOME", "home"), ("SERPIS_NODE_DIR", "node"), ("SERPIS_NODE_SOCKET", "node/node.sock"), ("SERPIS_AGENT_DIR", "agent")].map(|(k, v)| (k.to_string(), format!("{dir}/{v}"))).to_vec();
-    let target = Target::Ssh { host: host.clone(), ssh: vec!["ssh".into()], ssh_args: ssh_args.clone(), env, command: None, deploy: builds };
+    let target = Target::Ssh { host: host.clone(), ssh: vec!["ssh".into()], ssh_args: ssh_args.clone(), env, command: None, deploy: builds, ask: false };
     rt.block_on(async {
         let started = std::time::Instant::now();
         let (c, mut events) = Client::connect(&target, "ssh-check").await.unwrap_or_else(|e| panic!("connecting over ssh to {host}: {e:#}"));

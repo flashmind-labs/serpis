@@ -33,6 +33,7 @@ fn the_node_is_installed_on_first_connect_and_checked_on_every_start() {
         env: vec![("HOME".into(), home.to_string_lossy().into_owned()), ("SERPIS_NODE_SOCKET".into(), root.join("n.sock").to_string_lossy().into_owned())],
         command: None,
         deploy,
+        ask: false,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -57,6 +58,39 @@ fn the_node_is_installed_on_first_connect_and_checked_on_every_start() {
         assert_eq!(sha256_file(&installed).unwrap(), node.sha256, "replaced with the real one");
         c.call(Request::Stop).await.unwrap();
         drop(c);
+
+        // No builds at all: the machine says its system, a build is made for it (here: this
+        // one, standing in for scripts/build-node.sh), installed, and run.
+        std::fs::remove_dir_all(home.join(".serpis")).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (a, n) = (asked.clone(), node.clone());
+        let obtain: serpis_node::client::Obtain = std::sync::Arc::new(move |system: String| {
+            a.lock().unwrap().push(system);
+            let n = n.clone();
+            Box::pin(async move { Ok(n) })
+        });
+        let stages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let st = stages.clone();
+        let (c, _) = Client::connect_with(&target(vec![]), "deploy-test", Some(obtain), move |s| st.lock().unwrap().push(s)).await.unwrap();
+        assert_eq!(*asked.lock().unwrap(), [uname()], "a build was asked for once, for this system");
+        assert_eq!(*stages.lock().unwrap(), [serpis_node::client::Stage::Building(uname()), serpis_node::client::Stage::Installing]);
+        assert_eq!(sha256_file(&installed).unwrap(), node.sha256);
+        c.call(Request::Stop).await.unwrap();
+        drop(c);
+
+        // No build to be had: a serpis-node installed there is used instead...
+        std::fs::remove_dir_all(home.join(".serpis")).unwrap();
+        let failing: serpis_node::client::Obtain = std::sync::Arc::new(|_| Box::pin(async { anyhow::bail!("no toolchain here") }));
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::os::unix::fs::symlink(exe, home.join(".local/bin/serpis-node")).unwrap();
+        let (c, _) = Client::connect_with(&target(vec![]), "deploy-test", Some(failing.clone()), |_| {}).await.unwrap();
+        c.call(Request::Stop).await.unwrap();
+        drop(c);
+        // ...and without one, the error says both why there's no build and that none is there.
+        std::fs::remove_file(home.join(".local/bin/serpis-node")).unwrap();
+        let err = Client::connect_with(&target(vec![]), "deploy-test", Some(failing), |_| {}).await.err().expect("nothing to run");
+        let err = format!("{err:#}");
+        assert!(err.contains("no toolchain here") && err.contains("serpis-node is not installed"), "{err}");
 
         // No build for this machine's system, and none installed there: said so.
         let other = NodeBinary { os_arch: "Plan9 mips".into(), ..node.clone() };
