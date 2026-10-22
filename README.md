@@ -228,7 +228,11 @@ it left keeps its session, marked as moved. Only an idle chat moves. Its folder 
 deletions, untracked files; ignored ones stay), made without touching its index, working tree or
 refs, and checked out there with the work uncommitted again; any other folder as its files. It
 lands in a new folder in the home there (`name-2` when `name` is taken), and the chat continues
-in the same subfolder. Or it continues in a folder already there. Besides the pill, `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
+in the same subfolder. Or it continues in a folder already there. `chat-resume`'s
+"every machine" scope (TAB to it, or `chat-resume-scope` = `"everywhere"`) lists the saved
+sessions of this machine and of every other one together, newest first, each saying where it is;
+one picked there resumes there. Sessions whose chat moved on aren't listed
+(`chat-resume-show-moved`). Besides the pill, `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
 (sessions saved there) and `remote-close-chat` do the rest, and `chat-select-model` lists that
 machine's models. Closing such a chat's window only stops showing it. The sidebar groups them as
 `folder · machine`, and they are shown again when serpis starts.

@@ -331,7 +331,9 @@ Steps:
       new folder in the home there. Follow-ups: into an existing clone there (a worktree,
       fetching only what it lacks, instead of the whole history), and environment variables
       from an allowlist (needs per-chat environments in the agent's tools).
-   d. Sessions of every machine in one list.
+   d. *Done* (`tests/ui/remote_resume.lua`): sessions of every machine in one list, chat-resume's
+      "every machine" scope: this machine's at once, the others' as they answer (listing never
+      asks for a username), moved ones hidden, a picked one resumed where it is.
 4. Remote terminals through manymux.
 5. Node reliability: running turns that survive a node restart, parking a turn that keeps
    crashing it, the node's own Lua (hooks, tools, extensions on machines).

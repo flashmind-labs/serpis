@@ -596,6 +596,7 @@ impl Node {
                         cwd: i.cwd.to_string_lossy().into_owned(),
                         modified: i.modified.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0),
                         messages: i.messages,
+                        moved_to: i.moved_to,
                     })
                     .collect();
                 sessions.sort_by(|a, b| b.modified.cmp(&a.modified));

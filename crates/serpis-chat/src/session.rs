@@ -336,6 +336,8 @@ pub struct Info {
     /// scanner: a lookup can block for a while (automounted `/home`, network volumes), so the
     /// UI never stats session paths itself.
     pub exists: bool,
+    /// The machine the chat moved to (it continues there; this copy is its past).
+    pub moved_to: Option<String>,
 }
 
 impl Info {
@@ -395,6 +397,8 @@ pub fn info(path: &Path) -> Option<Info> {
             }
         } else if head.contains("\"type\":\"session_info\"") {
             i.name = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.get("name")?.as_str().map(str::to_string)).filter(|n| !n.is_empty());
+        } else if head.contains("\"customType\":\"serpis-moved\"") {
+            i.moved_to = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.pointer("/data/to")?.as_str().map(str::to_string));
         } else if head.contains("\"type\":\"model_change\"") {
             i.model = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.get("modelId")?.as_str().map(str::to_string));
         }

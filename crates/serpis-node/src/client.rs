@@ -50,7 +50,7 @@ impl Target {
         Target::Ssh {
             host: host.to_string(),
             ssh: vec!["ssh".into()],
-            ssh_args: ["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec(),
+            ssh_args: ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec(),
             env: Vec::new(),
             command: None,
             deploy: Vec::new(),

@@ -221,6 +221,9 @@ pub struct SessionInfo {
     /// Milliseconds since the epoch.
     pub modified: u64,
     pub messages: usize,
+    /// The machine the chat moved to, when it continues elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<String>,
 }
 
 /// One frame's bytes.

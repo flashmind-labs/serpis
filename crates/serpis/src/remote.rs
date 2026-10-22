@@ -61,6 +61,14 @@ pub struct Remotes {
     trying: HashMap<String, String>,
     /// Machines offered setting up this session (asked once).
     offered: std::collections::HashSet<String>,
+    /// Machines being reached only to list things: a refused login there isn't asked about.
+    quiet: std::collections::HashSet<String>,
+    /// Saved sessions of other machines, as they last said (`fetch_sessions`).
+    pub sessions: HashMap<String, Vec<serpis_proto::wire::SessionInfo>>,
+    /// Machines asked for their sessions that haven't answered yet.
+    pub sessions_pending: usize,
+    /// Called as each machine's sessions arrive (an open picker shows them).
+    pub on_sessions: Option<Box<dyn Fn(&mut Editor)>>,
     /// The node builds serpis installs on machines, as last scanned: (directory, when it
     /// changed, builds).
     builds: Option<(std::path::PathBuf, Option<std::time::SystemTime>, Vec<serpis_node::deploy::NodeBinary>)>,
@@ -329,8 +337,10 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
     };
     // A refused login, unless the account was named in remote-hosts (user@host): most likely the
     // account here (or the one tried, or remembered) isn't one there. Ask, and carry on.
+    let quiet = ed.remote.quiet.remove(machine);
     if let Err(e) = &client
         && e.contains("Permission denied")
+        && !quiet
         && !account_named(ed, machine)
     {
         ed.remote.trying.remove(machine);
@@ -776,6 +786,56 @@ fn move_chat(ed: &mut Editor, id: BufferId, from: Option<String>, to: String) {
         }
         Some(_) => pick(ed, Box::new(move |ed, dir| fetch_session(ed, id, from, to, dir))),
         None => {}
+    });
+}
+
+/// Machines whose saved sessions are listed with this machine's: those of remote-hosts, and the
+/// rayfish peers serpis can log in to (connected, or with a known account): listing never asks.
+pub fn listable(ed: &mut Editor) -> Vec<String> {
+    let users = ed.var("remote-users").cloned().unwrap_or(Value::Null);
+    machines(ed)
+        .into_iter()
+        .filter(|m| m.source != "rayfish" || users.get(&m.name).is_some() || matches!(ed.remote.conns.get(&m.name), Some(Conn::Up(_))))
+        .map(|m| m.name)
+        .collect()
+}
+
+/// Ask every listable machine for its saved sessions, quietly; `on_sessions` runs as they come.
+pub fn fetch_sessions(ed: &mut Editor) {
+    let list = listable(ed);
+    ed.remote.sessions_pending = list.len();
+    for m in list {
+        if !matches!(ed.remote.conns.get(&m), Some(Conn::Up(_))) {
+            ed.remote.quiet.insert(m.clone());
+        }
+        let name = m.clone();
+        request(ed, &m, Request::Sessions { limit: Some(200) }, move |ed, r| {
+            match r {
+                Ok(Response::Sessions { sessions }) => {
+                    ed.remote.sessions.insert(name, sessions);
+                }
+                _ => {
+                    ed.remote.sessions.remove(&name);
+                }
+            }
+            ed.remote.sessions_pending = ed.remote.sessions_pending.saturating_sub(1);
+            if let Some(f) = ed.remote.on_sessions.take() {
+                f(ed);
+                ed.remote.on_sessions.get_or_insert(f);
+            }
+        });
+    }
+}
+
+/// Resume session `path` (a file on `machine`) there, and show it.
+pub fn resume_on(ed: &mut Editor, machine: &str, path: &str) {
+    let m = machine.to_string();
+    request(ed, machine, Request::Resume { session: path.to_string() }, move |ed, r| match r {
+        Ok(Response::Chat { chat }) => {
+            open_chat(ed, &m, &chat, true);
+        }
+        Ok(other) => ed.error(format!("{m}: unexpected answer {other:?}")),
+        Err(e) => ed.error(format!("{m}: {e}")),
     });
 }
 

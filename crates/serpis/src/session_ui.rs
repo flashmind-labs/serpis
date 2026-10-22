@@ -189,6 +189,8 @@ enum Scope {
     All,
     /// The current folder (a worktree or a subdirectory of the project).
     Folder(PathBuf),
+    /// This machine's sessions and every other machine's (remote-hosts, rayfish).
+    Everywhere,
 }
 
 impl Scope {
@@ -198,12 +200,15 @@ impl Scope {
             Scope::Project(p) => format!("project {}", name(p)),
             Scope::All => "all projects".into(),
             Scope::Folder(p) => format!("folder {}", name(p)),
+            Scope::Everywhere => "every machine".into(),
         }
     }
+    /// Whether this machine's session `i` is listed (a session that moved away continues
+    /// elsewhere: hidden unless chat-resume-show-moved).
     fn holds(&self, i: &Info) -> bool {
         match self {
             Scope::Project(root) => in_project(i, root),
-            Scope::All => true,
+            Scope::All | Scope::Everywhere => true,
             Scope::Folder(dir) => i.cwd.starts_with(dir),
         }
     }
@@ -212,7 +217,7 @@ impl Scope {
 /// The scopes to cycle through, in order: this project, all projects, this folder (when it
 /// isn't the project itself).
 fn scopes(ed: &mut Editor) -> Vec<Scope> {
-    let dir = ed.buffer_directory(ed.current_buffer()).unwrap_or_else(|| ed.cwd.clone());
+    let dir = ed.local_directory(ed.current_buffer()).unwrap_or_else(|| ed.cwd.clone());
     let project = current_project(ed);
     let mut out = Vec::new();
     if let Some(p) = &project {
@@ -222,13 +227,20 @@ fn scopes(ed: &mut Editor) -> Vec<Scope> {
     if project.as_deref() != Some(dir.as_path()) && dir.is_dir() {
         out.push(Scope::Folder(dir));
     }
+    if !crate::remote::listable(ed).is_empty() {
+        out.push(Scope::Everywhere);
+    }
     out
 }
 
 /// The prompt and candidates for `scope` (with what TAB switches to).
 fn listing(ed: &mut Editor, scopes: &[Scope], at: usize) -> (String, Vec<Candidate>) {
     let scope = &scopes[at];
-    let list: Vec<Info> = ed.sessions.list.iter().filter(|i| scope.holds(i)).cloned().collect();
+    let show_moved = ed.var("chat-resume-show-moved").and_then(Value::as_bool).unwrap_or(false);
+    let list: Vec<Info> = ed.sessions.list.iter().filter(|i| scope.holds(i) && (show_moved || i.moved_to.is_none())).cloned().collect();
+    if *scope == Scope::Everywhere {
+        return everywhere(ed, scopes, at, list);
+    }
     let open: Vec<PathBuf> = ed.buffers.keys().collect::<Vec<_>>().into_iter().filter_map(|id| session_of(ed, id)).collect();
     let cands = list
         .iter()
@@ -255,8 +267,40 @@ fn listing(ed: &mut Editor, scopes: &[Scope], at: usize) -> (String, Vec<Candida
     (format!("Resume ({}{empty}{next}): ", scope.label()), cands)
 }
 
+/// Every machine's sessions, newest first, each saying where it is (a picked one resumes there).
+fn everywhere(ed: &mut Editor, scopes: &[Scope], at: usize, here: Vec<Info>) -> (String, Vec<Candidate>) {
+    let show_moved = ed.var("chat-resume-show-moved").and_then(Value::as_bool).unwrap_or(false);
+    let ms = |t: Option<std::time::SystemTime>| t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+    // (modified, title, where, detail, value)
+    let mut rows: Vec<(u64, String, String, String, String)> = here
+        .iter()
+        .map(|i| (ms(i.modified), i.title(), "here".to_string(), format!("{} · {} msgs", age(i), i.messages), i.path.to_string_lossy().into_owned()))
+        .collect();
+    for (m, list) in &ed.remote.sessions {
+        for s in list.iter().filter(|s| show_moved || s.moved_to.is_none()) {
+            let ago = crate::sidebar::fmt_age(std::time::Duration::from_millis(serpis_ai::now_ms().saturating_sub(s.modified)));
+            rows.push((s.modified, s.title.clone(), format!("on {m}"), format!("{ago} · {} msgs", s.messages), format!("@{m}\u{1}{}", s.path)));
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let cands = rows
+        .into_iter()
+        .map(|(_, title, place, detail, value)| {
+            let mut title = if title.is_empty() { "(untitled)".to_string() } else { title };
+            if title.chars().count() > 70 {
+                title = title.chars().take(69).collect::<String>() + "…";
+            }
+            Candidate::new(format!("{title}  ·  {place}")).detail(detail).value(value)
+        })
+        .collect::<Vec<_>>();
+    let waiting = ed.remote.sessions_pending;
+    let asking = if waiting > 0 { format!(" · asking {waiting} machine{}", if waiting == 1 { "" } else { "s" }) } else { String::new() };
+    let next = if scopes.len() > 1 { format!(" · TAB: {}", scopes[(at + 1) % scopes.len()].label()) } else { String::new() };
+    (format!("Resume (every machine{asking}{next}): "), cands)
+}
+
 fn pick(ed: &mut Editor, all: bool) {
-    if ed.sessions.list.is_empty() {
+    if ed.sessions.list.is_empty() && crate::remote::listable(ed).is_empty() {
         ed.message("No saved sessions yet");
         return;
     }
@@ -264,7 +308,7 @@ fn pick(ed: &mut Editor, all: bool) {
     let wanted = if all { "all".to_string() } else { ed.var_str("chat-resume-scope").unwrap_or_else(|| "project".into()) };
     let mut at = scopes
         .iter()
-        .position(|s| matches!((s, wanted.as_str()), (Scope::All, "all") | (Scope::Project(_), "project") | (Scope::Folder(_), "folder")))
+        .position(|s| matches!((s, wanted.as_str()), (Scope::All, "all") | (Scope::Project(_), "project") | (Scope::Folder(_), "folder") | (Scope::Everywhere, "everywhere")))
         .unwrap_or(0);
     // A scope with nothing in it opens on the next one that has something.
     for _ in 0..scopes.len() {
@@ -273,23 +317,48 @@ fn pick(ed: &mut Editor, all: bool) {
         }
         at = (at + 1) % scopes.len();
     }
+    // Other machines' sessions are asked for when that scope is shown, and join it as they come.
+    let current = std::rc::Rc::new(std::cell::Cell::new(at));
+    let show = {
+        let (scopes, current) = (scopes.clone(), current.clone());
+        std::rc::Rc::new(move |ed: &mut Editor, fetch: bool| {
+            let at = current.get();
+            if scopes[at] == Scope::Everywhere && fetch {
+                crate::remote::fetch_sessions(ed);
+            }
+            let (prompt, cands) = listing(ed, &scopes, at);
+            let loading = scopes[at] == Scope::Everywhere && ed.remote.sessions_pending > 0;
+            if let Some(mb) = &mut ed.minibuffer {
+                mb.replace_candidates(prompt, cands);
+            }
+            ed.minibuffer_loading(loading);
+        })
+    };
     let (prompt, cands) = listing(ed, &scopes, at);
     ed.completing_read(&prompt, cands, true, |ed, c, _| {
+        ed.remote.on_sessions = None;
         if let Some(c) = c {
+            if let Some((machine, path)) = c.value.strip_prefix('@').and_then(|v| v.split_once('\u{1}')) {
+                return crate::remote::resume_on(ed, machine, path);
+            }
             if let Err(e) = resume(ed, Path::new(&c.value)) {
                 ed.error(format!("{e:#}"));
             }
         }
     });
-    let current = std::rc::Rc::new(std::cell::Cell::new(at));
+    let s2 = show.clone();
+    ed.remote.on_sessions = Some(Box::new(move |ed: &mut Editor| {
+        if ed.minibuffer.as_ref().is_some_and(|m| m.prompt.starts_with("Resume (")) {
+            s2(ed, false);
+        }
+    }));
+    if scopes[at] == Scope::Everywhere {
+        show(ed, true);
+    }
     let cycle: crate::minibuffer::CycleFn = std::rc::Rc::new(move |ed: &mut Editor, dir: i32| {
         let n = scopes.len();
-        let at = ((current.get() as i32 + dir).rem_euclid(n as i32)) as usize;
-        current.set(at);
-        let (prompt, cands) = listing(ed, &scopes, at);
-        if let Some(mb) = &mut ed.minibuffer {
-            mb.replace_candidates(prompt, cands);
-        }
+        current.set(((current.get() as i32 + dir).rem_euclid(n as i32)) as usize);
+        show(ed, true);
     });
     if let Some(mb) = &mut ed.minibuffer {
         mb.keep_order = true;
@@ -333,7 +402,8 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("session-restore-on-start", json!(true), "Reopen the chats that were open when serpis quit.");
     ed.defvar("session-scan-interval", json!(30.0), "Seconds a read session list stays fresh.");
     ed.defvar("project-remember", json!(true), "Pin a project to the sidebar (the projects variable) when a chat in it saves its first session.");
-    ed.defvar("chat-resume-scope", json!("project"), "Sessions chat-resume starts with: \"project\" (this project, all its worktrees), \"all\" or \"folder\" (the current folder). TAB / S-TAB in the picker cycle through them.");
+    ed.defvar("chat-resume-scope", json!("project"), "Sessions chat-resume starts with: \"project\" (this project, all its worktrees), \"all\", \"folder\" (the current folder) or \"everywhere\" (every machine's: remote-hosts and rayfish peers). TAB / S-TAB in the picker cycle through them.");
+    ed.defvar("chat-resume-show-moved", json!(false), "List sessions whose chat moved to another machine (they continue there) in chat-resume.");
     ed.defvar("sidebar-recent-sessions", json!(3), "Closed sessions listed under each sidebar project (0 hides them).");
 
     ed.define_command("chat-resume", "Resume a saved chat session: this project's first (chat-resume-scope); TAB / S-TAB cycle to all projects and this folder. C-u or param \"all\" starts with all.", o, |ed, a| {
