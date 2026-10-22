@@ -1393,6 +1393,9 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Durations of recent frames in ms, newest last (input, logic and drawing).
     debug.set("frame_times", lua.create_function(|_, ()| ed(|e| e.frame_times.iter().copied().collect::<Vec<f32>>()))?)?;
+    // Frames drawn so far: injected input takes effect in the next frame, so a test waits for
+    // this to grow instead of guessing a delay.
+    debug.set("frames", lua.create_function(|_, ()| ed(|e| e.frames_drawn))?)?;
     // Record views' scroll positions as they are drawn: trace_scroll(true) starts, then
     // trace_scroll() returns {{t, y}} and stops.
     debug.set("trace_scroll", lua.create_function(|lua, on: Option<bool>| {

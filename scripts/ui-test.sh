@@ -8,7 +8,9 @@ tmp="$(mktemp -d)"
 # A throwaway HOME: tests never see your pi/serpis sessions, settings or API keys
 # (~/.pi/agent is read as a fallback otherwise), and never call a real provider.
 mkdir -p "$tmp/home"
-touch "$tmp/home/.zshrc"
+# A short, fixed prompt: terminal tests must not depend on the hostname or the checkout's
+# folder name, which can push a command line past the terminal's width and wrap it.
+echo "PROMPT='%# '" > "$tmp/home/.zshrc"
 for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; done
 # A local model (tests/ui/mock_llm.py) for tests that run agents end to end.
 python3 "$root/tests/ui/mock_llm.py" "$tmp/mock.port" "$tmp/mock.log" &

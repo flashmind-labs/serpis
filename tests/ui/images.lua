@@ -171,7 +171,9 @@ steps({
   end,
   function()
     serpis.defer(1200, function()
-      serpis.buffer.insert("echo ")
+      -- `file` reads the pasted path and prints a line short enough not to wrap; the path
+      -- itself is longer than the terminal is wide, and terminal text breaks at every row.
+      serpis.buffer.insert("file -b ")
       serpis.defer(300, function()
         d.paste_image(png)
         serpis.defer(300, function() serpis.buffer.insert("\r") end)
@@ -180,9 +182,8 @@ steps({
     return 2600
   end,
   function()
-    local out = serpis.buffer.text()
-    local path = out:match("\n([^\n]*serpis%-pastes/pasted%-%d+%.png)")
-    T.check("terminal gets the saved image's path", path ~= nil, true)
-    T.check("and the file is the image", path and sh("file -b '" .. path .. "'"):match("^PNG image data, 240 x 160") ~= nil, true)
+    local newest = sh("ls -t \"${TMPDIR:-/tmp}\"/serpis-pastes/pasted-*.png | head -1")
+    T.check("the pasted image is saved as a PNG", newest:match("serpis%-pastes/pasted%-%d+%.png$") ~= nil, true)
+    T.check("the terminal gets its path (file reads it)", serpis.buffer.text():find("PNG image data, 240 x 160", 1, true) ~= nil, true)
   end,
 })

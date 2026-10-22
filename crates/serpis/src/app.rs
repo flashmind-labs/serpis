@@ -116,6 +116,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         crate::ui::draw(ui, &mut self.ed);
+        self.ed.frames_drawn += 1;
         if let Some(t) = self.frame_start.take() {
             let ms = t.elapsed().as_secs_f32() * 1000.0;
             if ms > 100.0 {

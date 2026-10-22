@@ -231,6 +231,8 @@ pub struct Editor {
     pub sessions: crate::session_ui::Sessions,
     /// How long recent frames took (input, logic and drawing), in milliseconds, newest last.
     pub frame_times: std::collections::VecDeque<f32>,
+    /// Frames drawn so far (`serpis.debug.frames`: tests wait for input to be drawn).
+    pub frames_drawn: u64,
     /// Where named controls were drawn last frame (`serpis.debug.rect`, for tests).
     pub debug_rects: HashMap<&'static str, Rect>,
     /// Jump labels on screen (avy/hop), and copies fading out.
@@ -315,6 +317,7 @@ impl Editor {
             sidebar: Default::default(),
             sessions: Default::default(),
             frame_times: Default::default(),
+            frames_drawn: 0,
             debug_rects: HashMap::new(),
             jump: Default::default(),
             chats: HashMap::new(),

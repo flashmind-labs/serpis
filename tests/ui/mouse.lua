@@ -21,8 +21,9 @@ local function win(name)
     if serpis.buffer.name(w.buffer) == name then return w end
   end
 end
--- A point in a window's header (left part, clear of the buttons), or at fractions of its body.
-local function header(name) local r = win(name).rect; return r.x + 120, r.y + 15 end
+-- A point in a window's header (left part, clear of the buttons: in a narrow window they reach
+-- past 120 points), or at fractions of its body.
+local function header(name) local r = win(name).rect; return r.x + math.min(120, r.w * 0.3), r.y + 15 end
 local function at(name, fx, fy) local r = win(name).rect; return r.x + r.w * fx, r.y + r.h * fy end
 local function targets(kind)
   local out = {}
@@ -30,23 +31,36 @@ local function targets(kind)
   return out
 end
 
--- Run steps one frame-ish apart.
+-- Run steps in order, each once two more frames have been drawn: injected input is read by the
+-- next frame, so a busy machine that draws late can't merge a press and a move into one frame.
 local queue = {}
 local function step(f) table.insert(queue, f) end
 local tries = 0
-local function run()
+local run
+local function after_frames(n, k)
+  local target = d.frames() + n
+  local function poll()
+    if d.frames() >= target then return k() end
+    serpis.defer(16, poll)
+  end
+  poll()
+end
+run = function()
   local f = table.remove(queue, 1)
   if not f then return end
   -- A window that was just created may not be drawn yet (no rectangle): try again next frame.
   local ok, err = pcall(f)
   if not ok then
     tries = tries + 1
-    if tries > 20 then error(err) end
+    if tries > 20 then
+      T.check("step runs", tostring(err), nil)
+      return T.finish()
+    end
     table.insert(queue, 1, f)
-    return serpis.defer(60, run)
+    return after_frames(1, run)
   end
   tries = 0
-  serpis.defer(60, run)
+  after_frames(2, run)
 end
 -- Press at (x, y), move in a few steps to (tx, ty), release.
 local function drag(x, y, tx, ty, before_release)
