@@ -170,7 +170,7 @@ pub fn bundled() -> &'static BTreeMap<String, ThemeSpec> {
     static B: OnceLock<BTreeMap<String, ThemeSpec>> = OnceLock::new();
     B.get_or_init(|| {
         let mut m = BTreeMap::new();
-        for src in [include_str!("../themes/modus.json"), include_str!("../themes/github.json")] {
+        for src in [include_str!("../themes/modus.json"), include_str!("../themes/github.json"), include_str!("../themes/rayfish.json")] {
             let parsed: BTreeMap<String, ThemeSpec> = serde_json::from_str(src).expect("bundled theme JSON");
             m.extend(parsed);
         }
