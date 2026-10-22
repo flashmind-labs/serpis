@@ -21,7 +21,8 @@ end
 -- The other machine. By default a node on this one in a throwaway home of its own; with
 -- SERPIS_TEST_REMOTE_HOST (e.g. aelita@slimbook.net.ray) a real machine over ssh, where the node
 -- runs in a throwaway /tmp directory and the mock provider runs next to it
--- (SERPIS_TEST_REMOTE_MOCK: its path there; serpis-node is found as for any machine).
+-- (SERPIS_TEST_REMOTE_MOCK: its path there). serpis installs its node there from
+-- SERPIS_TEST_NODE_BUILDS (a node store, as scripts/build-node.sh --store fills).
 local remote = os.getenv("SERPIS_TEST_REMOTE_HOST")
 local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
 -- Run a shell command where the node runs.
@@ -46,10 +47,11 @@ local home = remote and (box .. "/home") or sh("cd '" .. box .. "/home' && pwd -
 local env = "HOME=" .. home .. " SERPIS_NODE_DIR=" .. box .. "/node SERPIS_NODE_SOCKET=" .. box .. "/node/node.sock SERPIS_AGENT_DIR=" .. box .. "/agent"
 serpis.var.set("remote-rayfish", false)
 if remote then
-  -- Found the way any machine's is (PATH, ~/.local/bin, ~/.cargo/bin); only its home is the test's.
+  -- serpis installs its node there (remote-deploy), into the throwaway home like the rest.
   serpis.var.set("remote-ssh-args", { "-o", "StrictHostKeyChecking=accept-new" })
-  serpis.var.set("remote-hosts", { { name = "box", host = remote,
-    node_command = "for p in serpis-node ~/.local/bin/serpis-node ~/.cargo/bin/serpis-node; do command -v $p >/dev/null 2>&1 && exec env " .. env .. " $p agent; done; exit 127" } })
+  serpis.var.set("remote-node-builds", os.getenv("SERPIS_TEST_NODE_BUILDS"))
+  serpis.var.set("remote-hosts", { { name = "box", host = remote, env = { HOME = home, SERPIS_NODE_DIR = box .. "/node",
+    SERPIS_NODE_SOCKET = box .. "/node/node.sock", SERPIS_AGENT_DIR = box .. "/agent" } } })
 else
   serpis.var.set("remote-hosts", { { name = "box", command = { "sh", "-c", "exec env " .. env .. " " .. root .. "/target/debug/serpis-node agent" } } })
 end
@@ -126,6 +128,9 @@ steps({
     T.check("the answer came back", has("done"), true)
     T.check("its usage is shown", serpis.chat.info(chat).usage.total_tokens > 0, true)
     T.check("the box saved the session", far("ls " .. box .. "/sessions/*/ | wc -l"):match("%d+"), "1")
+    if remote then
+      T.check("serpis installed its node there", far("ls " .. home .. "/.serpis/bin"):find("serpis-node-", 1, true) ~= nil, true)
+    end
   end,
   -- Closing the view leaves the chat running on the box; it comes back whole.
   function()

@@ -3421,6 +3421,7 @@ dependencies = [
  "serpis-chat",
  "serpis-proto",
  "serpis-testkit",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",

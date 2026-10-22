@@ -5,9 +5,10 @@
 //! directory. So the node never sees the account's real sessions, settings or keys, and no
 //! real provider is called. Host keys go to a known-hosts file of the test's own.
 //!
-//! The mock runs where the node does: in this process on localhost, or on the other machine
-//! (`SERPIS_SSH_TEST_MOCK`: serpis-mock-provider's path there). `SERPIS_SSH_TEST_NODE` is
-//! serpis-node's path there (this build's, by default, which is right for localhost).
+//! The node is installed there the way serpis installs it, from the builds in
+//! `SERPIS_SSH_TEST_NODE_BUILDS` (a `<target>/serpis-node` store; this build alone for
+//! localhost), into the throwaway home. The mock runs where the node does: in this process on
+//! localhost, or on the other machine (`SERPIS_SSH_TEST_MOCK`: serpis-mock-provider's path there).
 //! Needs ssh that works without a prompt: a key in authorized_keys, or rayfish's mesh SSH.
 
 use std::time::Duration;
@@ -33,7 +34,15 @@ fn quote(s: &str) -> String {
 fn a_node_over_real_ssh() {
     let host = std::env::var("SERPIS_SSH_TEST_HOST").unwrap_or_else(|_| "localhost".into());
     let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
-    let node = std::env::var("SERPIS_SSH_TEST_NODE").unwrap_or_else(|_| env!("CARGO_BIN_EXE_serpis-node").to_string());
+    let builds = match std::env::var("SERPIS_SSH_TEST_NODE_BUILDS") {
+        Ok(dir) => serpis_node::deploy::scan(std::path::Path::new(&dir)),
+        Err(_) => {
+            let exe = std::path::Path::new(env!("CARGO_BIN_EXE_serpis-node"));
+            let os_arch = String::from_utf8(std::process::Command::new("uname").arg("-sm").output().unwrap().stdout).unwrap().trim().to_string();
+            vec![serpis_node::deploy::NodeBinary { os_arch, path: exe.into(), sha256: serpis_node::deploy::sha256_file(exe).unwrap() }]
+        }
+    };
+    assert!(!builds.is_empty(), "no node builds to install");
     let id = &uuid::Uuid::now_v7().simple().to_string()[24..];
     let dir = format!("/tmp/snssh-{id}");
     let near = std::env::temp_dir().join(format!("snssh-{id}"));
@@ -60,13 +69,14 @@ fn a_node_over_real_ssh() {
     let settings = json!({"session-directory": format!("{dir}/sessions")});
     far(&host, &ssh_args, &format!("printf '%s' {} > {dir}/agent/models.json && printf '{{}}' > {dir}/agent/auth.json && printf '%s' {} > {dir}/node/settings.json", quote(&models.to_string()), quote(&settings.to_string())));
 
-    let command = format!("env HOME={dir}/home SERPIS_NODE_DIR={dir}/node SERPIS_NODE_SOCKET={dir}/node/node.sock SERPIS_AGENT_DIR={dir}/agent {node} agent");
-    let target = Target::Ssh { host: host.clone(), command, ssh_args: ssh_args.clone() };
+    let env = [("HOME", "home"), ("SERPIS_NODE_DIR", "node"), ("SERPIS_NODE_SOCKET", "node/node.sock"), ("SERPIS_AGENT_DIR", "agent")].map(|(k, v)| (k.to_string(), format!("{dir}/{v}"))).to_vec();
+    let target = Target::Ssh { host: host.clone(), ssh: vec!["ssh".into()], ssh_args: ssh_args.clone(), env, command: None, deploy: builds };
     rt.block_on(async {
         let started = std::time::Instant::now();
         let (c, mut events) = Client::connect(&target, "ssh-check").await.unwrap_or_else(|e| panic!("connecting over ssh to {host}: {e:#}"));
         println!("node on {host}: {} (serpis-node {}), connected in {:?}", c.hello.host, c.hello.serpis, started.elapsed());
         assert_eq!(c.hello.home, format!("{dir}/home"), "the node runs in the throwaway home");
+        assert!(far(&host, &ssh_args, &format!("ls {dir}/home/.serpis/bin")).contains("serpis-node-"), "serpis installed its node there");
         let Response::Chat { chat } = c.call(Request::New { cwd: "~/proj".into(), model: None, thinking: None }).await.unwrap() else { panic!() };
         c.call(Request::Attach { chat: chat.clone() }).await.unwrap();
         let t = std::time::Instant::now();

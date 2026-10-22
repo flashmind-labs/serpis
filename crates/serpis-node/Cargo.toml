@@ -22,6 +22,7 @@ dirs.workspace = true
 uuid.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nix = { version = "0.29", features = ["hostname", "process", "user"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 serpis-testkit.workspace = true

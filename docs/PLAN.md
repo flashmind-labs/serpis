@@ -301,7 +301,16 @@ Steps:
    stops showing it. Tests: `crates/serpis-node/tests/node.rs` (socket, bridge, auto-start,
    late joiners, retries, resume, restart) and `tests/ui/remote.lua` (the whole flow with real
    input against a real node in a throwaway home, through `serpis-node agent` instead of ssh).
-   Not yet checked over a real ssh connection or rayfish.
+   Checked over real ssh and rayfish (2026-10-22): a Linux x86-64 box reached by its mesh name
+   with keyless mesh SSH, `tests/ui/remote.lua` with `SERPIS_TEST_REMOTE_HOST` passes there.
+   serpis installs its node on first connect (`serpis_node::deploy`): the build for `uname -sm`
+   from `~/.serpis/nodes`, into `~/.serpis/bin/serpis-node-<sha256>` there, checked before every
+   start and replaced when altered; a system without a build falls back to a serpis-node found
+   there. The first connect to a fresh box over the mesh took 6.5 s (10.6 MB), later ones 0.2 s.
+   Two wrong assumptions found on the way: rayfish logs in as the account the client names (its
+   peers carry none, so `user@host` in `remote-hosts` replaces the peer), and non-interactive
+   ssh has a short PATH (hence installing rather than looking for one). A newer serpis talking
+   to an older running node isn't handled yet beyond a version check in hello.
    Next here: the node's own Lua config (hooks and tools on boxes); running turns that survive
    a node restart; parking a turn that keeps crashing it.
 3. Remote terminals through manymux.

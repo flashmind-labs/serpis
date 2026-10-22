@@ -204,6 +204,36 @@ From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configu
 `serpis.workspace.switch/move_window/list/rename`, and the hooks `workspace-switched` and
 `window-layout-changed`.
 
+## Chats on other machines
+
+A chat can run on another machine: the agent, its tools and its LLM calls all run there, with
+that machine's files and API keys, and keep running when your laptop sleeps or serpis quits.
+This window shows it and sends what you type.
+
+Machines are ssh destinations: `remote-hosts` (`serpis.var.set("remote-hosts", {"gpu-box",
+"me@lab"})`, or `{name, host, env = {...}}` tables), plus the peers of your
+[rayfish](https://github.com/rayfish/rayfish) networks (`remote-rayfish`), named
+`host.network.ray`. With rayfish, `ray ssh on` and `ray ssh allow <network> <this machine> --user
+<account>` on the other machine let serpis in by mesh identity, no keys needed; rayfish logs in
+as the account the client asks for, so name it when it differs from yours here
+(`"aelita@box.net.ray"` in `remote-hosts`, or `User` in `~/.ssh/config`). serpis keeps no
+credentials of its own: sshd, or rayfish, decides who gets in.
+
+The composer's machine pill (`chat-select-machine`) moves a new chat to a machine and a folder
+there; `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
+(sessions saved there) and `remote-close-chat` do the rest, and `chat-select-model` lists that
+machine's models. Closing such a chat's window only stops showing it. The sidebar groups them as
+`folder · machine`, and they are shown again when serpis starts.
+
+serpis installs its node (`serpis-node`, one file, no GUI) on a machine the first time it
+connects: into `~/.serpis/bin` there, named by its SHA-256 and checked before every start. The
+install script builds it for this Mac and, with `cargo-zigbuild` and the Rust targets installed,
+for Linux x86-64 and arm64 (`scripts/build-node.sh --store [target]` does one); `remote-deploy`
+turns installing off, and `remote-node-command` runs something else there. On the machine, the
+node keeps its settings in `~/.serpis/node/settings.json` (the variables above, by name) and uses
+models and keys from `~/.serpis/agent` or `~/.pi/agent` there. `scripts/ssh-check.sh <host>`
+runs a whole chat over real ssh in a throwaway directory there, with a mock model.
+
 ## Images
 
 - **Chats**: paste an image (Cmd-V with a screenshot on the clipboard) or drop image files on a chat:

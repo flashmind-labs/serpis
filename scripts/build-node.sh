@@ -8,8 +8,12 @@
 #       glibc 2.28 or newer, 2018 on): needs `cargo zigbuild` (cargo install cargo-zigbuild;
 #       zig is already a serpis build dependency) and `rustup target add` for it
 #   SERPIS_BUILD_PACKAGES="serpis-node serpis-testkit" ...   # also the mock provider (tests)
+#   scripts/build-node.sh --store [target]   # and keep it where serpis installs nodes from
+#       (~/.serpis/nodes/<target>/serpis-node, or $SERPIS_NODE_STORE)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
+store=""
+if [[ "${1:-}" == "--store" ]]; then store="${SERPIS_NODE_STORE:-$HOME/.serpis/nodes}"; shift; fi
 # The workspace links std dynamically for the desktop's plugins (.cargo/config.toml); the node
 # loads none. RUSTFLAGS replaces the config's flags (a --config array would add to them), and a
 # target directory of its own keeps the two kinds of build from rebuilding each other.
@@ -23,5 +27,13 @@ if [[ $# -gt 0 ]]; then
 else
   cargo build --release -q --manifest-path "$root/Cargo.toml" "${packages[@]}"
   out="$CARGO_TARGET_DIR/release/serpis-node"
+fi
+if [[ -n "$store" ]]; then
+  triple="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
+  triple="${triple%.2.*}"
+  mkdir -p "$store/$triple"
+  # Replaced, not overwritten in place: a node running from the old file keeps its copy.
+  cp "$out" "$store/$triple/.serpis-node.new" && mv -f "$store/$triple/.serpis-node.new" "$store/$triple/serpis-node"
+  out="$store/$triple/serpis-node"
 fi
 echo "$out"

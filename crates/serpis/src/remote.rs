@@ -53,6 +53,9 @@ pub struct Remotes {
     next_answer: u64,
     rayfish: Vec<Machine>,
     rayfish_checked: Option<Instant>,
+    /// The node builds serpis installs on machines, as last scanned: (directory, when it
+    /// changed, builds).
+    builds: Option<(std::path::PathBuf, Option<std::time::SystemTime>, Vec<serpis_node::deploy::NodeBinary>)>,
 }
 
 /// The machines chats can run on: `remote-hosts`, then rayfish peers.
@@ -72,8 +75,23 @@ pub fn machines(ed: &mut Editor) -> Vec<Machine> {
     out
 }
 
-fn node_command(ed: &Editor) -> String {
-    ed.var_str("remote-node-command").filter(|c| !c.is_empty()).unwrap_or_else(|| serpis_node::client::AGENT_COMMAND.into())
+/// The node builds to install on machines (`remote-node-builds`), scanned again when the
+/// directory changes.
+fn node_builds(ed: &mut Editor) -> Vec<serpis_node::deploy::NodeBinary> {
+    if !ed.var("remote-deploy").and_then(Value::as_bool).unwrap_or(true) {
+        return Vec::new();
+    }
+    let dir = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into()));
+    let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+    if let Some((d, m, builds)) = &ed.remote.builds
+        && *d == dir
+        && *m == modified
+    {
+        return builds.clone();
+    }
+    let builds = serpis_node::deploy::scan(&dir);
+    ed.remote.builds = Some((dir, modified, builds.clone()));
+    builds
 }
 
 /// The host an ssh target reaches, without its user.
@@ -84,17 +102,21 @@ fn ssh_host(t: &Target) -> Option<String> {
     }
 }
 
-fn ssh_target(ed: &Editor, host: &str, command: Option<String>) -> Target {
-    let Target::Ssh { mut ssh_args, .. } = Target::ssh(host) else { unreachable!() };
+fn ssh_target(ed: &mut Editor, host: &str, command: Option<String>) -> Target {
+    let mut t = Target::ssh(host);
+    let Target::Ssh { ssh_args, command: run, deploy, .. } = &mut t else { unreachable!() };
     if let Some(Value::Array(extra)) = ed.var("remote-ssh-args") {
         ssh_args.extend(extra.iter().filter_map(Value::as_str).map(str::to_string));
     }
-    Target::Ssh { host: host.to_string(), command: command.unwrap_or_else(|| node_command(ed)), ssh_args }
+    *run = command.or_else(|| ed.var_str("remote-node-command")).filter(|c| !c.is_empty());
+    *deploy = node_builds(ed);
+    t
 }
 
-/// `remote-hosts`: `"box"`, or `{name, host, node_command, command}` (`command`: a program that
-/// speaks the protocol on stdio instead of ssh, e.g. for a container).
-fn configured(ed: &Editor) -> Vec<Machine> {
+/// `remote-hosts`: `"box"`, or `{name, host, env, node_command, command}` (`env`: variables for
+/// what runs there; `command`: a program that speaks the protocol on stdio instead of ssh, e.g.
+/// for a container).
+fn configured(ed: &mut Editor) -> Vec<Machine> {
     let Some(Value::Array(list)) = ed.var("remote-hosts").cloned() else { return Vec::new() };
     list.iter()
         .filter_map(|h| {
@@ -105,7 +127,13 @@ fn configured(ed: &Editor) -> Vec<Machine> {
                     let name = o.get("name").and_then(Value::as_str).or(host)?.to_string();
                     let target = match o.get("command") {
                         Some(Value::Array(argv)) => Target::Command(argv.iter().filter_map(Value::as_str).map(str::to_string).collect()),
-                        _ => ssh_target(ed, host?, o.get("node_command").and_then(Value::as_str).map(str::to_string)),
+                        _ => {
+                            let mut t = ssh_target(ed, host?, o.get("node_command").and_then(Value::as_str).map(str::to_string));
+                            if let (Target::Ssh { env, .. }, Some(Value::Object(vars))) = (&mut t, o.get("env")) {
+                                env.extend(vars.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))));
+                            }
+                            t
+                        }
                     };
                     (name, target)
                 }
@@ -177,6 +205,8 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
         _ => {}
     }
     ed.remote.conns.insert(machine.to_string(), Conn::Connecting(vec![Box::new(f)]));
+    // The first connect to a machine installs its node, which takes a few seconds.
+    ed.message(format!("Connecting to {machine}…"));
     let target = target_of(ed, machine);
     let (main, name) = (ed.main_sender(), machine.to_string());
     ed.rt.spawn(async move {
@@ -453,10 +483,12 @@ pub fn reopen(ed: &mut Editor, list: &Value) {
 
 pub fn install(ed: &mut Editor) {
     let o = BUILTIN;
-    ed.defvar("remote-hosts", json!([]), "Machines chats can run on: ssh destinations (\"gpu-box\", \"me@lab\", a rayfish name like \"box.home.ray\"), or {name, host, node_command} / {name, command = {argv}} tables. Each needs serpis-node on its PATH (scripts/build-node.sh).");
+    ed.defvar("remote-hosts", json!([]), "Machines chats can run on: ssh destinations (\"gpu-box\", \"me@lab\", a rayfish name like \"box.home.ray\"), or {name, host, env = {VAR = value}, node_command} / {name, command = {argv}} tables. serpis installs its node on each the first time (remote-deploy).");
     ed.defvar("remote-rayfish", json!(true), "Also offer the peers of your rayfish networks (`ray status --json`) as machines, as hostname.network.ray.");
     ed.defvar("remote-rayfish-command", json!(""), "The ray command for remote-rayfish (\"\": ray on PATH, else the one in /Applications/Rayfish.app).");
-    ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh (\"\": serpis-node agent, from PATH, ~/.local/bin or ~/.cargo/bin).");
+    ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh, instead of the node serpis installs there (\"\": serpis's own, else serpis-node from PATH, ~/.local/bin or ~/.cargo/bin).");
+    ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
+    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<target triple>/serpis-node (scripts/build-node.sh --store, and the install script, put them there).");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 
     ed.define_command("remote-new-chat", "Start a chat on another machine: pick the machine, then a folder there (params: machine, folder, model).", o, |ed, a| {
