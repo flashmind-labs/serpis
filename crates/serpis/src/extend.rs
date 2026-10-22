@@ -70,7 +70,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.buffer.set_local", "(key, value): a buffer-local setting for the current buffer."),
     // Chats (buf: a chat's buffer id; nil = the current buffer; in serpis_lua, CHAT is your own chat).
     ("serpis.chat.list", "(): every chat as serpis.chat.info returns it."),
-    ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil}."),
+    ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil, session_id (the chat's id on its machine), machine = name | nil (where it runs, when not here)}."),
     ("serpis.chat.usage", "(buf?): the whole session's {input, output, cache_read, cache_write, total_tokens, cost} (cost in dollars, every message so far)."),
     ("serpis.chat.cache", "(buf?): the prompt cache: {hit_rate (share of prompt tokens read from the cache), state (\"warm\", \"cold\" or nil before anything was cached), left (seconds until it expires), misses = {{cause, text, tokens, cost}}} (newest last)."),
     ("serpis.chat.running", "(buf?): whether its agent is working."),
@@ -179,6 +179,8 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("after-tool-call", "{buffer, name, text, isError}: a tool finished. Return {text = \"...\"} to replace what the model sees."),
     ("tool-finished", "{buffer, name, isError}: a tool's result reached the chat."),
     ("agent-finished", "{buffer, total}: a chat's agent stopped (done, failed or aborted)."),
+    ("remote-connected", "{machine, host, serpis}: serpis reached the node on another machine (host: what it calls itself; serpis: its version)."),
+    ("remote-disconnected", "{machine, error}: the node on another machine couldn't be reached, or its connection closed; it is retried while one of its chats is shown."),
     ("session-resumed", "{buffer, path, id, messages}: a saved session was loaded into a chat."),
     ("buffer-created", "{buffer, kind}."),
     ("buffer-shown", "{buffer}: a buffer was shown in a window."),

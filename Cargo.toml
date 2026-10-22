@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/serpis-ai", "crates/serpis-proto", "crates/serpis-chat", "crates/serpis-agent", "crates/serpis", "crates/serpis-bin", "crates/serpis-testkit", "examples/plugins/hello"]
+members = ["crates/serpis-ai", "crates/serpis-proto", "crates/serpis-chat", "crates/serpis-node", "crates/serpis-agent", "crates/serpis", "crates/serpis-bin", "crates/serpis-testkit", "examples/plugins/hello"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,7 @@ serpis-ai = { path = "crates/serpis-ai" }
 serpis-proto = { path = "crates/serpis-proto" }
 serpis-agent = { path = "crates/serpis-agent" }
 serpis-chat = { path = "crates/serpis-chat" }
+serpis-node = { path = "crates/serpis-node" }
 serpis = { path = "crates/serpis" }
 serpis-testkit = { path = "crates/serpis-testkit" }
 anyhow = "1"

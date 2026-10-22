@@ -3324,6 +3324,7 @@ dependencies = [
  "serpis-agent",
  "serpis-ai",
  "serpis-chat",
+ "serpis-node",
  "serpis-proto",
  "slotmap",
  "syntect",
@@ -3404,6 +3405,25 @@ dependencies = [
  "serpis-proto",
  "serpis-testkit",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "serpis-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "nix",
+ "serde_json",
+ "serpis-agent",
+ "serpis-ai",
+ "serpis-chat",
+ "serpis-proto",
+ "serpis-testkit",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

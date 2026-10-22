@@ -374,10 +374,14 @@ pub fn items(ed: &mut Editor) -> Vec<Item> {
     for id in ids {
         let Some(meta) = ed.meta(id).cloned() else { continue };
         let dir = ed.buffer_directory(id);
-        let repo = dir.as_ref().and_then(|d| ed.repo_of(d));
-        let project = match &repo {
-            Some(r) => Some(r.main.clone()),
-            None => dir.as_ref().and_then(|d| crate::project::root(d)),
+        let machine = ed.buffer_machine(id);
+        // Work on another machine is grouped under its folder there, `host:/path`: nothing about
+        // it can be looked up on this machine's disk.
+        let repo = dir.as_ref().filter(|_| machine.is_none()).and_then(|d| ed.repo_of(d));
+        let project = match (&machine, &repo) {
+            (Some(m), _) => dir.as_ref().map(|d| PathBuf::from(format!("{m}:{}", d.display()))),
+            (None, Some(r)) => Some(r.main.clone()),
+            (None, None) => dir.as_ref().and_then(|d| crate::project::root(d)),
         };
         let activity = ed.buffer_activity(id);
         let agent = meta.major == "chat" || activity.program.as_deref().is_some_and(|p| is_agent_program(ed, p));
@@ -415,7 +419,20 @@ fn sort_items(ed: &Editor, items: &mut [Item]) {
 }
 
 fn dir_name(p: &Path) -> String {
+    if let Some((machine, path)) = remote_root(p) {
+        return format!("{} · {machine}", dir_name(path));
+    }
     p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string_lossy().into_owned())
+}
+
+/// A folder on another machine as the sidebar keys it, `host:/path`: (host, path).
+pub fn remote_root(p: &Path) -> Option<(&str, &Path)> {
+    let s = p.to_str()?;
+    if s.starts_with('/') {
+        return None;
+    }
+    let (machine, _) = s.split_once(":/")?;
+    Some((machine, Path::new(&s[machine.len() + 1..])))
 }
 
 /// Buffers grouped by project and worktree, with pinned projects and known worktrees

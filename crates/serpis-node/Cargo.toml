@@ -1,0 +1,27 @@
+[package]
+name = "serpis-node"
+description = "The headless serpis node: runs chats on a machine for clients elsewhere (the desktop, the iOS app), reached over its socket or `ssh <host> serpis-node agent`"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "serpis-node"
+path = "src/main.rs"
+
+[dependencies]
+serpis-ai.workspace = true
+serpis-agent.workspace = true
+serpis-chat.workspace = true
+serpis-proto.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nix = { version = "0.29", features = ["hostname", "process", "user"] }
+
+[dev-dependencies]
+serpis-testkit.workspace = true

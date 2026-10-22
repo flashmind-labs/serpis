@@ -87,7 +87,7 @@ pub fn kill(ed: &mut Editor, from: Pos, to: Pos, save: bool) -> Option<String> {
     text
 }
 
-fn current_chat(ed: &mut Editor) -> Option<BufferId> {
+pub fn current_chat(ed: &mut Editor) -> Option<BufferId> {
     let id = ed.current_buffer();
     (ed.meta(id)?.major == "chat").then_some(id)
 }
@@ -912,6 +912,25 @@ pub fn install(ed: &mut Editor) {
                 if let Err(e) = ed.set_chat_model(id, &spec) {
                     ed.error(format!("{e:#}"));
                 }
+            });
+            return Ok(());
+        }
+        // A chat on another machine uses that machine's models and keys.
+        if let Some(id) = current_chat(ed)
+            && let Some(machine) = ed.buffer_machine(id)
+        {
+            let m = machine.clone();
+            crate::remote::request(ed, &machine, serpis_proto::wire::Request::Models, move |ed, r| match r {
+                Ok(serpis_proto::wire::Response::Models { models }) => {
+                    let cands = models.into_iter().map(|i| Candidate::new(i.model).detail(format!("{}{}", i.name, if i.reasoning { "  ◆" } else { "" }))).collect();
+                    ed.completing_read(&format!("Model on {m}: "), cands, true, move |ed, c, _| {
+                        if let Some(c) = c {
+                            ed.with_buffer_as::<ChatBuffer, _>(id, |chat, _| chat.set_remote_model(&c.value));
+                        }
+                    });
+                }
+                Ok(other) => ed.error(format!("{m}: unexpected answer {other:?}")),
+                Err(e) => ed.error(format!("{m}: {e}")),
             });
             return Ok(());
         }

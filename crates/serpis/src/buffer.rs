@@ -122,6 +122,11 @@ pub trait Buffer: Any {
         None
     }
 
+    /// The machine this buffer's work runs on, when it isn't this one (a remote chat).
+    fn machine(&self) -> Option<String> {
+        None
+    }
+
     /// Called before the buffer is destroyed.
     fn on_kill(&mut self, _ed: &mut Editor) {}
 

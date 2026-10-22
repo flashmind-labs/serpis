@@ -36,6 +36,8 @@ pub struct ChatInfo {
     pub agent: Option<serpis_agent::AgentHandle>,
     /// The prompt cache: {hit_rate, state = "warm"|"cold"|nil, left (seconds), misses}.
     pub cache: Value,
+    /// The machine the chat runs on, when it isn't this one (`remote-hosts`).
+    pub machine: Option<String>,
 }
 
 pub fn usage_json(u: &Usage) -> Value {
@@ -61,6 +63,8 @@ impl ChatInfo {
             "title": self.title,
             "cwd": self.cwd,
             "session": self.session,
+            "session_id": self.session_id,
+            "machine": self.machine,
             "context": {
                 "used": self.context.0.unwrap_or(0),
                 "window": self.context.1,
@@ -119,6 +123,12 @@ impl Editor {
 
     /// Switch chat `id` to model `spec`; errors when it is unknown or has no credentials.
     pub fn set_chat_model(&mut self, id: BufferId, spec: &str) -> anyhow::Result<()> {
+        // A chat on another machine: that machine knows its models.
+        if self.buffer_machine(id).is_some() {
+            let spec = spec.to_string();
+            self.with_chat_soon(id, move |c, _| c.set_remote_model(&spec));
+            return Ok(());
+        }
         let model = self.find_model(spec).ok_or_else(|| anyhow::anyhow!("Model {spec} not found (see serpis.agent.models())"))?;
         if !self.provider_configured(&model.provider) {
             anyhow::bail!("No credentials for provider {}", model.provider);

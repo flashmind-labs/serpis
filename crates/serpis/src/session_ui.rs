@@ -302,6 +302,7 @@ pub fn save_open(ed: &mut Editor) {
     let ids: Vec<BufferId> = ed.buffers.keys().collect();
     let open: Vec<String> = ids.into_iter().filter_map(|id| session_of(ed, id)).map(|p| p.to_string_lossy().into_owned()).collect();
     ed.persist_state("open-sessions", json!(open));
+    ed.persist_state("open-remote-chats", crate::remote::open_chats(ed));
 }
 
 /// Reopen the chats that were open last time (in the background of the sidebar, unshown).
@@ -317,6 +318,10 @@ pub fn restore_open(ed: &mut Editor) {
                 ed.warn(format!("restoring {}: {e:#}", p.display()));
             }
         }
+    }
+    // Chats on other machines kept running there: show them again.
+    if let Some(list) = Editor::persisted_state("open-remote-chats") {
+        crate::remote::reopen(ed, &list);
     }
 }
 

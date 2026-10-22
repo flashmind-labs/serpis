@@ -246,6 +246,8 @@ pub struct Editor {
     deferred: Vec<Deferred>,
     /// Lua extensions (`<config>/extensions`) that loaded without errors.
     pub loaded_extensions: Vec<String>,
+    /// Connections to the nodes of other machines (remote chats).
+    pub remote: crate::remote::Remotes,
 }
 
 impl Editor {
@@ -324,6 +326,7 @@ impl Editor {
             buffer_stack: Vec::new(),
             deferred: Vec::new(),
             loaded_extensions: Vec::new(),
+            remote: Default::default(),
         }
     }
 
@@ -836,6 +839,11 @@ impl Editor {
     /// The directory a buffer works in (file directory, chat cwd, terminal pwd).
     pub fn buffer_directory(&self, id: BufferId) -> Option<std::path::PathBuf> {
         self.buffers.get(id)?.buf.as_ref()?.directory()
+    }
+
+    /// The machine a buffer's work runs on, when it isn't this one.
+    pub fn buffer_machine(&self, id: BufferId) -> Option<String> {
+        self.buffers.get(id)?.buf.as_ref()?.machine()
     }
 
     // ------------------------------------------------------------------

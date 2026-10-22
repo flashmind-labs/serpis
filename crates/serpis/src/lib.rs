@@ -35,6 +35,7 @@ pub mod motion;
 pub mod mouse;
 pub mod packages;
 pub mod pickers;
+pub mod remote;
 pub mod plugins;
 pub mod project;
 pub use serpis_chat::session;
@@ -162,6 +163,7 @@ pub fn bootstrap(ed: &mut Editor) {
     mouse::install(ed);
     sidebar::install(ed);
     session_ui::install(ed);
+    remote::install(ed);
     pickers::install(ed);
     jump::install(ed);
     extend::install(ed);

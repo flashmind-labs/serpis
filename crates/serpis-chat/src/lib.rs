@@ -69,6 +69,29 @@ pub trait Host {
     }
 }
 
+/// The model a new chat starts with: `agent_model` (`provider/id`, the `agent-model` setting),
+/// then pi's settings (`defaultProvider`/`defaultModel`), then any model with credentials.
+pub fn default_model(registry: &Registry, agent_model: Option<&str>) -> Option<Model> {
+    let supported = |m: &Model| api::SUPPORTED_APIS.contains(&m.api.as_str()) || m.api == "azure-openai-responses";
+    if let Some(m) = agent_model.and_then(|s| s.split_once('/')).and_then(|(p, id)| registry.find(p, id)) {
+        return Some(m);
+    }
+    if let (Some(p), Some(id)) = (pi_setting("defaultProvider"), pi_setting("defaultModel")) {
+        if let Some(m) = registry.find(&p, &id) {
+            return Some(m);
+        }
+    }
+    let configured = registry.configured_providers();
+    registry.models().into_iter().find(|m| configured.contains(&m.provider) && supported(m))
+}
+
+/// A setting from pi's `~/.pi/agent/settings.json`.
+pub fn pi_setting(key: &str) -> Option<String> {
+    let p = dirs::home_dir()?.join(".pi/agent/settings.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+    v.get(key)?.as_str().map(str::to_string)
+}
+
 /// `~/x` → the home folder's `x`.
 pub fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/").or_else(|| (p == "~").then_some("")) {

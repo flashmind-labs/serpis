@@ -57,9 +57,32 @@ pub enum Focus {
     Prompt,
 }
 
+/// A chat running on another machine's node, which this buffer shows.
+pub struct RemoteChat {
+    /// The machine (as `remote-hosts` or rayfish names it).
+    pub machine: String,
+    /// The chat's id on its node.
+    pub chat: String,
+    /// The chat as its node last said.
+    pub state: serpis_proto::ChatState,
+    /// Whether the connection to the node is up.
+    pub online: bool,
+    main: MainSender,
+}
+
+impl RemoteChat {
+    /// Send a request about this chat to its node (at the next tick, where the editor is free).
+    fn post(&self, request: serpis_proto::wire::Request) {
+        let m = self.machine.clone();
+        self.main.send(move |ed| crate::remote::send(ed, &m, request));
+    }
+}
+
 pub struct ChatBuffer {
-    /// The conversation and the agent working on it.
+    /// The conversation and the agent working on it (unused while the chat runs elsewhere).
     pub chat: serpis_chat::Chat,
+    /// Set when the chat runs on another machine: what is shown comes from its node.
+    pub remote: Option<RemoteChat>,
     /// The transcript as last received, and how each entry is shown here.
     entries: Vec<Entry>,
     views: Vec<View>,
@@ -156,6 +179,7 @@ fn info_of(c: &serpis_chat::Chat) -> crate::chat_api::ChatInfo {
         agent: c.agent().cloned(),
         context: c.context(),
         cache: c.cache_json(),
+        machine: None,
     }
 }
 
@@ -182,6 +206,7 @@ impl ChatBuffer {
         let main = ed.main_sender();
         let mut chat = ChatBuffer {
             chat: serpis_chat::Chat::new(init, Arc::new(move || main.repaint())),
+            remote: None,
             entries: Vec::new(),
             views: Vec::new(),
             prompt,
@@ -205,8 +230,109 @@ impl ChatBuffer {
         chat
     }
 
+    /// A buffer showing `chat` on `machine` (attach it to receive the chat).
+    pub fn new_remote(ed: &mut Editor, machine: &str, chat: &str) -> Self {
+        let mut c = ChatBuffer::new(ed, &Value::Null);
+        c.become_remote(ed, machine, chat);
+        c
+    }
+
+    /// Show `chat` on `machine` from now on (this buffer's own chat must be empty).
+    pub fn become_remote(&mut self, ed: &mut Editor, machine: &str, chat: &str) {
+        self.remote = Some(RemoteChat { machine: machine.to_string(), chat: chat.to_string(), state: Default::default(), online: true, main: ed.main_sender() });
+        self.entries.clear();
+        self.views.clear();
+        self.dirty = true;
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
+        }
+    }
+
+    /// Run here again: the (empty) chat on the other machine is closed there.
+    pub fn become_local(&mut self, ed: &mut Editor) {
+        let Some(r) = self.remote.take() else { return };
+        r.post(serpis_proto::wire::Request::Close { chat: r.chat.clone() });
+        self.entries.clear();
+        self.views.clear();
+        self.apply_splice(self.chat.full_splice());
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
+        }
+    }
+
+    /// No messages yet: the chat can still move to another machine as it is.
+    pub fn is_empty(&self) -> bool {
+        match &self.remote {
+            Some(_) => !self.entries.iter().any(|e| matches!(e, Entry::User { .. })),
+            None => self.chat.history.is_empty() && !self.chat.running(),
+        }
+    }
+
+    pub fn remote_chat_id(&self) -> Option<String> {
+        self.remote.as_ref().map(|r| r.chat.clone())
+    }
+
+    pub fn set_online(&mut self, online: bool) {
+        if let Some(r) = &mut self.remote {
+            r.online = online;
+            self.dirty = true;
+        }
+    }
+
+    /// Something the chat's node sent about it.
+    pub fn remote_event(&mut self, ed: &mut Editor, ev: serpis_proto::wire::Event) {
+        use serpis_proto::wire::{Event, NoticeLevel};
+        let Some(r) = &mut self.remote else { return };
+        r.online = true;
+        let machine = r.machine.clone();
+        match ev {
+            Event::Splice { splice, .. } => self.apply_splice(splice),
+            Event::State { state, .. } => {
+                let was = r.state.running;
+                r.state = state;
+                match (was, r.state.running) {
+                    (false, true) => self.started = Some(Instant::now()),
+                    (true, false) => self.started = None,
+                    _ => {}
+                }
+                self.dirty = true;
+            }
+            Event::Notice { level, text, .. } => match level {
+                NoticeLevel::Info => ed.message(format!("{machine}: {text}")),
+                NoticeLevel::Warn => ed.warn(format!("{machine}: {text}")),
+                NoticeLevel::Error => ed.error(format!("{machine}: {text}")),
+            },
+            Event::Closed { .. } => {
+                r.online = false;
+                ed.warn(format!("The chat was closed on {machine}"));
+            }
+        }
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
+        }
+    }
+
+    /// The chat as the header, composer and sidebar show it, wherever it runs.
+    pub fn state_now(&self) -> serpis_proto::ChatState {
+        match &self.remote {
+            Some(r) => r.state.clone(),
+            None => self.chat.state(),
+        }
+    }
+
+    /// The model's id without its provider, or None.
+    fn model_short(&self) -> Option<String> {
+        match &self.remote {
+            Some(r) => r.state.model.as_deref().map(|m| short_model(m.split_once('/').map_or(m, |(_, id)| id)).to_string()),
+            None => self.chat.model.as_ref().map(|m| short_model(&m.id).to_string()),
+        }
+    }
+
     /// Show what changed in the chat since the last time.
     fn sync(&mut self) {
+        if self.remote.is_some() {
+            return;
+        }
         if let Some(s) = self.chat.take_splice() {
             self.apply_splice(s);
         }
@@ -260,11 +386,17 @@ impl ChatBuffer {
     }
 
     pub fn running(&self) -> bool {
-        self.chat.running()
+        match &self.remote {
+            Some(r) => r.state.running,
+            None => self.chat.running(),
+        }
     }
 
     pub fn abort(&mut self) {
-        self.chat.abort();
+        match &self.remote {
+            Some(r) => r.post(serpis_proto::wire::Request::Abort { chat: r.chat.clone() }),
+            None => self.chat.abort(),
+        }
     }
 
     pub fn clear(&mut self) {
@@ -273,17 +405,47 @@ impl ChatBuffer {
     }
 
     pub fn set_model(&mut self, m: Model) {
-        self.chat.set_model(m);
+        match &self.remote {
+            Some(r) => r.post(serpis_proto::wire::Request::SetModel { chat: r.chat.clone(), model: format!("{}/{}", m.provider, m.id) }),
+            None => self.chat.set_model(m),
+        }
         self.dirty = true;
+    }
+
+    /// Use model `spec` (`provider/id`) on the chat's machine.
+    pub fn set_remote_model(&mut self, spec: &str) {
+        if let Some(r) = &self.remote {
+            r.post(serpis_proto::wire::Request::SetModel { chat: r.chat.clone(), model: spec.to_string() });
+        }
     }
 
     pub fn cycle_thinking(&mut self) {
-        self.chat.cycle_thinking();
+        match &self.remote {
+            Some(r) => {
+                // The node clamps the level to what its model supports.
+                let levels = ThinkingLevel::ALL;
+                let now = ThinkingLevel::parse(&r.state.thinking).unwrap_or(ThinkingLevel::Medium);
+                let next = levels[(levels.iter().position(|l| *l == now).unwrap_or(0) + 1) % levels.len()];
+                r.post(serpis_proto::wire::Request::SetThinking { chat: r.chat.clone(), level: next.as_str().into() });
+            }
+            None => self.chat.cycle_thinking(),
+        }
     }
 
     pub fn set_thinking(&mut self, level: ThinkingLevel) {
-        self.chat.set_thinking(level);
+        match &self.remote {
+            Some(r) => r.post(serpis_proto::wire::Request::SetThinking { chat: r.chat.clone(), level: level.as_str().into() }),
+            None => self.chat.set_thinking(level),
+        }
         self.dirty = true;
+    }
+
+    /// The thinking level, as shown.
+    pub fn thinking_level(&self) -> ThinkingLevel {
+        match &self.remote {
+            Some(r) => ThinkingLevel::parse(&r.state.thinking).unwrap_or(ThinkingLevel::Medium),
+            None => self.chat.thinking,
+        }
     }
 
     /// Send the prompt: start a run, or steer the running one.
@@ -307,6 +469,14 @@ impl ChatBuffer {
     /// `{block = "reason"}`, no model, a compaction running); the images stay attached then.
     pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) -> bool {
         let images: Vec<serpis_proto::Image> = self.attachments.iter().map(|a| serpis_proto::Image { mime: a.encoded.mime.clone(), data: a.encoded.data.to_string() }).collect();
+        if let Some(r) = &self.remote {
+            // The node answers refusals as notices; a lost reply is safe to retry with its id.
+            let request_id = Some(uuid::Uuid::now_v7().to_string());
+            crate::remote::send(ed, &r.machine.clone(), serpis_proto::wire::Request::Prompt { chat: r.chat.clone(), text, images, follow_up, request_id });
+            self.attachments.clear();
+            self.view.follow_tail = true;
+            return true;
+        }
         let ok = self.with_host(ed, |c, h| c.submit(h, text, images, follow_up, None)).is_ok();
         if ok {
             self.attachments.clear();
@@ -317,17 +487,26 @@ impl ChatBuffer {
 
     /// Replace the messages before a cut point with a summary (chat-compact).
     pub fn compact(&mut self, ed: &mut Editor, reason: CompactReason, instructions: Option<String>) {
+        if let Some(r) = &self.remote {
+            return r.post(serpis_proto::wire::Request::Compact { chat: r.chat.clone(), instructions });
+        }
         self.with_host(ed, |c, h| c.compact(h, reason, instructions));
     }
 
     pub fn context(&self) -> (Option<u64>, u64) {
-        self.chat.context()
+        match &self.remote {
+            Some(r) => r.state.context,
+            None => self.chat.context(),
+        }
     }
 
     /// `↑12k ↓3.4k R1.2M W40k $1.234 45.2%/200k`, as pi's footer: the session's input, output,
     /// cache reads and writes, cost, then context used of the window.
     pub fn usage_label(&self) -> String {
-        let u = &self.chat.totals;
+        let u = &match &self.remote {
+            Some(r) => r.state.usage.clone(),
+            None => self.chat.totals.clone(),
+        };
         let mut parts = vec![format!("↑{}", fmt_tokens(u.input)), format!("↓{}", fmt_tokens(u.output))];
         if u.cache_read > 0 {
             parts.push(format!("R{}", fmt_tokens(u.cache_read)));
@@ -368,7 +547,24 @@ impl ChatBuffer {
 
     /// This chat as seen from outside (`Editor::chats`, `serpis.chat`).
     pub fn info(&self) -> crate::chat_api::ChatInfo {
-        info_of(&self.chat)
+        let Some(r) = &self.remote else { return info_of(&self.chat) };
+        let s = &r.state;
+        crate::chat_api::ChatInfo {
+            model: s.model.clone(),
+            thinking: s.thinking.clone(),
+            running: s.running,
+            compacting: s.compacting,
+            usage: s.usage.clone(),
+            title: s.title.clone(),
+            cwd: s.cwd.clone(),
+            session: None,
+            session_id: r.chat.clone(),
+            entries: Vec::new(),
+            agent: None,
+            context: s.context,
+            cache: Value::Null,
+            machine: Some(r.machine.clone()),
+        }
     }
 
     pub fn publish(&self, ed: &mut Editor, id: crate::BufferId) {
@@ -1242,28 +1438,10 @@ pub struct Attachment {
 
 /// `agent-model` var, then pi's settings (`defaultProvider`/`defaultModel`), then any model with credentials.
 pub fn default_model(ed: &Editor) -> Option<Model> {
-    let supported = |m: &Model| serpis_ai::api::SUPPORTED_APIS.contains(&m.api.as_str()) || m.api == "azure-openai-responses";
-    if let Some(spec) = ed.var_str("agent-model") {
-        if let Some((p, id)) = spec.split_once('/') {
-            if let Some(m) = ed.registry.find(p, id) {
-                return Some(m);
-            }
-        }
-    }
-    if let (Some(p), Some(id)) = (pi_setting("defaultProvider"), pi_setting("defaultModel")) {
-        if let Some(m) = ed.registry.find(&p, &id) {
-            return Some(m);
-        }
-    }
-    let configured = ed.registry.configured_providers();
-    ed.registry.models().into_iter().find(|m| configured.contains(&m.provider) && supported(m))
+    serpis_chat::default_model(&ed.registry, ed.var_str("agent-model").as_deref())
 }
 
-pub fn pi_setting(key: &str) -> Option<String> {
-    let p = dirs::home_dir()?.join(".pi/agent/settings.json");
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-    v.get(key)?.as_str().map(str::to_string)
-}
+pub use serpis_chat::pi_setting;
 
 /// Runs `before-tool-call` / `after-tool-call` editor hooks on the UI thread.
 struct EditorToolHooks {
@@ -1349,7 +1527,7 @@ impl Buffer for ChatBuffer {
             self.show_cache = show;
             self.dirty = true;
         }
-        if show.1 && matches!(self.chat.cache.state(Instant::now()), Some(crate::cache_watch::State::Warm(_))) {
+        if show.1 && self.remote.is_none() && matches!(self.chat.cache.state(Instant::now()), Some(crate::cache_watch::State::Warm(_))) {
             ui.ctx().request_repaint_after(Duration::from_secs(30));
         }
         // A centered reading column; tables are laid out for its width.
@@ -1501,16 +1679,28 @@ impl Buffer for ChatBuffer {
             crate::chrome::text(&painter, egui::pos2(tx, cy), label, small.clone(), if resp.hovered() { theme.fg } else { theme.fg_dim }, w);
             (r, resp.clicked())
         };
-        let model = self.chat.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
+        let model = self.model_short().unwrap_or_else(|| "Choose a model".into());
         let (mr, clicked) = pill(ui, bar.left(), "model", &model, "Model (chat-select-model)", Some(theme.accent));
         if clicked {
             run = Some("chat-select-model");
         }
-        let thinking = format!("Thinking · {}", self.chat.thinking.as_str());
+        let thinking = format!("Thinking · {}", self.thinking_level().as_str());
         let (tr, clicked) = pill(ui, mr.right() + 2.0 * k, "thinking", &thinking, "Thinking level (chat-select-thinking)", None);
         if clicked {
             run = Some("chat-select-thinking");
         }
+        // Where the chat runs: this machine, or another one's node.
+        let machine = match &self.remote {
+            Some(r) if r.online => format!("⇄ {}", r.machine),
+            Some(r) => format!("⇄ {} · offline", r.machine),
+            None => "local".to_string(),
+        };
+        let (wr, clicked) = pill(ui, tr.right() + 2.0 * k, "machine", &machine, "Where this chat runs (chat-select-machine)", None);
+        if clicked {
+            run = Some("chat-select-machine");
+        }
+        // The activity and usage labels fit between these pills and the send button.
+        let (think_r, tr) = (tr, wr);
 
         // Send (or stop) on the right.
         let d = 28.0 * k;
@@ -1554,7 +1744,7 @@ impl Buffer for ChatBuffer {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
-        hits.extend([("model", mr), ("thinking", tr), ("send", send), ("card", card)]);
+        hits.extend([("model", mr), ("thinking", think_r), ("machine", wr), ("send", send), ("card", card)]);
         self.composer_hits = hits;
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;
@@ -1600,37 +1790,58 @@ impl Buffer for ChatBuffer {
 
     fn modeline(&self) -> Modeline {
         // The model: clicking it chooses another, as the composer's model pill does.
-        let model = self.chat.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
+        let model = self.model_short().unwrap_or_else(|| "Choose a model".into());
         let mut status = vec![model];
         let mut status_commands = vec![Some("chat-select-model".into())];
+        // Where it runs: clicking it chooses another machine (for a chat with no messages yet).
+        if let Some(r) = &self.remote {
+            status.insert(0, if r.online { format!("⇄ {}", r.machine) } else { format!("⇄ {} · offline", r.machine) });
+            status_commands.insert(0, Some("chat-select-machine".into()));
+        }
         // The cache: clicking it lists its recent misses.
-        if let Some(c) = self.chat.cache_status().filter(|_| self.show_cache.1) {
+        if let Some(c) = self.state_now().cache.filter(|_| self.show_cache.1) {
             status.insert(0, c);
             status_commands.insert(0, Some("chat-cache-report".into()));
         }
-        Modeline { title: self.chat.title.clone(), status, status_commands, busy: self.running() }
+        Modeline { title: self.state_now().title, status, status_commands, busy: self.running() }
     }
 
     fn activity(&self) -> Activity {
-        if self.chat.compacting() {
+        let s = self.state_now();
+        if s.compacting {
             return Activity::new(ActivityState::Working, "compacting");
         }
-        if self.running() {
-            return Activity { since: self.started, ..Activity::new(ActivityState::Working, self.chat.current_step()) };
+        if s.running {
+            return Activity { since: self.started, ..Activity::new(ActivityState::Working, s.step.unwrap_or_else(|| "working".into())) };
         }
-        match &self.chat.last_error {
+        if self.remote.as_ref().is_some_and(|r| !r.online) {
+            return Activity::new(ActivityState::Error, "offline");
+        }
+        match &s.last_error {
             Some(e) => Activity::new(ActivityState::Error, e.lines().next().unwrap_or("")),
             // Idle chats say which model they talk to.
-            None => Activity::new(ActivityState::Idle, self.chat.model.as_ref().map(|m| short_model(&m.id)).unwrap_or("no model")),
+            None => Activity::new(ActivityState::Idle, self.model_short().as_deref().unwrap_or("no model")),
         }
     }
 
-    fn on_kill(&mut self, _ed: &mut Editor) {
-        self.abort();
+    fn on_kill(&mut self, ed: &mut Editor) {
+        match &self.remote {
+            // Closing the view of a chat elsewhere leaves it running there (remote-close-chat
+            // stops it).
+            Some(r) => crate::remote::send(ed, &r.machine.clone(), serpis_proto::wire::Request::Detach { chat: r.chat.clone() }),
+            None => self.abort(),
+        }
     }
 
     fn directory(&self) -> Option<std::path::PathBuf> {
-        Some(self.chat.cwd.clone())
+        match &self.remote {
+            Some(r) => (!r.state.cwd.is_empty()).then(|| std::path::PathBuf::from(&r.state.cwd)),
+            None => Some(self.chat.cwd.clone()),
+        }
+    }
+
+    fn machine(&self) -> Option<String> {
+        self.remote.as_ref().map(|r| r.machine.clone())
     }
 
     fn parts(&self) -> usize {

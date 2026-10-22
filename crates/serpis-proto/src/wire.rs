@@ -64,6 +64,10 @@ pub enum Request {
         images: Vec<Image>,
         #[serde(default)]
         follow_up: bool,
+        /// A client's id for this prompt: sending it again (after a lost reply) doesn't send
+        /// the message twice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     Abort { chat: String },
     Compact {
@@ -82,6 +86,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Stop the node: its chats are aborted, their sessions kept to reopen when it starts again.
+    Stop,
     /// The folders in a directory on the node (`~` and relative paths start from its home),
     /// for picking where a chat runs.
     Dirs { path: String },
@@ -117,6 +123,16 @@ pub enum Event {
     State { chat: String, state: ChatState },
     /// The chat was closed on the node.
     Closed { chat: String },
+    /// Something to tell whoever shows the chat (a refused prompt, a cache warning).
+    Notice { chat: String, level: NoticeLevel, text: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeLevel {
+    Info,
+    Warn,
+    Error,
 }
 
 /// A chat running on a node: its id (the session id) and state.
@@ -196,7 +212,7 @@ mod tests {
     fn frames_come_back_however_the_stream_is_cut() {
         let calls = [
             Call { id: 1, request: Request::Hello { version: VERSION, client: "test".into() } },
-            Call { id: 2, request: Request::Prompt { chat: "c".into(), text: "hi".into(), images: vec![], follow_up: false } },
+            Call { id: 2, request: Request::Prompt { chat: "c".into(), text: "hi".into(), images: vec![], follow_up: false, request_id: Some("r1".into()) } },
         ];
         let bytes: Vec<u8> = calls.iter().flat_map(|c| encode(tag::CALL, c)).collect();
         for cut in 1..bytes.len() {

@@ -287,9 +287,23 @@ Steps:
    rendering from splices. `crates/serpis-chat/tests/chat.rs` runs a real chat against the mock
    provider with no window and checks that a client fed JSON splices shows exactly the same
    transcript, that a retried request id doesn't run twice, and that the saved session resumes.
-2. `serpis-node`: the daemon, the protocol over its socket and over `ssh … agent`, a
-   machine picker and remote chats in the GUI, and the node's own settings (and later Lua)
-   standing in for `init.lua` hooks on boxes.
+2. *Done*: `serpis-node` (`crates/serpis-node`): one thread owns the chats; an owner-only
+   socket (0700 directory, peer uid checked); `serpis-node agent` bridges stdio for ssh and
+   starts a node in its own session when none runs; open chats come back when it restarts;
+   settings from `~/.serpis/node/settings.json` (the desktop's variable names); request ids, and
+   a lagging client gets a fresh snapshot instead of a backlog. `scripts/build-node.sh` builds
+   the one-file binary for a box (std linked statically). In the GUI (`crates/serpis/src/remote.rs`):
+   `remote-hosts` and rayfish peers (`ray --json status`) as machines, one connection per
+   machine with reconnects, the composer's machine pill (`chat-select-machine`) for a new chat,
+   `remote-new-chat`, `remote-attach-chat`, `remote-resume-chat`, `remote-close-chat`,
+   `remote-stop-node`, the machine's own models in `chat-select-model`, sidebar groups
+   `folder · machine`, and remote chats reopened on start. Closing a remote chat's window only
+   stops showing it. Tests: `crates/serpis-node/tests/node.rs` (socket, bridge, auto-start,
+   late joiners, retries, resume, restart) and `tests/ui/remote.lua` (the whole flow with real
+   input against a real node in a throwaway home, through `serpis-node agent` instead of ssh).
+   Not yet checked over a real ssh connection or rayfish.
+   Next here: the node's own Lua config (hooks and tools on boxes); running turns that survive
+   a node restart; parking a turn that keeps crashing it.
 3. Remote terminals through manymux.
 4. Moving and syncing chats; sessions of every machine in one list.
 5. The iOS app.

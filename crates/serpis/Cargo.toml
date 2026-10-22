@@ -14,6 +14,7 @@ serpis-ai.workspace = true
 serpis-agent.workspace = true
 serpis-proto.workspace = true
 serpis-chat.workspace = true
+serpis-node.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
