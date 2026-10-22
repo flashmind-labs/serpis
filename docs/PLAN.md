@@ -311,14 +311,23 @@ Steps:
    peers carry none, so `user@host` in `remote-hosts` replaces the peer), and non-interactive
    ssh has a short PATH (hence installing rather than looking for one). A newer serpis talking
    to an older running node isn't handled yet beyond a version check in hello.
-   Next here: the node's own Lua config (hooks and tools on boxes); running turns that survive
-   a node restart; parking a turn that keeps crashing it.
    **Pinned for later: release builds of the node.** Building a node on demand only works when
    serpis runs from its source with Rust installed; a clean install elsewhere has nothing to
    build from, and falls back to a serpis-node installed on the machine. The fix is a release
    pipeline publishing serpis-node for each system (Linux x86-64/arm64, macOS), which serpis
    downloads when a machine first needs one, checked against checksums built into serpis
    itself. Needs a decision on where releases are hosted.
-3. Remote terminals through manymux.
-4. Moving and syncing chats; sessions of every machine in one list.
-5. The iOS app.
+3. Moving chats between machines (next, in this order):
+   a. Node upgrades: a machine still running an older node is restarted on the new one when
+      none of its chats is mid-turn, and its chats come back.
+   b. Moving a chat with its history (here to a machine, back, or between two machines) into a
+      folder picked there; it continues with its session, and its id keeps provider caches
+      warm. The machine it left keeps the session, marked as moved.
+   c. Carrying the folder along: git first (the branch plus a snapshot commit of uncommitted
+      changes, into a worktree there), rsync over ssh otherwise; environment variables only
+      from an allowlist setting.
+   d. Sessions of every machine in one list.
+4. Remote terminals through manymux.
+5. Node reliability: running turns that survive a node restart, parking a turn that keeps
+   crashing it, the node's own Lua (hooks, tools, extensions on machines).
+6. The iOS app.
