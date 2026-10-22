@@ -27,13 +27,18 @@ pub enum Target {
     Command(Vec<String>),
 }
 
+/// What runs on a machine to reach its node: `serpis-node agent`, found on PATH or where a
+/// user install puts it. A non-interactive ssh session often has a short PATH (no
+/// `~/.local/bin`), and `sh -c` keeps it independent of the login shell (fish too).
+pub const AGENT_COMMAND: &str = r#"sh -c 'for p in serpis-node "$HOME/.local/bin/serpis-node" "$HOME/.cargo/bin/serpis-node"; do command -v "$p" >/dev/null 2>&1 && exec "$p" agent; done; echo "serpis-node is not installed on $(hostname) (not on PATH, nor in ~/.local/bin or ~/.cargo/bin)" >&2; exit 127'"#;
+
 impl Target {
     /// `ssh <host> serpis-node agent`, with options that suit a program with nobody at the
     /// terminal: no password prompts, and dead connections noticed within a minute.
     pub fn ssh(host: &str) -> Target {
         Target::Ssh {
             host: host.to_string(),
-            command: "serpis-node agent".into(),
+            command: AGENT_COMMAND.into(),
             ssh_args: ["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec(),
         }
     }

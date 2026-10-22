@@ -18,23 +18,41 @@ local function write(path, text)
   f:close()
 end
 
--- The other machine: its home, a project in it, its agent directory and its node directory.
+-- The other machine. By default a node on this one in a throwaway home of its own; with
+-- SERPIS_TEST_REMOTE_HOST (e.g. aelita@slimbook.net.ray) a real machine over ssh, where the node
+-- runs in a throwaway /tmp directory and the mock provider runs next to it
+-- (SERPIS_TEST_REMOTE_MOCK: its path there; serpis-node is found as for any machine).
+local remote = os.getenv("SERPIS_TEST_REMOTE_HOST")
+local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
+-- Run a shell command where the node runs.
+local function far(cmd)
+  if remote then return sh("ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new " .. remote .. " -- " .. q("sh -c " .. q(cmd))) end
+  return sh(cmd)
+end
 -- /tmp rather than $TMPDIR: socket paths must stay short.
-local box = sh("mktemp -d /tmp/snbox.XXXXXX"):gsub("%s+$", "")
-sh("mkdir -p '" .. box .. "/home/proj' '" .. box .. "/agent' '" .. box .. "/node'")
-write(box .. "/home/proj/f0.txt", "zero from the box\n")
-write(box .. "/home/proj/f1.txt", "one from the box\n")
-write(box .. "/agent/models.json", string.format('{"providers":{"boxai":{"baseUrl":"%s/api/v1","api":"openai-completions","apiKey":"x","compat":{"openRouter":true},'
-  .. '"models":[{"id":"anthropic/claude-sonnet-4.5","contextWindow":200000}]}}}', os.getenv("SERPIS_TEST_CACHE_URL")))
-write(box .. "/agent/auth.json", "{}")
-write(box .. "/node/settings.json", '{"session-directory":"' .. box .. '/sessions"}')
-local home = sh("cd '" .. box .. "/home' && pwd -P"):gsub("%s+$", "")
+local box = remote and ("/tmp/snbox-" .. tostring(os.time())) or sh("mktemp -d /tmp/snbox.XXXXXX"):gsub("%s+$", "")
+far("mkdir -p " .. box .. "/home/proj " .. box .. "/agent " .. box .. "/node && printf 'zero from the box\\n' > " .. box .. "/home/proj/f0.txt && printf 'one from the box\\n' > " .. box .. "/home/proj/f1.txt")
+local mock_url, mock_pid = os.getenv("SERPIS_TEST_CACHE_URL"), nil
+if remote then
+  local out = far("nohup " .. os.getenv("SERPIS_TEST_REMOTE_MOCK") .. " " .. box .. "/mock.port " .. box .. "/mock.log >/dev/null 2>&1 & echo $!; for i in $(seq 50); do [ -s " .. box .. "/mock.port ] && break; sleep 0.1; done; cat " .. box .. "/mock.port")
+  local pid, port = out:match("(%d+)%s+(%d+)")
+  mock_pid, mock_url = pid, "http://127.0.0.1:" .. port
+end
+local models = string.format('{"providers":{"boxai":{"baseUrl":"%s/api/v1","api":"openai-completions","apiKey":"x","compat":{"openRouter":true},'
+  .. '"models":[{"id":"anthropic/claude-sonnet-4.5","contextWindow":200000}]}}}', mock_url)
+far("printf '%s' " .. q(models) .. " > " .. box .. "/agent/models.json && printf '{}' > " .. box .. "/agent/auth.json && printf '%s' "
+  .. q('{"session-directory":"' .. box .. '/sessions"}') .. " > " .. box .. "/node/settings.json")
+local home = remote and (box .. "/home") or sh("cd '" .. box .. "/home' && pwd -P"):gsub("%s+$", "")
+local env = "HOME=" .. home .. " SERPIS_NODE_DIR=" .. box .. "/node SERPIS_NODE_SOCKET=" .. box .. "/node/node.sock SERPIS_AGENT_DIR=" .. box .. "/agent"
 serpis.var.set("remote-rayfish", false)
-serpis.var.set("remote-hosts", { {
-  name = "box",
-  command = { "env", "HOME=" .. home, "SERPIS_NODE_DIR=" .. box .. "/node", "SERPIS_NODE_SOCKET=" .. box .. "/node/node.sock",
-    "SERPIS_AGENT_DIR=" .. box .. "/agent", root .. "/target/debug/serpis-node", "agent" },
-} })
+if remote then
+  -- Found the way any machine's is (PATH, ~/.local/bin, ~/.cargo/bin); only its home is the test's.
+  serpis.var.set("remote-ssh-args", { "-o", "StrictHostKeyChecking=accept-new" })
+  serpis.var.set("remote-hosts", { { name = "box", host = remote,
+    node_command = "for p in serpis-node ~/.local/bin/serpis-node ~/.cargo/bin/serpis-node; do command -v $p >/dev/null 2>&1 && exec env " .. env .. " $p agent; done; exit 127" } })
+else
+  serpis.var.set("remote-hosts", { { name = "box", command = { "sh", "-c", "exec env " .. env .. " " .. root .. "/target/debug/serpis-node agent" } } })
+end
 
 local function steps(list)
   local i = 0
@@ -107,7 +125,7 @@ steps({
     T.check("the box's files were read there", has("f0.txt") and has("f1.txt") and not has("ENOENT"), true)
     T.check("the answer came back", has("done"), true)
     T.check("its usage is shown", serpis.chat.info(chat).usage.total_tokens > 0, true)
-    T.check("the box saved the session", sh("ls '" .. box .. "/sessions'/*/ | wc -l"):match("%d+"), "1")
+    T.check("the box saved the session", far("ls " .. box .. "/sessions/*/ | wc -l"):match("%d+"), "1")
   end,
   -- Closing the view leaves the chat running on the box; it comes back whole.
   function()
@@ -125,11 +143,11 @@ steps({
   end,
   function(go)
     serpis.command.run("remote-stop-node", "box")
-    when(function() return sh("ls '" .. box .. "/node'"):find("node.sock", 1, true) == nil end, go)
+    when(function() return far("ls " .. box .. "/node"):find("node.sock", 1, true) == nil end, go)
     return false
   end,
   function()
-    T.check("the node stopped", sh("ls '" .. box .. "/node'"):find("node.sock", 1, true), nil)
-    sh("rm -rf '" .. box .. "'")
+    T.check("the node stopped", far("ls " .. box .. "/node"):find("node.sock", 1, true), nil)
+    far((mock_pid and ("kill " .. mock_pid .. "; ") or "") .. "rm -rf " .. box)
   end,
 })
