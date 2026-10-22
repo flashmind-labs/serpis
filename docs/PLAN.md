@@ -293,7 +293,7 @@ Steps:
    settings from `~/.serpis/node/settings.json` (the desktop's variable names); request ids, and
    a lagging client gets a fresh snapshot instead of a backlog. `scripts/build-node.sh` builds
    the one-file binary for a box (std linked statically). In the GUI (`crates/serpis/src/remote.rs`):
-   `remote-hosts` and rayfish peers (`ray --json status`) as machines, one connection per
+   `remote-hosts` and rayfish peers (`ray status --json`) as machines, one connection per
    machine with reconnects, the composer's machine pill (`chat-select-machine`) for a new chat,
    `remote-new-chat`, `remote-attach-chat`, `remote-resume-chat`, `remote-close-chat`,
    `remote-stop-node`, the machine's own models in `chat-select-model`, sidebar groups

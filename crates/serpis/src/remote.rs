@@ -105,6 +105,17 @@ fn configured(ed: &Editor) -> Vec<Machine> {
         .collect()
 }
 
+/// The `ray` command: `remote-rayfish-command`, else `ray` on PATH, else (macOS) the one inside
+/// Rayfish.app, which the app doesn't put on PATH.
+fn ray_command(ed: &Editor) -> String {
+    if let Some(c) = ed.var_str("remote-rayfish-command").filter(|c| !c.is_empty()) {
+        return c;
+    }
+    let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("ray").is_file()));
+    let bundled = "/Applications/Rayfish.app/Contents/MacOS/ray";
+    if !on_path && cfg!(target_os = "macos") && std::path::Path::new(bundled).is_file() { bundled.into() } else { "ray".into() }
+}
+
 /// Ask rayfish for its peers, at most every 30 seconds, in the background.
 fn refresh_rayfish(ed: &mut Editor) {
     if ed.remote.rayfish_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
@@ -112,8 +123,10 @@ fn refresh_rayfish(ed: &mut Editor) {
     }
     ed.remote.rayfish_checked = Some(Instant::now());
     let main = ed.main_sender();
+    let ray = ray_command(ed);
     ed.rt.spawn(async move {
-        let out = tokio::process::Command::new("ray").args(["--json", "status"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().await;
+        // A daemon that isn't running answers in words, not JSON: no peers, then.
+        let out = tokio::process::Command::new(ray).args(["status", "--json"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().await;
         let Ok(out) = out else { return };
         let Ok(status) = serde_json::from_slice::<Value>(&out.stdout) else { return };
         let peers = rayfish_peers(&status);
@@ -124,7 +137,7 @@ fn refresh_rayfish(ed: &mut Editor) {
     });
 }
 
-/// `hostname.network.ray` and its state, for every peer in `ray --json status`.
+/// `hostname.network.ray` and its state, for every peer in `ray status --json`.
 pub fn rayfish_peers(status: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for net in status["networks"].as_array().into_iter().flatten() {
@@ -430,7 +443,8 @@ pub fn reopen(ed: &mut Editor, list: &Value) {
 pub fn install(ed: &mut Editor) {
     let o = BUILTIN;
     ed.defvar("remote-hosts", json!([]), "Machines chats can run on: ssh destinations (\"gpu-box\", \"me@lab\", a rayfish name like \"box.home.ray\"), or {name, host, node_command} / {name, command = {argv}} tables. Each needs serpis-node on its PATH (scripts/build-node.sh).");
-    ed.defvar("remote-rayfish", json!(true), "Also offer the peers of your rayfish networks (`ray --json status`) as machines, as hostname.network.ray.");
+    ed.defvar("remote-rayfish", json!(true), "Also offer the peers of your rayfish networks (`ray status --json`) as machines, as hostname.network.ray.");
+    ed.defvar("remote-rayfish-command", json!(""), "The ray command for remote-rayfish (\"\": ray on PATH, else the one in /Applications/Rayfish.app).");
     ed.defvar("remote-node-command", json!("serpis-node agent"), "What runs on a machine to reach its node over ssh.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 
@@ -545,4 +559,20 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rayfish_peers_are_named_as_its_dns_names_them() {
+        // The shape of `ray status --json` (ray-proto's NetworkStatus / PeerStatus).
+        let status = json!({"networks": [
+            {"name": "home", "peers": [{"hostname": "gpu", "state": "active"}, {"hostname": null, "state": "idle"}, {"hostname": "nas", "state": "offline"}]},
+            {"name": "work", "peers": [{"hostname": "ci", "state": "idle"}]},
+        ]});
+        assert_eq!(rayfish_peers(&status), [("gpu.home.ray", "active"), ("nas.home.ray", "offline"), ("ci.work.ray", "idle")].map(|(a, b)| (a.to_string(), b.to_string())));
+        assert!(rayfish_peers(&json!({})).is_empty());
+    }
 }
