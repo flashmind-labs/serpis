@@ -255,5 +255,10 @@ steps({
     T.check("cache writes are 1-hour by default (agent-cache-retention)", long, true)
     T.check("no request was rejected", sh("grep -c rejected '" .. log .. "'"):gsub("%s+", ""), "0")
     T.check("responses name their OpenRouter upstream", #upstreams > 0 and upstreams[1]:match("^upstream%-[ab]$") ~= nil, true)
+    -- For cache_restore.lua: the chat stays open, and CLAUDE.md changes while serpis is closed.
+    local fh = io.open(os.getenv("SERPIS_TEST_OUT") .. ".path", "w")
+    fh:write(serpis.session.of(chat))
+    fh:close()
+    write("CLAUDE.md", "Use tabs.\nAnd write tests.\nAnd be brief.\n")
   end,
 })

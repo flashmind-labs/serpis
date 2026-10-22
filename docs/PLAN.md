@@ -151,7 +151,13 @@ it ships, so there is no runtime hashing of prompts.
    (`crates/serpis-ai/tests/cache_props.rs`, proptest) generate agent-shaped transcripts on six
    venues: append-only always hits, bytes are deterministic, and each injected change is its own
    miss cause and recovers. Seeds of past failures are kept next to them.
-2. **Frozen prefix** (*done*): the system prompt is kept per chat. `chat-refresh-context` rebuilds
+2. **Frozen prefix** (*done*): the system prompt is kept per chat, and saved in its session
+   (`serpis-system-prompt` entries). A resumed or restored chat keeps it while its cache can still
+   be warm (`chat-resume-system-prompt`: warm / always / never), says so when the instructions
+   changed since (`chat-resume-system-prompt-notice`), and carries its cache state on from the
+   last response; an older one is rebuilt, since keeping it would save nothing.
+   `tests/ui/cache_restore.lua` restarts serpis with CLAUDE.md changed and requires a cache hit.
+   Tools are compared by their full declarations, so a changed extension tool is a "tools" miss. `chat-refresh-context` rebuilds
    it with the next message, and `agent-live-context` rebuilds it for every message. The tool list
    stays live: a kept tool from a hot-reloaded Rust plugin would point into unloaded code, and
    changing tools is an explicit action (a stated miss cause, warned about in item 6). When the

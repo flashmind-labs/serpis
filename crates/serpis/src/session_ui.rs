@@ -145,7 +145,11 @@ pub fn restore(ed: &mut Editor, path: &Path, reuse: bool) -> anyhow::Result<Buff
         let cwd = if loaded.cwd.is_dir() { loaded.cwd.clone() } else { ed.cwd.clone() };
         ed.create_buffer("chat", Some("*chat*"), &json!({"cwd": cwd.to_string_lossy()}))?
     };
-    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.restore(ed, &loaded));
+    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| {
+        c.restore(ed, &loaded);
+        // Scripts see the restored chat (serpis.chat.*) at once.
+        c.publish(ed, id);
+    });
     ed.run_hook("session-resumed", &json!({"buffer": buffer_id_to_u64(id), "path": path.to_string_lossy(), "id": loaded.id, "messages": loaded.messages.len()}));
     Ok(id)
 }

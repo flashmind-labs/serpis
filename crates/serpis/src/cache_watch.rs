@@ -15,6 +15,8 @@ pub struct Sent {
     /// `provider/model-id`.
     pub model: String,
     pub thinking: String,
+    /// The tools' declarations (name, description, parameters), so a changed description
+    /// counts as a tools change.
     pub tools: Vec<String>,
     /// A hash of the system prompt.
     pub prompt: u64,
@@ -239,6 +241,16 @@ impl CacheWatch {
         })
     }
 
+    /// Carry on from a resumed session: its last response (`usage`, `upstream`) ended `age` ago and
+    /// was sent with `sent`.
+    pub fn resume(&mut self, sent: Sent, model: &Model, usage: &Usage, upstream: Option<String>, age: Duration) {
+        let prompt_tokens = usage.input + usage.cache_read + usage.cache_write;
+        let cached = if usage.cache_write > 0 { usage.cache_read + usage.cache_write } else if usage.cache_read > 0 { prompt_tokens } else { 0 };
+        let now = Instant::now();
+        let ended = now.checked_sub(age).unwrap_or(now);
+        self.last = Some(Last { sent, cached, prompt_tokens, ended, upstream, model: model.clone() });
+    }
+
     /// Pretend the last response ended `d` earlier (tests: `serpis.debug.cache_age`).
     pub fn age(&mut self, d: Duration) {
         if let Some(l) = &mut self.last {
@@ -250,6 +262,25 @@ impl CacheWatch {
 /// "~$0.32", or "<$0.01" for less than a cent.
 pub fn fmt_cost(c: f64) -> String {
     if c < 0.01 { "<$0.01".into() } else { format!("~${c:.2}") }
+}
+
+/// Whether a resumed chat keeps the system prompt it was sent with (chat-resume-system-prompt):
+/// "warm" while its cache can still be alive (`age` < `ttl`), "always", or "never" (rebuild it).
+/// Once the cache has expired, keeping an outdated prompt saves nothing.
+pub fn keep_prompt_on_resume(mode: &str, age: Duration, ttl: Duration) -> bool {
+    match mode {
+        "always" => true,
+        "never" => false,
+        _ => age < ttl,
+    }
+}
+
+/// A short hash of the tool declarations a request sends.
+pub fn declaration_key(t: &serpis_ai::Tool) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::json!({"d": t.description, "p": t.parameters}).to_string().hash(&mut h);
+    format!("{}#{:x}", t.name, h.finish())
 }
 
 pub fn fmt_duration(d: Duration) -> String {
@@ -382,6 +413,25 @@ mod tests {
         t.send(sent(), usage(1500, 0, 0), None);
         assert_eq!(t.send(sent(), usage(100, 1500, 0), None).1, None);
         assert_eq!(t.send(sent(), usage(1700, 0, 0), None).1.unwrap().cause, Cause::Unexplained);
+    }
+
+    #[test]
+    fn a_resumed_chat_keeps_its_prompt_only_while_the_cache_can_be_warm() {
+        let h = Duration::from_secs(3600);
+        assert!(keep_prompt_on_resume("warm", Duration::from_secs(600), h));
+        assert!(!keep_prompt_on_resume("warm", Duration::from_secs(2 * 3600), h), "an expired cache: rebuild");
+        assert!(keep_prompt_on_resume("always", Duration::from_secs(30 * 86400), h));
+        assert!(!keep_prompt_on_resume("never", Duration::ZERO, h));
+    }
+
+    #[test]
+    fn a_resumed_watch_is_warm_and_judges_the_first_request() {
+        let mut t = T::new();
+        t.w.resume(sent(), &model(), &usage(0, 9000, 1000), Some("Anthropic".into()), Duration::from_secs(600));
+        assert!(matches!(t.w.state(t.now), Some(State::Warm(left)) if left.as_secs().abs_diff(3000) < 5));
+        let mut s = sent();
+        s.prompt = 2;
+        assert_eq!(t.send(s, usage(0, 1200, 9000), Some("Anthropic")).1.unwrap().cause, Cause::Prompt);
     }
 
     #[test]

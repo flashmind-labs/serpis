@@ -288,30 +288,15 @@ impl ChatBuffer {
         }
         let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
         self.record(ed, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
-        let mut tools = serpis_agent::builtin_tools();
-        for (_, t) in &ed.agent_tools {
-            tools.retain(|x| x.name() != t.name());
-            tools.push(t.clone());
-        }
-        let disabled: Vec<String> = ed
-            .var("agent-disabled-tools")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .unwrap_or_default();
-        tools.retain(|t| !disabled.iter().any(|d| d == t.name()));
+        let tools = agent_tools(ed);
         let system_prompt = self.system_prompt_for(ed, &tools);
         let native = ed.var("agent-native-web-search").and_then(Value::as_bool).unwrap_or(true);
         let cache_retention = model.cache_retention(cache_retention(ed, &model.provider));
         self.sent = Some(crate::cache_watch::Sent {
             model: format!("{}/{}", model.provider, model.id),
             thinking: self.thinking.as_str().to_string(),
-            tools: tools.iter().map(|t| t.name().to_string()).collect(),
-            prompt: {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                system_prompt.hash(&mut h);
-                h.finish()
-            },
+            tools: tools.iter().map(|t| crate::cache_watch::declaration_key(&t.declaration())).collect(),
+            prompt: prompt_hash(&system_prompt),
             retention: cache_retention,
         });
         if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
@@ -396,7 +381,7 @@ impl ChatBuffer {
     /// (that misses the cache anyway, so the prompt catches up for free) or `agent-live-context`
     /// asks for a fresh one every time. Re-reading AGENTS.md / CLAUDE.md and the prompt vars on
     /// every message would rewrite the whole cached conversation whenever one of them changed.
-    fn system_prompt_for(&mut self, ed: &Editor, tools: &[serpis_agent::ToolRef]) -> String {
+    fn system_prompt_for(&mut self, ed: &mut Editor, tools: &[serpis_agent::ToolRef]) -> String {
         let names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
         let live = ed.var("agent-live-context").and_then(Value::as_bool).unwrap_or(false);
         if let Some((n, p)) = &self.system_prompt {
@@ -404,6 +389,17 @@ impl ChatBuffer {
                 return p.clone();
             }
         }
+        let prompt = self.build_system_prompt(ed, tools);
+        // Saved with the session, so a resumed chat can send the same prompt (and read its cache).
+        if self.system_prompt.as_ref().is_none_or(|(_, p)| *p != prompt) {
+            self.append_entry(ed, SYSTEM_PROMPT_ENTRY, serde_json::json!({"prompt": prompt, "tools": names}));
+        }
+        self.system_prompt = Some((names, prompt.clone()));
+        prompt
+    }
+
+    /// The system prompt as the project's instructions and settings make it now.
+    fn build_system_prompt(&self, ed: &Editor, tools: &[serpis_agent::ToolRef]) -> String {
         let agent_dir = ed.registry.paths().agent_dir.clone();
         let mut opts = serpis_agent::system_prompt::PromptOptions {
             context_files: serpis_agent::system_prompt::load_context_files(&self.cwd, &agent_dir),
@@ -413,9 +409,68 @@ impl ChatBuffer {
         if let Some(Value::Array(g)) = ed.var("agent-guidelines") {
             opts.guidelines = g.iter().filter_map(Value::as_str).map(str::to_string).collect();
         }
-        let prompt = serpis_agent::system_prompt::build_system_prompt(tools, &self.cwd, &opts);
-        self.system_prompt = Some((names, prompt.clone()));
-        prompt
+        serpis_agent::system_prompt::build_system_prompt(tools, &self.cwd, &opts)
+    }
+
+    /// On resume: keep the system prompt the session was sent with while its cache can still
+    /// be warm (chat-resume-system-prompt), say so when the instructions changed since
+    /// (chat-resume-system-prompt-notice), and carry the cache state on from the last response.
+    fn resume_system_prompt(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
+        use crate::cache_watch::{keep_prompt_on_resume, ttl};
+        let saved = l.entries.iter().rev().find(|(k, _)| k == SYSTEM_PROMPT_ENTRY).and_then(|(_, d)| {
+            let names: Vec<String> = d["tools"].as_array()?.iter().filter_map(Value::as_str).map(str::to_string).collect();
+            Some((names, d["prompt"].as_str()?.to_string()))
+        });
+        let last = l.messages.iter().rev().find_map(|m| match m {
+            Message::Assistant(a) if a.usage.input + a.usage.cache_read + a.usage.cache_write > 0 => Some(a),
+            _ => None,
+        });
+        let (Some((names, prompt)), Some(last), Some(model)) = (saved, last.cloned(), self.model.clone()) else { return };
+        let age = Duration::from_millis(serpis_ai::now_ms().saturating_sub(last.timestamp));
+        let retention = model.cache_retention(cache_retention(ed, &model.provider));
+        let mode = ed.var_str("chat-resume-system-prompt").unwrap_or_else(|| "warm".into());
+        if !keep_prompt_on_resume(&mode, age, ttl(retention)) {
+            return;
+        }
+        self.system_prompt = Some((names.clone(), prompt.clone()));
+        // Chats are restored while serpis starts, before extensions register their tools: compare
+        // tools and instructions once that is done.
+        let Some(id) = ed.this_buffer() else { return };
+        ed.defer(move |ed| {
+            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.finish_resume(ed, names, prompt, last, model, retention, age));
+        });
+    }
+
+    fn finish_resume(&mut self, ed: &mut Editor, names: Vec<String>, prompt: String, last: AssistantMessage, model: Model, retention: CacheRetention, age: Duration) {
+        use crate::cache_watch::{Sent, declaration_key, ttl};
+        let tools = agent_tools(ed);
+        let current: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+        // With other tools the next request misses anyway, and the prompt is rebuilt for them.
+        if current == names {
+            let changed = self.build_system_prompt(ed, &tools) != prompt;
+            if changed && ed.var("chat-resume-system-prompt-notice").and_then(Value::as_bool).unwrap_or(true) {
+                let left = ttl(retention).saturating_sub(age);
+                self.entries.push(Entry::Info {
+                    text: format!(
+                        "Kept the system prompt this chat was sent with, so its prompt cache (warm for about {} more) can be read. AGENTS.md / CLAUDE.md or the prompt settings changed since: chat-refresh-context picks them up and rewrites the cache once.",
+                        crate::cache_watch::fmt_duration(left)
+                    ),
+                    face: Face::MetaWarn,
+                });
+            }
+        }
+        let sent = Sent {
+            model: format!("{}/{}", model.provider, model.id),
+            thinking: self.thinking.as_str().to_string(),
+            tools: tools.iter().map(|t| declaration_key(&t.declaration())).collect(),
+            prompt: prompt_hash(&prompt),
+            retention,
+        };
+        self.cache.resume(sent, &model, &last.usage, last.upstream.clone(), age);
+        self.dirty = true;
+        if let Some(id) = ed.this_buffer() {
+            self.publish(ed, id);
+        }
     }
 
     /// Rebuild the system prompt with the next message (AGENTS.md / CLAUDE.md, prompt vars).
@@ -1052,6 +1107,7 @@ impl ChatBuffer {
             Message::Assistant(a) => Some(&a.usage),
             _ => None,
         }));
+        self.resume_system_prompt(ed, l);
         self.session = Some(crate::session::SessionWriter::resume(l));
         self.session_failed = false;
         self.last_error = None;
@@ -2275,6 +2331,33 @@ impl TextSurface for ChatBuffer {
             Focus::Prompt => self.prompt.reveal_cursor(),
         }
     }
+}
+
+/// The session entry holding the system prompt a chat sends.
+const SYSTEM_PROMPT_ENTRY: &str = "serpis-system-prompt";
+
+fn prompt_hash(prompt: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    prompt.hash(&mut h);
+    h.finish()
+}
+
+/// The tools a chat's agent gets: the built-in ones, then extension tools (which replace
+/// built-ins of the same name), minus agent-disabled-tools.
+fn agent_tools(ed: &Editor) -> Vec<serpis_agent::ToolRef> {
+    let mut tools = serpis_agent::builtin_tools();
+    for (_, t) in &ed.agent_tools {
+        tools.retain(|x| x.name() != t.name());
+        tools.push(t.clone());
+    }
+    let disabled: Vec<String> = ed
+        .var("agent-disabled-tools")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    tools.retain(|t| !disabled.iter().any(|d| d == t.name()));
+    tools
 }
 
 /// Whether to warn about `action` throwing away a cache worth `cost` dollars (cache-warn,

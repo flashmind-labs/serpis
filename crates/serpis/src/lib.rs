@@ -141,6 +141,8 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("cache-warn", json!("notice"), "Before an action that throws a warm prompt cache away (see cache-warn-actions): \"confirm\" asks first, \"notice\" says what it costs after, \"off\" stays quiet. Sending after the cache expired and tool changes only ever get a notice.");
     ed.defvar("cache-warn-threshold", json!(0.10), "Warn (cache-warn) only when re-caching would cost at least this many dollars.");
     ed.defvar("cache-warn-actions", json!(commands::CACHE_WARN_ACTIONS), "Actions cache-warn warns about: model, thinking, tools, refresh (chat-refresh-context), expired (sending after the cache expired).");
+    ed.defvar("chat-resume-system-prompt", json!("warm"), "What a resumed or restored chat sends as its system prompt: \"warm\" keeps the one it was sent with while its prompt cache can still be alive (otherwise it is rebuilt from the current AGENTS.md / CLAUDE.md and settings, as keeping it would save nothing), \"always\" keeps it, \"never\" rebuilds it.");
+    ed.defvar("chat-resume-system-prompt-notice", json!(true), "Say so when a resumed chat keeps its system prompt although the project's instructions or prompt settings changed since (chat-refresh-context picks them up).");
     ed.defvar("agent-live-context", json!(false), "Rebuild the system prompt (AGENTS.md / CLAUDE.md, agent-guidelines, agent-append-system-prompt) for every message instead of keeping the one a chat started with. Any change then rewrites the chat's whole prompt cache; chat-refresh-context picks up changes once.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
