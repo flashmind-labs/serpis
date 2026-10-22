@@ -1,13 +1,14 @@
 //! A node over real ssh (opt-in: `scripts/ssh-check.sh [host]`, default localhost).
 //!
-//! The node on the other side runs in a throwaway home with throwaway node and agent
-//! directories (set on its command line), so it never sees the account's real sessions,
-//! settings or keys; host keys go to a known-hosts file of the test's own. On localhost the
-//! chat runs for real against the mock provider; another host can't reach the mock, so there
-//! the test stops after the node answered and opened a chat.
+//! Everything on the other side is made over ssh in a throwaway directory under /tmp there: a
+//! home with a project, an agent directory whose only model is a mock provider, and the node's
+//! directory. So the node never sees the account's real sessions, settings or keys, and no
+//! real provider is called. Host keys go to a known-hosts file of the test's own.
 //!
-//! Needs ssh access that works without a prompt (a key in authorized_keys, or rayfish's mesh
-//! SSH), and on another host `SERPIS_SSH_TEST_NODE`: where serpis-node is there.
+//! The mock runs where the node does: in this process on localhost, or on the other machine
+//! (`SERPIS_SSH_TEST_MOCK`: serpis-mock-provider's path there). `SERPIS_SSH_TEST_NODE` is
+//! serpis-node's path there (this build's, by default, which is right for localhost).
+//! Needs ssh that works without a prompt: a key in authorized_keys, or rayfish's mesh SSH.
 
 use std::time::Duration;
 
@@ -16,66 +17,82 @@ use serpis_node::client::{Client, Target};
 use serpis_proto::Entry;
 use serpis_proto::wire::{Event, Request, Response};
 
+/// Run `script` with sh on `host`, through ssh with `args`; its stdout.
+fn far(host: &str, args: &[String], script: &str) -> String {
+    let out = std::process::Command::new("ssh").args(args).arg(host).arg("--").arg(format!("sh -c {}", quote(script))).output().expect("running ssh");
+    assert!(out.status.success(), "on {host}: {script}\n{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 #[test]
 #[ignore = "uses real ssh: scripts/ssh-check.sh"]
 fn a_node_over_real_ssh() {
     let host = std::env::var("SERPIS_SSH_TEST_HOST").unwrap_or_else(|_| "localhost".into());
     let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
     let node = std::env::var("SERPIS_SSH_TEST_NODE").unwrap_or_else(|_| env!("CARGO_BIN_EXE_serpis-node").to_string());
-    // On the far side: /tmp there (it exists everywhere and keeps the socket path short).
     let id = &uuid::Uuid::now_v7().simple().to_string()[24..];
-    let far = format!("/tmp/snssh-{id}");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let mock = rt.block_on(serpis_testkit::Mock::start(serpis_testkit::commands()));
-    // This side: the known-hosts file. On localhost, the far side's files are made from here too.
+    let dir = format!("/tmp/snssh-{id}");
     let near = std::env::temp_dir().join(format!("snssh-{id}"));
     std::fs::create_dir_all(&near).unwrap();
-    if local {
-        let models = json!({"providers": {"mock": {"baseUrl": format!("{}/api/v1", mock.base), "api": "openai-completions", "apiKey": "x", "compat": {"openRouter": true}, "models": [{"id": "anthropic/claude-sonnet-4.5"}]}}});
-        for d in ["home/proj", "agent", "node"] {
-            std::fs::create_dir_all(format!("{far}/{d}")).unwrap();
-        }
-        std::fs::write(format!("{far}/agent/models.json"), models.to_string()).unwrap();
-        std::fs::write(format!("{far}/agent/auth.json"), "{}").unwrap();
-        std::fs::write(format!("{far}/node/settings.json"), json!({"session-directory": format!("{far}/sessions")}).to_string()).unwrap();
-        std::fs::write(format!("{far}/home/proj/f0.txt"), "zero over ssh\n").unwrap();
-        std::fs::write(format!("{far}/home/proj/f1.txt"), "one over ssh\n").unwrap();
-    }
-    let prepare = if local { String::new() } else { format!("mkdir -p {far}/home/proj {far}/agent {far}/node && ") };
-    let command = format!("{prepare}env HOME={far}/home SERPIS_NODE_DIR={far}/node SERPIS_NODE_SOCKET={far}/node/node.sock SERPIS_AGENT_DIR={far}/agent {node} agent");
     let Target::Ssh { mut ssh_args, .. } = Target::ssh(&host) else { unreachable!() };
     ssh_args.extend(["-o".into(), format!("UserKnownHostsFile={}", near.join("known_hosts").display()), "-o".into(), "StrictHostKeyChecking=accept-new".into()]);
-    let target = Target::Ssh { host: host.clone(), command, ssh_args };
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
+    // The mock provider, next to the node.
+    far(&host, &ssh_args, &format!("mkdir -p {dir}/home/proj {dir}/agent {dir}/node && printf 'zero over ssh\\n' > {dir}/home/proj/f0.txt && printf 'one over ssh\\n' > {dir}/home/proj/f1.txt"));
+    let (_mock, base, mock_pid) = if local {
+        let m = rt.block_on(serpis_testkit::Mock::start(serpis_testkit::commands()));
+        let base = m.base.clone();
+        (Some(m), base, None)
+    } else {
+        let mock = std::env::var("SERPIS_SSH_TEST_MOCK").expect("SERPIS_SSH_TEST_MOCK: serpis-mock-provider's path on the other machine");
+        let started = far(&host, &ssh_args, &format!("nohup {mock} {dir}/mock.port {dir}/mock.log >/dev/null 2>&1 & echo $!; for i in $(seq 50); do [ -s {dir}/mock.port ] && break; sleep 0.1; done; cat {dir}/mock.port"));
+        let mut lines = started.lines();
+        let pid = lines.next().unwrap().trim().to_string();
+        let port = lines.next().expect("the mock wrote its port").trim().to_string();
+        (None, format!("http://127.0.0.1:{port}"), Some(pid))
+    };
+    let models = json!({"providers": {"mock": {"baseUrl": format!("{base}/api/v1"), "api": "openai-completions", "apiKey": "x", "compat": {"openRouter": true}, "models": [{"id": "anthropic/claude-sonnet-4.5"}]}}});
+    let settings = json!({"session-directory": format!("{dir}/sessions")});
+    far(&host, &ssh_args, &format!("printf '%s' {} > {dir}/agent/models.json && printf '{{}}' > {dir}/agent/auth.json && printf '%s' {} > {dir}/node/settings.json", quote(&models.to_string()), quote(&settings.to_string())));
+
+    let command = format!("env HOME={dir}/home SERPIS_NODE_DIR={dir}/node SERPIS_NODE_SOCKET={dir}/node/node.sock SERPIS_AGENT_DIR={dir}/agent {node} agent");
+    let target = Target::Ssh { host: host.clone(), command, ssh_args: ssh_args.clone() };
     rt.block_on(async {
+        let started = std::time::Instant::now();
         let (c, mut events) = Client::connect(&target, "ssh-check").await.unwrap_or_else(|e| panic!("connecting over ssh to {host}: {e:#}"));
-        println!("node on {host}: {} (serpis-node {})", c.hello.host, c.hello.serpis);
-        assert_eq!(c.hello.home, format!("{far}/home"), "the node runs in the throwaway home");
+        println!("node on {host}: {} (serpis-node {}), connected in {:?}", c.hello.host, c.hello.serpis, started.elapsed());
+        assert_eq!(c.hello.home, format!("{dir}/home"), "the node runs in the throwaway home");
         let Response::Chat { chat } = c.call(Request::New { cwd: "~/proj".into(), model: None, thinking: None }).await.unwrap() else { panic!() };
         c.call(Request::Attach { chat: chat.clone() }).await.unwrap();
-        if local {
-            c.call(Request::Prompt { chat: chat.clone(), text: "READ 2".into(), images: vec![], follow_up: false, request_id: Some("ssh-1".into()) }).await.unwrap();
-            let mut entries: Vec<Entry> = Vec::new();
-            let mut idle = false;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-            while !(idle && entries.len() >= 5) {
-                match tokio::time::timeout_at(deadline, events.recv()).await.expect("the chat finished over ssh") {
-                    Some(Event::Splice { splice, .. }) => splice.apply(&mut entries),
-                    Some(Event::State { state, .. }) => idle = !state.running && state.usage.total_tokens > 0,
-                    Some(_) => {}
-                    None => panic!("the ssh connection closed"),
-                }
+        let t = std::time::Instant::now();
+        c.call(Request::Prompt { chat: chat.clone(), text: "READ 2".into(), images: vec![], follow_up: false, request_id: Some("ssh-1".into()) }).await.unwrap();
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut idle = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !(idle && entries.len() >= 5) {
+            match tokio::time::timeout_at(deadline, events.recv()).await.expect("the chat finished over ssh") {
+                Some(Event::Splice { splice, .. }) => splice.apply(&mut entries),
+                Some(Event::State { state, .. }) => idle = !state.running && state.usage.total_tokens > 0,
+                Some(_) => {}
+                None => panic!("the ssh connection closed"),
             }
-            let tool = serde_json::to_string(&entries[2]).unwrap();
-            assert!(tool.contains("zero over ssh"), "the tool ran on the far side: {tool}");
-            println!("a chat ran over ssh: {} entries", entries.len());
         }
+        let tool = serde_json::to_string(&entries[2]).unwrap();
+        assert!(tool.contains("zero over ssh"), "the tool ran on the far side: {tool}");
+        println!("a chat with two tool calls ran on {host} over ssh in {:?}: {} entries", t.elapsed(), entries.len());
+        let Response::Sessions { sessions } = c.call(Request::Sessions { limit: None }).await.unwrap() else { panic!() };
+        assert_eq!(sessions.len(), 1, "the session was saved there");
         c.call(Request::Stop).await.unwrap();
     });
-    if local {
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!std::path::Path::new(&format!("{far}/node/node.sock")).exists(), "the node stopped");
-        let _ = std::fs::remove_dir_all(&far);
-    }
+    std::thread::sleep(Duration::from_millis(500));
+    let left = far(&host, &ssh_args, &format!("ls {dir}/node"));
+    assert!(!left.contains("node.sock"), "the node stopped: {left}");
+    let kill = mock_pid.map(|p| format!("kill {p}; ")).unwrap_or_default();
+    far(&host, &ssh_args, &format!("{kill}rm -rf {dir}"));
     let _ = std::fs::remove_dir_all(&near);
 }
