@@ -10,7 +10,10 @@
 //! explicit caches (Anthropic, Gemini) that fails the test; for best-effort automatic caches it is
 //! reported. A random marker opens the system prompt so earlier runs' caches can't help.
 //!
-//! SERPIS_LIVE_MODELS=a/b,c/d replaces the default models.
+//! SERPIS_LIVE_MODELS=a/b,c/d replaces the default models. SERPIS_LIVE_ROUTING sets OpenRouter's
+//! `provider` routing object on every request (it is a model's compat.openRouterRouting), e.g.
+//! '{"order":["coreweave"],"allow_fallbacks":false}' to see an upstream's own errors instead of a
+//! silent fallback.
 
 use std::time::Duration;
 
@@ -48,10 +51,12 @@ async fn catalog() -> std::collections::HashMap<String, (f64, f64, f64)> {
 }
 
 fn model(id: &str, price: (f64, f64, f64)) -> Model {
+    let routing: Option<Value> = std::env::var("SERPIS_LIVE_ROUTING").ok().map(|r| serde_json::from_str(&r).expect("SERPIS_LIVE_ROUTING is JSON"));
     serde_json::from_value(json!({
         "id": id, "api": "openai-completions", "provider": "openrouter", "baseUrl": "https://openrouter.ai/api/v1",
         "reasoning": false, "input": ["text"], "maxTokens": 64,
         "cost": {"input": price.0, "output": 0.0, "cacheRead": price.1, "cacheWrite": price.2},
+        "compat": routing.map(|r| json!({"openRouterRouting": r})),
     }))
     .unwrap()
 }

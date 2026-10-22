@@ -198,11 +198,16 @@ it ships, so there is no runtime hashing of prompts.
    and it still read the cache (the simulator would have predicted a miss: re-check before
    changing its rule). Gemini was not checked: the account's zero-data-retention setting excludes
    Google's endpoints (now reported as skipped).
-   Second run: OpenRouter again moved DeepSeek from CoreWeave to SiliconFlow mid-conversation
-   despite the session id, and this time the move cost a full rewrite (0 read, then a hit again
-   on SiliconFlow): upstreams do have separate caches, as the simulator assumes, and OpenRouter's
-   sticky routing can't be relied on. Next: ask OpenRouter to prefer the upstream that served the
-   chat last (`provider.order`, fallbacks still allowed), checked by the live run.
+   Second run: OpenRouter again moved DeepSeek from CoreWeave to SiliconFlow, at the same request
+   (the 12-parallel-call step), and this time the move cost a full rewrite: upstreams do have
+   separate caches, as the simulator assumes. OpenRouter documents sticky routing keyed on our
+   session id, with fallback when the sticky upstream errors or is unavailable, and expiry after
+   10 minutes idle. The same request moving twice points at CoreWeave rejecting that request shape
+   (to check: SERPIS_LIVE_ROUTING pinning CoreWeave without fallbacks), not at sticky routing.
+   The 10-minute expiry matters more: after a longer pause a multi-upstream model can land on an
+   upstream whose cache is cold while the 1h entry is still alive elsewhere. If that shows up, an
+   opt-in, off-by-default preference for the chat's last upstream (`provider.order`, fallbacks
+   allowed; it replaces OpenRouter's stickiness) is the fix.
 
 Deferred until usage data asks for them:
 
