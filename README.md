@@ -41,7 +41,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `s-p` | switch buffer |
 | `s-n` / `s-t` | new chat / new terminal (in the current buffer's project) |
 | `s-O` | open a folder as a project (pick a known one, type a path, or Browse… for the system dialog) |
-| `s-N` / `s-T` | new chat in a new git worktree / new terminal |
+| `s-N` / `s-T` | new chat in a new git worktree (pick the branch it starts from) / new terminal |
 | `s-b` / `s-e` | toggle the sidebar / search it |
 | `s-r` / `C-c C-r` | resume a saved chat session (`chat-resume`) |
 | `s-\` / `s-\|` | split right / below |

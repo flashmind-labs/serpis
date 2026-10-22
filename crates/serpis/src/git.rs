@@ -182,6 +182,64 @@ pub fn status(dir: &Path) -> anyhow::Result<Status> {
     Ok(s)
 }
 
+/// A branch a new worktree can start from.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Branch {
+    /// `main`, or `origin/main` for a remote branch.
+    pub name: String,
+    pub remote: bool,
+    /// Checked out where the list was read.
+    pub current: bool,
+    /// Last commit, in seconds since the epoch.
+    pub time: i64,
+    pub subject: String,
+    /// The worktree it is checked out in, if any.
+    pub worktree: Option<PathBuf>,
+}
+
+impl Branch {
+    /// A remote branch's name without its remote (`origin/fix` → `fix`).
+    pub fn local_name(&self) -> &str {
+        if self.remote { self.name.split_once('/').map_or(self.name.as_str(), |(_, n)| n) } else { &self.name }
+    }
+}
+
+const BRANCH_FORMAT: &str = "--format=%(refname)%00%(refname:short)%00%(committerdate:unix)%00%(HEAD)%00%(worktreepath)%00%(subject)";
+
+/// `git for-each-ref` lines in [`BRANCH_FORMAT`] → branches in the order given; remotes' HEAD
+/// pointers are left out.
+pub fn parse_branches(text: &str) -> Vec<Branch> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\0').collect();
+            let [refname, short, time, head, worktree, subject] = f[..] else { return None };
+            if refname.ends_with("/HEAD") {
+                return None;
+            }
+            Some(Branch {
+                name: short.to_string(),
+                remote: refname.starts_with("refs/remotes/"),
+                current: head == "*",
+                time: time.parse().unwrap_or(0),
+                subject: subject.to_string(),
+                worktree: (!worktree.is_empty()).then(|| PathBuf::from(worktree)),
+            })
+        })
+        .collect()
+}
+
+/// Local branches (the one checked out at `dir` first), then remote ones, newest first.
+pub fn branches(dir: &Path) -> anyhow::Result<Vec<Branch>> {
+    let mut list = parse_branches(&git(dir, &["for-each-ref", "--sort=-committerdate", BRANCH_FORMAT, "refs/heads", "refs/remotes"])?);
+    list.sort_by_key(|b| (!b.current, b.remote));
+    Ok(list)
+}
+
+/// Whether `rev` names a commit (a branch, tag, or hash).
+pub fn is_commit(repo: &Path, rev: &str) -> bool {
+    git(repo, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]).is_ok()
+}
+
 pub fn branch_exists(repo: &Path, branch: &str) -> bool {
     git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok()
 }
@@ -237,6 +295,40 @@ pub fn slug(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_branches_and_skips_remote_head_pointers() {
+        let text = [
+            "refs/heads/main\0main\01700000300\0*\0/repo\0Fix tabs",
+            "refs/heads/feature\0feature\01700000200\0 \0\0Add parser",
+            "refs/remotes/origin/HEAD\0origin\01700000300\0 \0\0Fix tabs",
+            "refs/remotes/origin/fix/x\0origin/fix/x\01700000100\0 \0\0Remote work",
+        ]
+        .join("\n");
+        let b = parse_branches(&text);
+        assert_eq!(b.len(), 3);
+        assert_eq!((b[0].name.as_str(), b[0].current, b[0].worktree.as_deref()), ("main", true, Some(Path::new("/repo"))));
+        assert_eq!((b[1].name.as_str(), b[1].current, b[1].worktree.as_deref(), b[1].time), ("feature", false, None, 1700000200));
+        assert_eq!((b[2].name.as_str(), b[2].remote, b[2].local_name(), b[2].subject.as_str()), ("origin/fix/x", true, "fix/x", "Remote work"));
+    }
+
+    #[test]
+    fn lists_real_branches_with_the_current_one_first() {
+        let dir = std::env::temp_dir().join(format!("serpis-branches-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success(), "{args:?}");
+        sh(&["init", "-q", "-b", "main"]);
+        sh(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        sh(&["branch", "older"]);
+        sh(&["checkout", "-q", "-b", "work"]);
+        let b = branches(&dir).unwrap();
+        assert_eq!(b[0].name, "work");
+        assert!(b[0].current);
+        assert!(b.iter().any(|x| x.name == "older" && !x.current));
+        assert!(is_commit(&dir, "older") && !is_commit(&dir, "nope"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_worktree_list() {

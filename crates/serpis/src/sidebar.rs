@@ -735,6 +735,64 @@ fn toggle_collapsed(ed: &mut Editor, p: PathBuf) {
     }
 }
 
+/// Ask what a new worktree starts from (worktree-pick-base: any branch, local or remote, or a
+/// commit typed in), then its branch name, and open a `kind` buffer in it.
+fn ask_new_worktree(ed: &mut Editor, from: PathBuf, kind: &'static str) {
+    let pick = ed.var("worktree-pick-base").and_then(Value::as_bool).unwrap_or(true);
+    let branches = if pick { git::branches(&from).unwrap_or_default() } else { Vec::new() };
+    if branches.is_empty() {
+        return ask_worktree_branch(ed, from, None, None, kind);
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mut cands = Vec::new();
+    if !branches.iter().any(|b| b.current) {
+        cands.push(Candidate::new("HEAD").detail("the commit checked out here"));
+    }
+    for b in &branches {
+        let mut detail = format!("{} · {}", fmt_age(Duration::from_secs(now.saturating_sub(b.time).max(0) as u64)), b.subject);
+        if b.current {
+            detail.push_str(" · current");
+        } else if b.remote {
+            detail.push_str(" · remote");
+        } else if let Some(w) = &b.worktree {
+            detail.push_str(&format!(" · in {}", w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        }
+        cands.push(Candidate::new(b.name.clone()).detail(detail));
+    }
+    ed.completing_read("New worktree from: ", cands, false, move |ed, c, typed| {
+        let base = c.map(|c| c.value).unwrap_or(typed).trim().to_string();
+        if base.is_empty() {
+            return;
+        }
+        if !git::is_commit(&from, &base) {
+            ed.error(format!("{base} is not a branch or commit here"));
+            return;
+        }
+        let remote = branches.iter().find(|b| b.name == base && b.remote).map(|b| b.local_name().to_string());
+        ask_worktree_branch(ed, from, Some(base), remote, kind);
+    });
+}
+
+/// Ask for a new worktree's branch: suggested from a remote base (`origin/fix` → `fix`, unless that
+/// branch exists here) or worktree-branch-prefix plus a short id.
+fn ask_worktree_branch(ed: &mut Editor, from: PathBuf, base: Option<String>, remote_name: Option<String>, kind: &'static str) {
+    let suggestion = remote_name.filter(|n| !git::branch_exists(&from, n)).unwrap_or_else(|| suggest_branch(ed));
+    let prompt = match &base {
+        Some(b) => format!("New branch from {b}: "),
+        None => "New worktree on branch: ".to_string(),
+    };
+    ed.read_string(&prompt, &suggestion, move |ed, branch| open_in_new_worktree(ed, from, branch, base, kind));
+}
+
+/// Create a worktree and open a `kind` buffer in it.
+fn open_in_new_worktree(ed: &mut Editor, from: PathBuf, branch: String, base: Option<String>, kind: &'static str) {
+    create_worktree(ed, from, branch, base, move |ed, path| {
+        if let Err(e) = ed.new_buffer_in(kind, &path) {
+            ed.error(format!("{e:#}"));
+        }
+    });
+}
+
 /// A suggested branch name for a new worktree.
 fn suggest_branch(ed: &Editor) -> String {
     let prefix = ed.var_str("worktree-branch-prefix").unwrap_or_default();
@@ -748,9 +806,9 @@ pub fn worktree_path(ed: &Editor, main: &Path, branch: &str) -> PathBuf {
     base.join(dir_name(main)).join(git::slug(branch).replace('/', "-"))
 }
 
-/// Create a worktree on `branch` from the checkout at `from`, in the background, then run
-/// `then` with its path.
-pub fn create_worktree(ed: &mut Editor, from: PathBuf, branch: String, then: impl FnOnce(&mut Editor, PathBuf) + Send + 'static) {
+/// Create a worktree on a new `branch` starting at `base` (default: the checkout at `from`), or on
+/// `branch` itself when it exists, in the background, then run `then` with its path.
+pub fn create_worktree(ed: &mut Editor, from: PathBuf, branch: String, base: Option<String>, then: impl FnOnce(&mut Editor, PathBuf) + Send + 'static) {
     let Some(repo) = ed.repo_of(&from) else {
         ed.error(format!("{} is not in a git repository", from.display()));
         return;
@@ -760,11 +818,15 @@ pub fn create_worktree(ed: &mut Editor, from: PathBuf, branch: String, then: imp
         return;
     }
     let path = worktree_path(ed, &repo.main, &branch);
-    ed.message(format!("Creating worktree {branch}…"));
+    let base = base.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
+    ed.message(match &base {
+        Some(b) => format!("Creating worktree {branch} from {b}…"),
+        None => format!("Creating worktree {branch}…"),
+    });
     let main = ed.main_sender();
     let root = repo.main.clone();
     ed.rt.spawn_blocking(move || {
-        let r = git::add_worktree(&from, &path, &branch, None);
+        let r = git::add_worktree(&from, &path, &branch, base.as_deref());
         main.send(move |ed| match r {
             Ok(()) => {
                 let path = path.canonicalize().unwrap_or(path);
@@ -862,6 +924,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("new-buffer-directory", json!("project"), "Where new-chat / new-terminal start: \"project\" (the current buffer's worktree root), \"buffer\" (its directory) or \"editor\" (where serpis started).");
     ed.defvar("worktree-directory", json!("~/.serpis/worktrees"), "Where new worktrees go: <dir>/<project>/<branch>.");
     ed.defvar("worktree-branch-prefix", json!("serpis/"), "Prefix of suggested branch names for new worktrees.");
+    ed.defvar("worktree-pick-base", json!(true), "New worktrees ask which branch (local or remote) or commit they start from; off: they start from the current checkout.");
     ed.defvar("worktree-delete-branch", json!("never"), "After worktree-remove, delete its branch: \"never\", \"merged\" (git branch -d) or \"always\" (-D).");
     ed.defvar(
         "sidebar-buffer-menu",
@@ -1032,45 +1095,22 @@ pub fn install(ed: &mut Editor) {
         ed.new_buffer_in("terminal", &dir)?;
         Ok(())
     });
-    ed.define_command("worktree-new-chat", "New chat in a new git worktree (params: directory, branch; prompts for the branch).", o, |ed, a| {
-        let from = target_dir(ed, a, true);
-        if ed.repo_of(&from).is_none() {
-            anyhow::bail!("{} is not in a git repository", from.display());
-        }
-        let go = move |ed: &mut Editor, branch: String| {
-            create_worktree(ed, from, branch, |ed, path| {
-                if let Err(e) = ed.new_buffer_in("chat", &path) {
-                    ed.error(format!("{e:#}"));
-                }
-            });
-        };
-        match a.str(1) {
-            Some(b) => go(ed, b.to_string()),
-            None => {
-                let suggestion = suggest_branch(ed);
-                ed.read_string("New worktree on branch: ", &suggestion, go);
+    for (name, kind, what) in [("worktree-new-chat", "chat", "chat"), ("worktree-new-terminal", "terminal", "terminal")] {
+        let doc = format!(
+            "New {what} in a new git worktree. Asks which branch it starts from (any local or remote branch, or a commit; worktree-pick-base) and the new branch's name. Params: directory, branch, base (default: the current checkout)."
+        );
+        ed.define_command(name, &doc, o, move |ed, a| {
+            let from = target_dir(ed, a, true);
+            if ed.repo_of(&from).is_none() {
+                anyhow::bail!("{} is not in a git repository", from.display());
             }
-        }
-        Ok(())
-    });
-    ed.define_command("worktree-new-terminal", "New terminal in a new git worktree (params: directory, branch).", o, |ed, a| {
-        let from = target_dir(ed, a, true);
-        let go = move |ed: &mut Editor, branch: String| {
-            create_worktree(ed, from, branch, |ed, path| {
-                if let Err(e) = ed.new_buffer_in("terminal", &path) {
-                    ed.error(format!("{e:#}"));
-                }
-            });
-        };
-        match a.str(1) {
-            Some(b) => go(ed, b.to_string()),
-            None => {
-                let suggestion = suggest_branch(ed);
-                ed.read_string("New worktree on branch: ", &suggestion, go);
+            match a.str(1) {
+                Some(b) => open_in_new_worktree(ed, from, b.to_string(), a.str(2).map(str::to_string), kind),
+                None => ask_new_worktree(ed, from, kind),
             }
-        }
-        Ok(())
-    });
+            Ok(())
+        });
+    }
     ed.define_command("worktree-remove", "Remove a linked git worktree and kill its buffers, after confirming (param: path).", o, |ed, a| {
         let dir = target_dir(ed, a, true);
         remove_worktree(ed, dir);

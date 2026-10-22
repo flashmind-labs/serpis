@@ -679,9 +679,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             _ => Some("chat".into()),
         };
         let on_done: Option<Function> = opts.as_ref().and_then(|o| o.get("on_done").ok());
+        let base: Option<String> = opts.as_ref().and_then(|o| o.get("base").ok());
         let l = lua.clone();
         let done = on_done.map(|f| SendPtr(Box::new((l, f))));
-        ed(|e| crate::sidebar::create_worktree(e, crate::expand_home(&dir), branch, move |e, path| {
+        ed(|e| crate::sidebar::create_worktree(e, crate::expand_home(&dir), branch, base, move |e, path| {
             if let Some(k) = kind {
                 if let Err(err) = e.new_buffer_in(&k, &path) {
                     e.error(format!("{err:#}"));
@@ -1479,6 +1480,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // The open prompt's text, or nil.
     debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
+    debug.set("minibuffer_input", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.input.text())))?)?;
     debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;
     debug.set("quit", lua.create_function(|_, ()| ed(|e| e.quit_requested = true))?)?;
     debug.set("messages", lua.create_function(|_, ()| ed(|e| e.messages.clone()))?)?;

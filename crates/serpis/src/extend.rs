@@ -138,7 +138,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.project.of_buffer", "(buf?): the project directory a buffer belongs to."),
     ("serpis.project.repo", "(dir): {worktree, main, branch, linked} for the git repository around dir."),
     ("serpis.project.worktrees", "(dir): {path, branch, head, main, locked} (runs git)."),
-    ("serpis.project.new_worktree", "(dir, branch, {kind = \"chat\" | \"terminal\" | false, on_done = fn(path)}?): create a git worktree (and open a buffer in it)."),
+    ("serpis.project.new_worktree", "(dir, branch, {base = \"origin/main\", kind = \"chat\" | \"terminal\" | false, on_done = fn(path)}?): create a git worktree on a new branch from base (default: the current checkout), or on branch when it exists (and open a buffer in it)."),
     ("serpis.project.add", "(dir): pin a project to the sidebar."),
     ("serpis.project.remove", "(dir): unpin it."),
     ("serpis.project.list", "(): the sidebar's groups: {root, name, git, worktrees = {{path, branch, main, status, buffers}}}."),
