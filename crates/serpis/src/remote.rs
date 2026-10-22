@@ -741,6 +741,104 @@ fn move_empty_chat(ed: &mut Editor, id: BufferId, machine: &str, dir: &str) {
     });
 }
 
+/// Move chat buffer `id` (running on `from`, None for here) to machine `to` ("local": here),
+/// into a folder picked there: its session goes over and continues there, and the machine it
+/// left keeps it, marked as moved. Only an idle chat moves.
+fn move_chat(ed: &mut Editor, id: BufferId, from: Option<String>, to: String) {
+    let to = if to == "local" { None } else { Some(to) };
+    if from == to {
+        return ed.message(format!("The chat already runs on {}", to.as_deref().unwrap_or("this machine")));
+    }
+    let busy = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.running() || c.state_now().compacting).unwrap_or(true);
+    if busy {
+        return ed.message("The chat is working: stop it (C-c C-c) or let it finish, then move it");
+    }
+    let target = to.clone();
+    let pick = move |ed: &mut Editor, f: Box<dyn FnOnce(&mut Editor, String)>| match &target {
+        Some(m) => pick_dir(ed, &m.clone(), f),
+        None => ed.read_directory("Continue it in: ", move |ed, d| f(ed, d.to_string_lossy().into_owned())),
+    };
+    pick(ed, Box::new(move |ed, dir| fetch_session(ed, id, from, to, dir)));
+}
+
+/// The chat's session text: from its file here, or exported by its node.
+fn fetch_session(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String) {
+    let key = format!("remote-move:{id:?}");
+    ed.busy_start(&key, &format!("Moving the chat to {}…", to.as_deref().unwrap_or("this machine")));
+    match &from {
+        None => {
+            let text = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.session_path()).flatten().and_then(|p| std::fs::read_to_string(p).ok());
+            match text {
+                Some(text) => deliver(ed, id, from, to, dir, text),
+                None => {
+                    ed.busy_stop(&key);
+                    ed.error("This chat isn't saved (session-save is off), so it can't move");
+                }
+            }
+        }
+        Some(m) => {
+            let chat = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.remote_chat_id()).flatten().unwrap_or_default();
+            request(ed, &m.clone(), Request::Export { chat }, move |ed, r| match r {
+                Ok(Response::Session { text }) => deliver(ed, id, from, to, dir, text),
+                Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
+                Err(e) => moved_failed(ed, id, e),
+            });
+        }
+    }
+}
+
+/// Continue the session on `to`, then let the machine it left know.
+fn deliver(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String, text: String) {
+    let to_name = to.clone().unwrap_or_else(|| "local".into());
+    let leave = move |ed: &mut Editor| match &from {
+        // Marked as moved, and closed there.
+        Some(m) => {
+            let chat = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.remote_chat_id()).flatten().unwrap_or_default();
+            send(ed, &m.clone(), Request::Moved { chat, to: to_name.clone() });
+        }
+        None => {
+            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.append_entry(ed, crate::session::MOVED_ENTRY, json!({"to": to_name})));
+        }
+    };
+    match to {
+        None => {
+            let root = crate::session_ui::session_root(ed);
+            let loaded = crate::session::import(&root, &text, std::path::Path::new(&dir)).and_then(|p| crate::session::load(&p));
+            match loaded {
+                Ok(l) => {
+                    leave(ed);
+                    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.continue_here(ed, &l));
+                    moved(ed, id, "this machine");
+                }
+                Err(e) => moved_failed(ed, id, format!("{e:#}")),
+            }
+        }
+        Some(m) => {
+            let m2 = m.clone();
+            request(ed, &m, Request::Import { session: text, cwd: dir }, move |ed, r| match r {
+                Ok(Response::Chat { chat }) => {
+                    leave(ed);
+                    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &m2, &chat));
+                    send(ed, &m2, Request::Attach { chat });
+                    moved(ed, id, &m2);
+                }
+                Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
+                Err(e) => moved_failed(ed, id, e),
+            });
+        }
+    }
+}
+
+fn moved(ed: &mut Editor, id: BufferId, to: &str) {
+    ed.busy_stop(&format!("remote-move:{id:?}"));
+    ed.message(format!("The chat continues on {to}"));
+}
+
+fn moved_failed(ed: &mut Editor, id: BufferId, error: String) {
+    ed.busy_stop(&format!("remote-move:{id:?}"));
+    ed.error(format!("The chat couldn't move: {error}"));
+}
+
 /// Pick a machine (`local` first), then call `f` with its name ("local" for this one).
 fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(&mut Editor, String) + 'static) {
     let cands = machine_candidates(ed, with_local);
@@ -853,11 +951,13 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
-    ed.define_command("chat-select-machine", "Choose where this chat runs. A chat with no messages yet moves to the machine you pick (then a folder there); `local` runs it in serpis.", o, |ed, _| {
+    ed.define_command("chat-select-machine", "Choose where this chat runs: the machine you pick, then a folder there (`local`: this one). A chat with messages moves with them: it continues there, and the machine it left keeps its session, marked as moved.", o, |ed, _| {
         let id = crate::commands::current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
         let empty = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.is_empty()).unwrap_or(false);
         if !empty {
-            ed.message("This chat already has messages: start a new chat on the other machine (remote-new-chat); moving chats between machines comes next");
+            // A chat with messages moves with them.
+            let from = ed.buffer_machine(id);
+            pick_machine(ed, "Move this chat to: ", from.is_some(), move |ed, to| move_chat(ed, id, from, to));
             return Ok(());
         }
         pick_machine(ed, "Run this chat on: ", true, move |ed, m| {

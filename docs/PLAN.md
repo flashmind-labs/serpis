@@ -318,9 +318,9 @@ Steps:
    downloads when a machine first needs one, checked against checksums built into serpis
    itself. Needs a decision on where releases are hosted.
 3. Moving chats between machines (next, in this order):
-   a. Node upgrades: a machine still running an older node is restarted on the new one when
-      none of its chats is mid-turn, and its chats come back.
-   b. Moving a chat with its history (here to a machine, back, or between two machines) into a
+   a. *Done*: node upgrades. A machine still running an older node is restarted on the new one
+      when none of its chats is mid-turn, and its chats come back (`tests/upgrade.rs`).
+   b. *Done* (`tests/ui/remote_move.lua`): moving a chat with its history (here to a machine, back, or between two machines) into a
       folder picked there; it continues with its session, and its id keeps provider caches
       warm. The machine it left keeps the session, marked as moved.
    c. Carrying the folder along: git first (the branch plus a snapshot commit of uncommitted

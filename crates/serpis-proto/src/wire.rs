@@ -88,6 +88,13 @@ pub enum Request {
     },
     /// Stop the node: its chats are aborted, their sessions kept to reopen when it starts again.
     Stop,
+    /// An idle chat's session file, to continue it on another machine.
+    Export { chat: String },
+    /// Continue a chat from another machine: its session file's text, in `cwd` here (a path on
+    /// this machine). An older copy of the same chat here is replaced. Answered with `Chat`.
+    Import { session: String, cwd: String },
+    /// The chat continues elsewhere (`to`, a machine): mark its session so, and close it here.
+    Moved { chat: String, to: String },
     /// Stop the node so a newer build can start, unless a chat is mid-turn (then an error says
     /// so): its open chats reopen in the new one.
     Restart,
@@ -137,6 +144,8 @@ pub enum Response {
     Models { models: Vec<ModelInfo> },
     Sessions { sessions: Vec<SessionInfo> },
     Dirs { path: String, dirs: Vec<String> },
+    /// A session file's text (`Export`).
+    Session { text: String },
     /// What a `Setup` added (`auth:openrouter`, `models:local`, `settings:agent-model`).
     Setup { added: Vec<String> },
 }

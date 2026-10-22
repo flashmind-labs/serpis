@@ -220,8 +220,11 @@ there, and keeps it (`remote-users`) once a login with it works; `"alice@box.net
 `remote-hosts`, or `User` in `~/.ssh/config`, names it up front. serpis keeps no
 credentials of its own: sshd, or rayfish, decides who gets in.
 
-The composer's machine pill (`chat-select-machine`) moves a new chat to a machine and a folder
-there; `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
+The composer's machine pill (`chat-select-machine`) moves a chat to a machine and a folder there,
+messages and all: here to a machine, back, or from one machine to another. It continues there as
+the same chat (its id keeps provider caches warm), with that folder's instructions, and the machine
+it left keeps its session, marked as moved. Only an idle chat moves, and the folder's files don't
+travel yet: pick one there that has them. Besides the pill, `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
 (sessions saved there) and `remote-close-chat` do the rest, and `chat-select-model` lists that
 machine's models. Closing such a chat's window only stops showing it. The sidebar groups them as
 `folder · machine`, and they are shown again when serpis starts.

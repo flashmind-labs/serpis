@@ -587,6 +587,34 @@ impl Node {
                 sessions.truncate(limit.unwrap_or(usize::MAX));
                 Response::Sessions { sessions }
             }
+            Request::Export { chat } => {
+                let slot = self.chats.get(&chat).ok_or_else(|| format!("no chat {chat} on this node"))?;
+                if slot.chat.running() || slot.chat.compacting() {
+                    return Err("the chat is mid-turn: stop it or wait for it to finish first".into());
+                }
+                let path = slot.chat.session.as_ref().filter(|w| w.exists()).map(|w| w.path.clone()).ok_or("the chat has no saved session (session-save is off, or nothing was said yet)")?;
+                Response::Session { text: std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))? }
+            }
+            Request::Import { session, cwd } => {
+                let cwd = from_home(&cwd);
+                if !cwd.is_dir() {
+                    return Err(format!("{} isn't a folder on this machine", cwd.display()));
+                }
+                let (id, _) = serpis_chat::session::rehome(&session, &cwd).map_err(|e| format!("{e:#}"))?;
+                // An older copy of it open here gives way.
+                if let Some(mut old) = self.chats.remove(&id) {
+                    old.chat.abort();
+                }
+                let path = serpis_chat::session::import(&self.session_root(), &session, &cwd).map_err(|e| format!("{e:#}"))?;
+                let chat = self.resume(&path)?;
+                // Its instructions are this folder's now (AGENTS.md, the cwd it names).
+                self.with_chat(&chat, |c, _| c.refresh_context())?;
+                Response::Chat { chat }
+            }
+            Request::Moved { chat, to } => {
+                self.with_chat(&chat, |c, h| c.append_entry(h, serpis_chat::session::MOVED_ENTRY, json!({"to": to})))?;
+                self.answer(client, Request::Close { chat })?
+            }
             Request::Stop => Response::Ok,
             Request::Restart => {
                 let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();

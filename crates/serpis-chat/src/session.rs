@@ -198,6 +198,40 @@ fn summary_message(prefix: &str, summary: &str) -> Message {
 }
 
 /// Read a session: follow the last entry back to the root and rebuild the conversation.
+/// The custom entry a session gets when its chat moved to another machine: {to, cwd}.
+pub const MOVED_ENTRY: &str = "serpis-moved";
+
+/// A session file's text with its folder set to `cwd`, and its id. A chat moving to another
+/// machine continues there in another folder; its entries stay as they were.
+pub fn rehome(text: &str, cwd: &Path) -> anyhow::Result<(String, String)> {
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let mut header: Value = serde_json::from_str(first)?;
+    if header.get("type").and_then(Value::as_str) != Some("session") {
+        anyhow::bail!("not a session file");
+    }
+    let id = header.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()).ok_or_else(|| anyhow::anyhow!("the session has no id"))?.to_string();
+    header["cwd"] = json!(cwd.to_string_lossy());
+    Ok((id, format!("{}\n{rest}", serde_json::to_string(&header)?)))
+}
+
+/// Write a session from elsewhere under `root`, for `cwd`, in place of any older copy of it
+/// there (a chat that moved away and comes back); the new file's path.
+pub fn import(root: &Path, text: &str, cwd: &Path) -> anyhow::Result<PathBuf> {
+    let (id, text) = rehome(text, cwd)?;
+    for d in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
+            if f.file_name().to_string_lossy().ends_with(&format!("_{id}.jsonl")) {
+                std::fs::remove_file(f.path())?;
+            }
+        }
+    }
+    let stamp = iso(SystemTime::now()).replace([':', '.'], "-");
+    let path = root.join(dir_for(cwd)).join(format!("{stamp}_{id}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap_or(root))?;
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
 pub fn load(path: &Path) -> anyhow::Result<Loaded> {
     let text = std::fs::read_to_string(path)?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());

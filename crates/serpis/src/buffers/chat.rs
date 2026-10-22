@@ -260,6 +260,22 @@ impl ChatBuffer {
         }
     }
 
+    /// Continue here a chat that ran elsewhere (its session written here): what this buffer showed
+    /// gives way to it, and its instructions are this folder's.
+    pub fn continue_here(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
+        self.remote = None;
+        self.chat.clear();
+        self.entries.clear();
+        self.views.clear();
+        self.restore(ed, l);
+        self.chat.refresh_context();
+    }
+
+    /// The session file this chat is saved in, when it runs here.
+    pub fn session_path(&self) -> Option<std::path::PathBuf> {
+        self.remote.is_none().then(|| self.chat.session.as_ref().filter(|w| w.exists()).map(|w| w.path.clone())).flatten()
+    }
+
     /// No messages yet: the chat can still move to another machine as it is.
     pub fn is_empty(&self) -> bool {
         match &self.remote {
