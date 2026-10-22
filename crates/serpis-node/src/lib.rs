@@ -14,6 +14,7 @@
 pub mod bridge;
 pub mod client;
 pub mod deploy;
+pub mod workspace;
 pub mod server;
 
 use std::path::PathBuf;

@@ -758,7 +758,183 @@ fn move_chat(ed: &mut Editor, id: BufferId, from: Option<String>, to: String) {
         Some(m) => pick_dir(ed, &m.clone(), f),
         None => ed.read_directory("Continue it in: ", move |ed, d| f(ed, d.to_string_lossy().into_owned())),
     };
-    pick(ed, Box::new(move |ed, dir| fetch_session(ed, id, from, to, dir)));
+    // Its folder can come along, or the chat continues in one that is there.
+    let dir = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.state_now().cwd).unwrap_or_default();
+    let name = std::path::Path::new(&dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let there = to.clone().unwrap_or_else(|| "this machine".into());
+    let cands = vec![
+        Candidate::new(format!("Bring {name} with it")).detail(format!("into ~/{name} on {there} (its git branch and uncommitted work, or its files)")).value("bring"),
+        Candidate::new(format!("Use a folder that is on {there}")).value("pick"),
+    ];
+    ed.completing_read("Its folder: ", cands, true, move |ed, c, _| match c.map(|c| c.value).as_deref() {
+        Some("bring") => {
+            let (f2, t2) = (from.clone(), to.clone());
+            carry(ed, id, from, to, dir, move |ed, r| match r {
+                Ok(cwd) => fetch_session(ed, id, f2, t2, cwd),
+                Err(e) => moved_failed(ed, id, format!("bringing its folder: {e}")),
+            });
+        }
+        Some(_) => pick(ed, Box::new(move |ed, dir| fetch_session(ed, id, from, to, dir))),
+        None => {}
+    });
+}
+
+/// Connections to `machines`, in order; `f` gets them all, or the first failure.
+fn clients(ed: &mut Editor, mut machines: Vec<String>, mut got: Vec<Arc<Client>>, f: Box<dyn FnOnce(&mut Editor, Result<Vec<Arc<Client>>, String>)>) {
+    if machines.is_empty() {
+        return f(ed, Ok(got));
+    }
+    let m = machines.remove(0);
+    with_client(ed, &m, move |ed, c| match c {
+        Ok(c) => {
+            got.push(c);
+            clients(ed, machines, got, f)
+        }
+        Err(e) => f(ed, Err(e)),
+    });
+}
+
+/// Carry folder `dir` (on `from`, None: here) to a new folder in the home of `to` (None:
+/// here), over the nodes' own connections; `done` gets the chat's folder there.
+fn carry(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String, done: impl FnOnce(&mut Editor, Result<String, String>) + 'static) {
+    let key = format!("remote-move:{id:?}");
+    ed.busy_start(&key, "Packing the folder…");
+    let machines: Vec<String> = from.iter().chain(to.iter()).cloned().collect();
+    let (has_from, has_to) = (from.is_some(), to.is_some());
+    clients(ed, machines, Vec::new(), Box::new(move |ed, c| {
+        let mut c = match c {
+            Ok(c) => c.into_iter(),
+            Err(e) => return done(ed, Err(e)),
+        };
+        let src = if has_from { c.next() } else { None };
+        let dst = if has_to { c.next() } else { None };
+        // The callback stays here; the result of the work comes back to it.
+        let token = ed.remote.next_answer;
+        ed.remote.next_answer += 1;
+        ed.remote.answers.insert(token, Box::new(move |ed, r| done(ed, r.and_then(|r| match r {
+            Response::Unpacked { cwd } => Ok(cwd),
+            other => Err(format!("unexpected answer {other:?}")),
+        }))));
+        let main = ed.main_sender();
+        let progress = {
+            let main = main.clone();
+            move |label: String| {
+                let key = key.clone();
+                main.send(move |ed| ed.busy_start(&key, &label));
+            }
+        };
+        ed.rt.spawn(async move {
+            let r = carry_folder(src, dst, dir, progress).await.map(|cwd| Response::Unpacked { cwd }).map_err(|e| format!("{e:#}"));
+            main.send(move |ed| {
+                if let Some(done) = ed.remote.answers.remove(&token) {
+                    done(ed, r);
+                }
+            });
+        });
+    }));
+}
+
+/// Where this machine packs and receives carried folders (its user's alone).
+fn transfer_dir() -> std::path::PathBuf {
+    let d = dirs::home_dir().unwrap_or_default().join(".serpis/transfer");
+    use std::os::unix::fs::DirBuilderExt;
+    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d);
+    d
+}
+
+const CHUNK: u64 = 4 << 20;
+
+/// The work of [`carry`]: pack where the folder is, move the bytes, unpack where it goes.
+async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: String, progress: impl Fn(String)) -> anyhow::Result<String> {
+    use anyhow::{Context, bail};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+    let mb = |n: u64| format!("{:.1}", n as f64 / (1u64 << 20) as f64);
+    let home = dirs::home_dir().unwrap_or_default();
+    // Packed: here (a local file), or there (a name on the source node).
+    let (local, remote, size, packed) = match &src {
+        None => {
+            let (file, packed) = tokio::task::spawn_blocking(move || serpis_node::workspace::pack(std::path::Path::new(&dir), &transfer_dir())).await??;
+            let size = std::fs::metadata(&file)?.len();
+            (Some(file), None, size, serde_json::to_value(packed)?)
+        }
+        Some(s) => match s.call(Request::Pack { dir }).await? {
+            Response::Packed { name, size, packed } => (None, Some(name), size, packed),
+            other => bail!("unexpected answer {other:?}"),
+        },
+    };
+    let read = |offset: u64| {
+        let (local, remote, src) = (local.clone(), remote.clone(), src.clone());
+        async move {
+            match (&local, &remote, &src) {
+                (Some(file), _, _) => {
+                    use std::io::{Read, Seek};
+                    let mut f = std::fs::File::open(file)?;
+                    f.seek(std::io::SeekFrom::Start(offset))?;
+                    let mut buf = Vec::new();
+                    f.take(CHUNK).read_to_end(&mut buf)?;
+                    anyhow::Ok(buf)
+                }
+                (_, Some(name), Some(s)) => match s.call(Request::Fetch { name: name.clone(), offset, len: CHUNK }).await? {
+                    Response::Chunk { data } => Ok(B64.decode(data)?),
+                    other => bail!("unexpected answer {other:?}"),
+                },
+                _ => bail!("nothing packed"),
+            }
+        }
+    };
+    let result = match &dst {
+        Some(t) => {
+            let name = format!("put-{}", uuid::Uuid::now_v7().simple());
+            let mut offset = 0;
+            while offset < size || offset == 0 {
+                let chunk = read(offset).await?;
+                if chunk.is_empty() && offset > 0 {
+                    break;
+                }
+                t.call(Request::Put { name: name.clone(), offset, data: B64.encode(&chunk) }).await?;
+                offset += chunk.len() as u64;
+                progress(format!("Bringing the folder: {} of {} MB…", mb(offset), mb(size)));
+                if chunk.is_empty() {
+                    break;
+                }
+            }
+            progress("Unpacking the folder…".into());
+            match t.call(Request::Unpack { name, packed, under: "~".into() }).await? {
+                Response::Unpacked { cwd } => Ok(cwd),
+                other => Err(anyhow::anyhow!("unexpected answer {other:?}")),
+            }
+        }
+        None => {
+            let file = transfer_dir().join(format!("in-{}", uuid::Uuid::now_v7().simple()));
+            let mut out = std::fs::File::create(&file)?;
+            let mut offset = 0;
+            while offset < size {
+                let chunk = read(offset).await?;
+                if chunk.is_empty() {
+                    break;
+                }
+                std::io::Write::write_all(&mut out, &chunk)?;
+                offset += chunk.len() as u64;
+                progress(format!("Bringing the folder: {} of {} MB…", mb(offset), mb(size)));
+            }
+            drop(out);
+            progress("Unpacking the folder…".into());
+            let packed: serpis_node::workspace::Packed = serde_json::from_value(packed)?;
+            let f2 = file.clone();
+            let r = tokio::task::spawn_blocking(move || serpis_node::workspace::unpack(&f2, &packed, &home)).await.context("unpacking")?;
+            let _ = std::fs::remove_file(&file);
+            r.map(|p| p.to_string_lossy().into_owned())
+        }
+    };
+    // What was packed is no longer needed, whichever way it went.
+    if let Some(f) = &local {
+        let _ = std::fs::remove_file(f);
+    }
+    if let (Some(name), Some(s)) = (&remote, &src) {
+        let _ = s.call(Request::Drop { name: name.clone() }).await;
+    }
+    result
 }
 
 /// The chat's session text: from its file here, or exported by its node.

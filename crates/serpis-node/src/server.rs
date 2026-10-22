@@ -49,6 +49,8 @@ enum Msg {
     Gone { client: u64 },
     /// A chat has news.
     Wake,
+    /// The answer to a call that took a while (packing, unpacking), done off this thread.
+    Reply { client: u64, id: u64, response: Response },
     Stop,
 }
 
@@ -101,7 +103,10 @@ pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
         }
     });
     let wake_tx = tx.clone();
+    let msgs = tx.clone();
     let mut node = Node {
+        msgs,
+        transfer: config.dir.join("transfer"),
         chats: BTreeMap::new(),
         clients: HashMap::new(),
         settings: Settings::load(config.dir.join("settings.json")),
@@ -262,6 +267,10 @@ struct Client {
 }
 
 struct Node {
+    /// To this node's own loop (answers of work done elsewhere).
+    msgs: mpsc::Sender<Msg>,
+    /// Where carried folders are packed and arrive (its user's alone).
+    transfer: PathBuf,
     chats: BTreeMap<String, Slot>,
     clients: HashMap<u64, Client>,
     settings: Settings,
@@ -332,6 +341,7 @@ impl Node {
                         self.clients.remove(&client);
                     }
                     Msg::Wake => {}
+                    Msg::Reply { client, id, response } => self.reply(client, id, response),
                     Msg::Stop => stop = true,
                 }
             }
@@ -466,6 +476,11 @@ impl Node {
             }
         };
         let stopping = matches!(call.request, Request::Stop | Request::Restart);
+        // Packing and unpacking take a while: done elsewhere, answered when done.
+        if let Request::Pack { .. } | Request::Unpack { .. } = &call.request {
+            self.answer_later(client, call.id, call.request);
+            return false;
+        }
         let response = match self.answer(client, call.request) {
             Ok(r) => r,
             Err(message) => Response::Error { message },
@@ -615,6 +630,29 @@ impl Node {
                 self.with_chat(&chat, |c, h| c.append_entry(h, serpis_chat::session::MOVED_ENTRY, json!({"to": to})))?;
                 self.answer(client, Request::Close { chat })?
             }
+            Request::Fetch { name, offset, len } => {
+                use std::io::{Read, Seek};
+                let path = self.transfer_file(&name)?;
+                let mut f = std::fs::File::open(&path).map_err(|e| format!("{name}: {e}"))?;
+                f.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+                let mut buf = Vec::new();
+                f.take(len.min(8 << 20)).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                Response::Chunk { data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf) }
+            }
+            Request::Put { name, offset, data } => {
+                use std::io::{Seek, Write};
+                let path = self.transfer_file(&name)?;
+                let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| e.to_string())?;
+                let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(offset == 0).open(&path).map_err(|e| format!("{name}: {e}"))?;
+                f.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+                f.write_all(&bytes).map_err(|e| e.to_string())?;
+                Response::Ok
+            }
+            Request::Drop { name } => {
+                let _ = std::fs::remove_file(self.transfer_file(&name)?);
+                Response::Ok
+            }
+            Request::Pack { .. } | Request::Unpack { .. } => unreachable!("answered later"),
             Request::Stop => Response::Ok,
             Request::Restart => {
                 let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();
@@ -637,6 +675,49 @@ impl Node {
                 Response::Dirs { path: dir.to_string_lossy().into_owned(), dirs }
             }
         })
+    }
+
+    /// A file in the transfer directory, by a name a client gave: only plain names (no paths),
+    /// so no request reaches outside it.
+    fn transfer_file(&self, name: &str) -> Result<PathBuf, String> {
+        if name.is_empty() || name.starts_with('.') || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+            return Err(format!("not a transfer name: {name}"));
+        }
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.transfer).map_err(|e| e.to_string())?;
+        Ok(self.transfer.join(name))
+    }
+
+    /// Pack or unpack on another thread, and answer when done.
+    fn answer_later(&mut self, client: u64, id: u64, request: Request) {
+        let (msgs, transfer) = (self.msgs.clone(), self.transfer.clone());
+        let file = match &request {
+            Request::Unpack { name, .. } => self.transfer_file(name).map(Some),
+            _ => self.transfer_file("x").map(|_| None),
+        };
+        self.rt.spawn_blocking(move || {
+            let response = (|| -> Result<Response, String> {
+                match request {
+                    Request::Pack { dir } => {
+                        let dir = from_home(&dir);
+                        let (path, packed) = crate::workspace::pack(&dir, &transfer).map_err(|e| format!("{e:#}"))?;
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        Ok(Response::Packed { name, size, packed: serde_json::to_value(packed).map_err(|e| e.to_string())? })
+                    }
+                    Request::Unpack { packed, under, .. } => {
+                        let file = file?.ok_or("no file")?;
+                        let packed: crate::workspace::Packed = serde_json::from_value(packed).map_err(|e| e.to_string())?;
+                        let cwd = crate::workspace::unpack(&file, &packed, &from_home(&under)).map_err(|e| format!("{e:#}"));
+                        let _ = std::fs::remove_file(&file);
+                        Ok(Response::Unpacked { cwd: cwd?.to_string_lossy().into_owned() })
+                    }
+                    _ => Err("not answered later".into()),
+                }
+            })()
+            .unwrap_or_else(|message| Response::Error { message });
+            let _ = msgs.send(Msg::Reply { client, id, response });
+        });
     }
 
     /// What this machine has for chats: the providers it has credentials for, and from where.

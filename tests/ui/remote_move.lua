@@ -16,8 +16,11 @@ write(agent_dir .. "/models.json", models)
 serpis.agent.reload_models()
 serpis.agent.model("mock/anthropic/claude-sonnet-4.5")
 serpis.var.set("session-directory", agent_dir .. "/sessions")
+-- The chat's folder: a repository on a branch, with uncommitted work in it.
 local here = sh("mktemp -d /tmp/snmove-here.XXXXXX"):gsub("%s+$", "")
 here = sh("cd '" .. here .. "' && pwd -P"):gsub("%s+$", "")
+local repo = here:match("([^/]+)$")
+sh("cd '" .. here .. "' && git init -q -b main && git config user.email t@t && git config user.name t && printf 'v1\\n' > app.txt && git add -A && git commit -qm first && git checkout -qb feature && printf 'v2\\n' > app.txt && printf 'draft\\n' > notes.md")
 
 -- Two other machines, the same model on each.
 local boxes, hosts = {}, {}
@@ -70,26 +73,43 @@ local function ask(text, answers)
     return false
   end
 end
--- Move the chat with the pill to `machine`, typing `folder` in the folder prompt.
+local function keys(text) return (text:gsub(".", "%0 "):gsub("   ", " SPC ")) end
+-- Move the chat with the pill to `machine`: bringing its folder (`folder` nil), or into
+-- `folder` there.
 local function move(machine, folder, wait_for)
-  return {
+  local list = {
     function(go)
       click("machine")
       when(function() return prompt():find("Move this chat to", 1, true) ~= nil end, go)
       return false
     end,
     function(go)
-      T.press(machine:gsub(".", "%0 ") .. "RET")
-      when(function() return prompt():find("Folder on", 1, true) ~= nil or prompt():find("Continue it in", 1, true) ~= nil end, go)
-      return false
-    end,
-    function(go)
-      T.press(folder:gsub(".", "%0 ") .. "RET")
-      when(function() return said("The chat continues on " .. wait_for) end, go)
+      T.press(keys(machine) .. "RET")
+      when(function() return prompt():find("Its folder", 1, true) ~= nil end, go)
       return false
     end,
   }
+  if folder then
+    list[#list + 1] = function(go)
+      T.press("u s e RET")
+      when(function() return prompt():find("Folder on", 1, true) ~= nil or prompt():find("Continue it in", 1, true) ~= nil end, go)
+      return false
+    end
+    list[#list + 1] = function(go)
+      T.press(keys(folder) .. "RET")
+      when(function() return said("The chat continues on " .. wait_for) end, go)
+      return false
+    end
+  else
+    list[#list + 1] = function(go)
+      T.press("b r i n g RET")
+      when(function() return said("The chat continues on " .. wait_for) end, go)
+      return false
+    end
+  end
+  return list
 end
+local function git_state(dir) return sh("cd '" .. dir .. "' && git branch --show-current && git status --porcelain && cat app.txt") end
 local function sessions_of(dir) return sh("cat '" .. dir .. "'/*/*.jsonl 2>/dev/null") end
 
 local list = {
@@ -104,12 +124,13 @@ local list = {
   end,
 }
 local function add(t) for _, s in ipairs(t) do list[#list + 1] = s end end
-add(move("box1", "~/proj", "box1"))
+add(move("box1", nil, "box1"))
 add({
   function()
     local info = serpis.chat.info(chat)
     T.check("here -> box1: it runs there", info.machine, "box1")
-    T.check("in the folder picked there", info.cwd, boxes.box1.home .. "/proj")
+    T.check("in its folder, brought along", info.cwd, boxes.box1.home .. "/" .. repo)
+    T.check("on its branch, with its work uncommitted", git_state(info.cwd), "feature\n M app.txt\n?? notes.md\nv2\n")
     T.check("as the same chat", info.session_id, id)
     T.check("with its conversation", count("hello") >= 1 and count("ok") == 1, true)
     T.check("this machine kept its session, marked as moved", sessions_of(agent_dir .. "/sessions"):find('"serpis-moved"', 1, true) ~= nil, true)
@@ -117,11 +138,12 @@ add({
   ask("next", 2),
   function() T.check("and it answers there", count("ok"), 2) end,
 })
-add(move("box2", "~/proj", "box2"))
+add(move("box2", nil, "box2"))
 add({
   function()
     local info = serpis.chat.info(chat)
     T.check("box1 -> box2", info.machine, "box2")
+    T.check("its folder brought from one machine to another", git_state(info.cwd), "feature\n M app.txt\n?? notes.md\nv2\n")
     T.check("still the same chat", info.session_id, id)
     T.check("with all of it", count("hello") >= 1 and count("next") >= 1 and count("ok") == 2, true)
     T.check("box1 kept its session, marked as moved", sessions_of(boxes.box1.home .. "/.serpis/agent/sessions"):find('"serpis-moved"', 1, true) ~= nil, true)

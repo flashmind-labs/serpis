@@ -323,9 +323,14 @@ Steps:
    b. *Done* (`tests/ui/remote_move.lua`): moving a chat with its history (here to a machine, back, or between two machines) into a
       folder picked there; it continues with its session, and its id keeps provider caches
       warm. The machine it left keeps the session, marked as moved.
-   c. Carrying the folder along: git first (the branch plus a snapshot commit of uncommitted
-      changes, into a worktree there), rsync over ssh otherwise; environment variables only
-      from an allowlist setting.
+   c. *Done* (`serpis_node::workspace`, `tests/ui/remote_move.lua`): carrying the folder along.
+      A repository goes as a bundle of its branch plus a snapshot commit of its uncommitted work
+      (through a temporary index and ref: nothing of it changes), and is checked out there with
+      the work uncommitted again; any other folder as a tar.gz. In 4 MB chunks over the nodes'
+      own connections (Pack, Fetch, Put, Unpack, Drop; packing off the node's thread), into a
+      new folder in the home there. Follow-ups: into an existing clone there (a worktree,
+      fetching only what it lacks, instead of the whole history), and environment variables
+      from an allowlist (needs per-chat environments in the agent's tools).
    d. Sessions of every machine in one list.
 4. Remote terminals through manymux.
 5. Node reliability: running turns that survive a node restart, parking a turn that keeps

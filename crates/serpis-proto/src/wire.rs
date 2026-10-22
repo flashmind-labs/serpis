@@ -95,6 +95,18 @@ pub enum Request {
     Import { session: String, cwd: String },
     /// The chat continues elsewhere (`to`, a machine): mark its session so, and close it here.
     Moved { chat: String, to: String },
+    /// Pack a folder here (its repository, when in one) for carrying to another machine:
+    /// answered with `Packed`, a file to `Fetch` and `Drop`.
+    Pack { dir: String },
+    /// `len` bytes of a packed file from `offset`.
+    Fetch { name: String, offset: u64, len: u64 },
+    /// Bytes of a file being carried here (base64), written at `offset`.
+    Put { name: String, offset: u64, data: String },
+    /// Unpack a carried file into a new folder under `under` (a path here): answered with
+    /// `Unpacked`, the chat's folder in it.
+    Unpack { name: String, packed: serde_json::Value, under: String },
+    /// Forget a packed or carried file.
+    Drop { name: String },
     /// Stop the node so a newer build can start, unless a chat is mid-turn (then an error says
     /// so): its open chats reopen in the new one.
     Restart,
@@ -146,6 +158,10 @@ pub enum Response {
     Dirs { path: String, dirs: Vec<String> },
     /// A session file's text (`Export`).
     Session { text: String },
+    Packed { name: String, size: u64, packed: serde_json::Value },
+    /// Bytes of a packed file (base64).
+    Chunk { data: String },
+    Unpacked { cwd: String },
     /// What a `Setup` added (`auth:openrouter`, `models:local`, `settings:agent-model`).
     Setup { added: Vec<String> },
 }

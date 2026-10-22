@@ -223,8 +223,12 @@ credentials of its own: sshd, or rayfish, decides who gets in.
 The composer's machine pill (`chat-select-machine`) moves a chat to a machine and a folder there,
 messages and all: here to a machine, back, or from one machine to another. It continues there as
 the same chat (its id keeps provider caches warm), with that folder's instructions, and the machine
-it left keeps its session, marked as moved. Only an idle chat moves, and the folder's files don't
-travel yet: pick one there that has them. Besides the pill, `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
+it left keeps its session, marked as moved. Only an idle chat moves. Its folder can come along ("Bring
+<folder> with it"): a git repository as its current branch plus its uncommitted work (changes,
+deletions, untracked files; ignored ones stay), made without touching its index, working tree or
+refs, and checked out there with the work uncommitted again; any other folder as its files. It
+lands in a new folder in the home there (`name-2` when `name` is taken), and the chat continues
+in the same subfolder. Or it continues in a folder already there. Besides the pill, `remote-new-chat`, `remote-attach-chat` (chats running there), `remote-resume-chat`
 (sessions saved there) and `remote-close-chat` do the rest, and `chat-select-model` lists that
 machine's models. Closing such a chat's window only stops showing it. The sidebar groups them as
 `folder · machine`, and they are shown again when serpis starts.
