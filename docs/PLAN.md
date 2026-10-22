@@ -167,7 +167,9 @@ it ships, so there is no runtime hashing of prompts.
    with the chat's id). `compat.openRouter` marks a gateway in front of OpenRouter. Each
    response's OpenRouter upstream is kept on the message (`upstream`, saved in the session) and
    passed to the `assistant-message` hook.
-6. **Cache UI**, each part with its own var:
+6. **Cache UI** (*done*: `crates/serpis/src/cache_watch.rs` works out hits, misses and their
+   causes from what each request was sent with and what the provider reported; `tests/ui/cache.lua`
+   checks every part below, and every switch, against the mock), each part with its own var:
    - `chat-cache-indicator`: a hit / partial / miss chip on each response (cache reads ÷ prompt).
    - `chat-cache-status`: the session hit rate and the cache state ("warm 41m", "cold") in the
      header; clicking lists recent misses with their causes.

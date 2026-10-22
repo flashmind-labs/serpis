@@ -72,6 +72,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.chat.list", "(): every chat as serpis.chat.info returns it."),
     ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, usage, context = {used, window, percent}, title, cwd, session = path | nil}."),
     ("serpis.chat.usage", "(buf?): the whole session's {input, output, cache_read, cache_write, total_tokens, cost} (cost in dollars, every message so far)."),
+    ("serpis.chat.cache", "(buf?): the prompt cache: {hit_rate (share of prompt tokens read from the cache), state (\"warm\", \"cold\" or nil before anything was cached), left (seconds until it expires), misses = {{cause, text, tokens, cost}}} (newest last)."),
     ("serpis.chat.running", "(buf?): whether its agent is working."),
     ("serpis.chat.abort", "(buf?): stop its agent now (also from the chat's own hooks: no further model request or tool runs)."),
     ("serpis.chat.set_model", "(buf?, \"provider/model-id\"): switch its model; raises when unknown or the provider has no credentials."),
@@ -169,6 +170,8 @@ pub const LUA_API: &[(&str, &str)] = &[
 /// Hooks serpis runs: (name, payload and what a handler may return).
 pub const HOOKS: &[(&str, &str)] = &[
     ("before-prompt", "{buffer, text, model, running}: a chat is about to send text. Return {block = \"reason\"} to refuse it (the text stays in the composer)."),
+    ("cache-miss", "{buffer, cause, text, tokens, cost}: a response read much less from the prompt cache than the previous one left; cause is model, thinking, tools, prompt, expired, upstream or unexplained, tokens what was rewritten and cost what reading it would have saved."),
+    ("before-cache-invalidate", "{buffer, action, tokens, cost, message}: an action (model, thinking, refresh) is about to throw a warm prompt cache away. Return false to keep the cache (the action doesn't happen) or a string to replace the warning."),
     ("assistant-message", "{buffer, text, stopReason, model, upstream, usage, total}: a model response finished; upstream is who served it behind a router (OpenRouter's provider, e.g. \"Anthropic\"), usage is this response's, total the session's ({input, output, cache_read, cache_write, total_tokens, cost})."),
     ("before-tool-call", "{buffer, name, args}: the agent wants to run a tool. Return {block = \"reason\"} to refuse, or {args = {...}} to change its arguments."),
     ("after-tool-call", "{buffer, name, text, isError}: a tool finished. Return {text = \"...\"} to replace what the model sees."),

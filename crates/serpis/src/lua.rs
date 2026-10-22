@@ -1060,6 +1060,12 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let v = ed(|e| e.chats.get(&id).map(|c| c.to_json(id)).unwrap_or(Value::Null))?;
         lua_of(lua, &v)
     })?)?;
+    // serpis.chat.cache(buf?): {hit_rate, state, left, misses = {{cause, text, tokens, cost}}}.
+    chat.set("cache", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let v = ed(|e| e.chats.get(&id).map(|c| c.cache.clone()).unwrap_or(Value::Null))?;
+        lua_of(lua, &v)
+    })?)?;
     // serpis.chat.usage(buf?): the session's {input, output, cache_read, cache_write, total_tokens, cost}.
     chat.set("usage", lua.create_function(move |lua, id: Option<u64>| {
         let id = chat_id(id)?;
@@ -1396,6 +1402,16 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     // Frames drawn so far: injected input takes effect in the next frame, so a test waits for
     // this to grow instead of guessing a delay.
     debug.set("frames", lua.create_function(|_, ()| ed(|e| e.frames_drawn))?)?;
+    // cache_age(buf, seconds): pretend the chat's last response ended that long ago (cache expiry).
+    debug.set("cache_age", lua.create_function(|_, (id, secs): (u64, f64)| {
+        ed(|e| {
+            let id = buffer_id_from_u64(id);
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| {
+                c.cache.age(std::time::Duration::from_secs_f64(secs));
+                c.publish(ed, id);
+            });
+        })
+    })?)?;
     // Record views' scroll positions as they are drawn: trace_scroll(true) starts, then
     // trace_scroll() returns {{t, y}} and stops.
     debug.set("trace_scroll", lua.create_function(|lua, on: Option<bool>| {

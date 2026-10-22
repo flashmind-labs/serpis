@@ -115,6 +115,8 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Controls not drawn this frame have no rectangle (tests see them disappear).
+        self.ed.debug_rects.clear();
         crate::ui::draw(ui, &mut self.ed);
         self.ed.frames_drawn += 1;
         if let Some(t) = self.frame_start.take() {

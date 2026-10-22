@@ -32,6 +32,8 @@ pub struct ChatInfo {
     pub context: (Option<u64>, u64),
     /// The running agent, so an abort takes effect at once (even from the chat's own hooks).
     pub agent: Option<serpis_agent::AgentHandle>,
+    /// The prompt cache: {hit_rate, state = "warm"|"cold"|nil, left (seconds), misses}.
+    pub cache: Value,
 }
 
 pub fn usage_json(u: &Usage) -> Value {

@@ -10,6 +10,7 @@
 pub mod app;
 pub mod buffer;
 pub mod buffers;
+pub mod cache_watch;
 pub mod chat_api;
 pub mod extend;
 pub mod frecency;
@@ -134,6 +135,12 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-disabled-tools", json!([]), "Tool names hidden from the agent.");
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");
     ed.defvar("agent-cache-retention", json!("long"), "How long providers keep a chat's prompt cached: \"long\" (1 hour on Anthropic-style caches, 24 hours where OpenAI-style caches allow it), \"short\" (5 minutes) or \"none\". Or per provider: {\"default\": \"long\", \"openrouter\": \"short\"}. 1-hour writes cost 2x input instead of 1.25x, but only for new tokens; a short cache expires during pauses and the next message rewrites the whole conversation.");
+    ed.defvar("chat-cache-indicator", json!(true), "Show how each response used the prompt cache (\"cache 96%\", \"cache miss\", \"cache new\") after its token counts.");
+    ed.defvar("chat-cache-status", json!(true), "Show the chat's cache hit rate and whether its cache is warm or cold in its window header; clicking it runs chat-cache-report.");
+    ed.defvar("chat-cache-miss-notice", json!("inline"), "Announce a prompt cache miss and its cause: \"inline\" (a line in the chat), \"message\" (the echo area) or \"off\". The cache-miss hook runs either way.");
+    ed.defvar("cache-warn", json!("notice"), "Before an action that throws a warm prompt cache away (see cache-warn-actions): \"confirm\" asks first, \"notice\" says what it costs after, \"off\" stays quiet. Sending after the cache expired and tool changes only ever get a notice.");
+    ed.defvar("cache-warn-threshold", json!(0.10), "Warn (cache-warn) only when re-caching would cost at least this many dollars.");
+    ed.defvar("cache-warn-actions", json!(commands::CACHE_WARN_ACTIONS), "Actions cache-warn warns about: model, thinking, tools, refresh (chat-refresh-context), expired (sending after the cache expired).");
     ed.defvar("agent-live-context", json!(false), "Rebuild the system prompt (AGENTS.md / CLAUDE.md, agent-guidelines, agent-append-system-prompt) for every message instead of keeping the one a chat started with. Any change then rewrites the chat's whole prompt cache; chat-refresh-context picks up changes once.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");

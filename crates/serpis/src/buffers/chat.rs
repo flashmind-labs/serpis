@@ -37,6 +37,8 @@ enum Entry {
         /// Thinking folded by hand (click or TAB): Some(true) all of it, Some(false) only its
         /// header; None follows chat-show-thinking.
         thinking: Option<bool>,
+        /// How the response used the prompt cache (None: resumed, or not reported).
+        cache: Option<crate::cache_watch::Hit>,
     },
     Tool {
         id: String,
@@ -104,6 +106,13 @@ pub struct ChatBuffer {
     /// The system prompt this chat sends, built on its first message and kept so the provider can
     /// reuse its cache: (tool names it was built for, prompt). `chat-refresh-context` drops it.
     system_prompt: Option<(Vec<String>, String)>,
+    /// What the prompt cache is doing (reads, misses and their causes, warm or cold).
+    pub cache: crate::cache_watch::CacheWatch,
+    /// What the running agent's requests are sent with.
+    sent: Option<crate::cache_watch::Sent>,
+    request_started: Option<Instant>,
+    /// chat-cache-indicator and chat-cache-status, as last read.
+    show_cache: (bool, bool),
 }
 
 const PREVIEW_LINES: usize = 10;
@@ -155,6 +164,10 @@ impl ChatBuffer {
             session: None,
             session_failed: false,
             system_prompt: None,
+            cache: Default::default(),
+            sent: None,
+            request_started: None,
+            show_cache: (true, true),
         };
         if chat.model.is_none() {
             chat.entries.push(Entry::Info {
@@ -185,6 +198,7 @@ impl ChatBuffer {
         self.last_error = None;
         self.session = None;
         self.system_prompt = None;
+        self.cache = Default::default();
         self.custom_entries.clear();
         self.dirty = true;
     }
@@ -288,6 +302,28 @@ impl ChatBuffer {
         let system_prompt = self.system_prompt_for(ed, &tools);
         let native = ed.var("agent-native-web-search").and_then(Value::as_bool).unwrap_or(true);
         let cache_retention = cache_retention(ed, &model.provider);
+        self.sent = Some(crate::cache_watch::Sent {
+            model: format!("{}/{}", model.provider, model.id),
+            thinking: self.thinking.as_str().to_string(),
+            tools: tools.iter().map(|t| t.name().to_string()).collect(),
+            prompt: {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                system_prompt.hash(&mut h);
+                h.finish()
+            },
+            retention: cache_retention,
+        });
+        if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
+            if cache_warning_applies(ed, "expired", cost) {
+                ed.message(format!(
+                    "The prompt cache expired {} ago: this message re-caches {} tokens ({})",
+                    crate::cache_watch::fmt_duration(ago),
+                    fmt_tokens(tokens),
+                    crate::cache_watch::fmt_cost(cost)
+                ));
+            }
+        }
         let cfg = AgentConfig {
             api_key: ed.registry.api_key(&model.provider),
             headers: ed.registry.provider_headers(&model.provider),
@@ -387,6 +423,57 @@ impl ChatBuffer {
         self.system_prompt = None;
     }
 
+    /// Account for a response's cache use; a miss is announced (chat-cache-miss-notice) and
+    /// passed to the `cache-miss` hook.
+    fn observe_cache(&mut self, ed: &mut Editor, a: &AssistantMessage) -> Option<crate::cache_watch::Hit> {
+        let (sent, model) = (self.sent.clone()?, self.model.clone()?);
+        let started = self.request_started.take().unwrap_or_else(Instant::now);
+        let (hit, miss) = self.cache.observe(sent, &model, &a.usage, a.upstream.clone(), started, Instant::now());
+        if let Some(m) = miss {
+            let payload = serde_json::json!({
+                "buffer": ed.this_buffer().map(crate::editor::buffer_id_to_u64),
+                "cause": m.cause.word(),
+                "text": m.cause.describe(),
+                "tokens": m.tokens,
+                "cost": m.cost,
+            });
+            ed.run_hook("cache-miss", &payload);
+            match ed.var_str("chat-cache-miss-notice").as_deref().unwrap_or("inline") {
+                "off" => {}
+                "message" => ed.warn(m.notice()),
+                _ => self.entries.push(Entry::Info { text: m.notice(), face: Face::MetaWarn }),
+            }
+        }
+        Some(hit)
+    }
+
+    /// The cache as scripts see it (`serpis.chat.cache`).
+    pub fn cache_json(&self) -> Value {
+        let now = Instant::now();
+        let (state, left) = match self.cache.state(now) {
+            Some(crate::cache_watch::State::Warm(d)) => (Some("warm"), d.as_secs()),
+            Some(crate::cache_watch::State::Cold) => (Some("cold"), 0),
+            None => (None, 0),
+        };
+        let misses: Vec<Value> = self
+            .cache
+            .misses
+            .iter()
+            .map(|m| serde_json::json!({"cause": m.cause.word(), "text": m.cause.describe(), "tokens": m.tokens, "cost": m.cost}))
+            .collect();
+        serde_json::json!({"hit_rate": self.cache.hit_rate(), "state": state, "left": left, "misses": misses})
+    }
+
+    /// The header's cache entry: "cache 94% · warm 41m" (None before anything was cached).
+    fn cache_status(&self) -> Option<String> {
+        let state = self.cache.state(Instant::now())?;
+        let rate = self.cache.hit_rate().map(|r| format!("cache {:.0}%", r * 100.0)).unwrap_or_else(|| "cache".into());
+        Some(match state {
+            crate::cache_watch::State::Warm(left) => format!("{rate} · warm {}", crate::cache_watch::fmt_duration(left)),
+            crate::cache_watch::State::Cold => format!("{rate} · cold"),
+        })
+    }
+
     /// Attach an image file to the next message.
     pub fn attach_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
         let (image, encoded) = crate::images::load_file(path).ok_or_else(|| anyhow::anyhow!("{} isn't an image serpis can read", path.display()))?;
@@ -410,6 +497,7 @@ impl ChatBuffer {
             entries: self.custom_entries.clone(),
             agent: self.agent.clone(),
             context: self.context(),
+            cache: self.cache_json(),
         }
     }
 
@@ -449,6 +537,7 @@ impl ChatBuffer {
                 usage: None,
                 error: None,
                 thinking: None,
+                cache: None,
             });
         }
     }
@@ -465,15 +554,20 @@ impl ChatBuffer {
                 }
                 self.entries.push(Entry::User { text, queued: false, images });
             }
-            AgentEvent::MessageStart(Message::Assistant(m)) => self.entries.push(Entry::Assistant {
-                blocks: Vec::new(),
-                model: m.model,
-                streaming: true,
-                continuation: false,
-                usage: None,
-                error: None,
-                thinking: None,
-            }),
+            AgentEvent::MessageStart(Message::Assistant(m)) => {
+                // The agent sends a request right before the response starts.
+                self.request_started = Some(Instant::now());
+                self.entries.push(Entry::Assistant {
+                    blocks: Vec::new(),
+                    model: m.model,
+                    streaming: true,
+                    continuation: false,
+                    usage: None,
+                    error: None,
+                    thinking: None,
+                    cache: None,
+                })
+            }
             AgentEvent::MessageStart(Message::ToolResult(_)) => {}
             AgentEvent::MessageDelta(d) => match d {
                 StreamEvent::TextStart { .. } => {
@@ -534,12 +628,14 @@ impl ChatBuffer {
             AgentEvent::MessageEnd(m) => {
                 if let Message::Assistant(a) = &m {
                     add_usage(&mut self.totals, &a.usage);
+                    let observed = self.observe_cache(ed, a);
                     let failed = matches!(a.stop_reason, StopReason::Error | StopReason::Aborted);
                     for e in self.entries.iter_mut().rev() {
-                        if let Entry::Assistant { streaming, usage, error, continuation, .. } = e {
+                        if let Entry::Assistant { streaming, usage, error, continuation, cache, .. } = e {
                             *streaming = false;
                             if !*continuation {
                                 *usage = Some(a.usage.clone());
+                                *cache = observed;
                                 if failed {
                                     let msg = a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason));
                                     if a.stop_reason == StopReason::Error {
@@ -678,7 +774,7 @@ impl ChatBuffer {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
-                Entry::Assistant { blocks, model, streaming, continuation, usage, error, thinking: fold } => {
+                Entry::Assistant { blocks, model, streaming, continuation, usage, error, thinking: fold, cache } => {
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
                     if !continuation && (has_content || *streaming || error.is_some()) {
@@ -746,7 +842,19 @@ impl ChatBuffer {
                     let calls_tools = blocks.iter().any(|b| matches!(b, AssistantContent::ToolCall(_)));
                     if let Some(u) = usage.as_ref().filter(|_| !calls_tools || error.is_some()) {
                         if u.total_tokens > 0 {
-                            push(&mut out, &mut owner, StyledLine::new(format_usage(u), Face::Meta).gap(8.0 * k), Some(ei));
+                            let mut line = StyledLine::new(format_usage(u), Face::Meta).gap(8.0 * k);
+                            if let Some(h) = cache.filter(|_| self.show_cache.0) {
+                                line.text.push_str(" · ");
+                                let start = line.text.len();
+                                line.text.push_str(&h.label());
+                                let face = match h {
+                                    crate::cache_watch::Hit::Miss => Face::MetaWarn,
+                                    crate::cache_watch::Hit::Hit(_) => Face::MetaGood,
+                                    crate::cache_watch::Hit::New => Face::Meta,
+                                };
+                                line.spans.push((start..line.text.len(), face));
+                            }
+                            push(&mut out, &mut owner, line, Some(ei));
                         }
                     }
                 }
@@ -918,6 +1026,7 @@ impl ChatBuffer {
                         usage: Some(a.usage.clone()),
                         error: failed.then(|| a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason))),
                         thinking: None,
+                        cache: None,
                     });
                     for tc in a.tool_calls() {
                         self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, expanded: None, started: None, elapsed: None });
@@ -939,6 +1048,10 @@ impl ChatBuffer {
         self.entries.push(Entry::Info { text: format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), face: Face::Dim });
         self.custom_entries = l.entries.clone();
         self.system_prompt = None;
+        self.cache = crate::cache_watch::CacheWatch::from_usages(l.messages.iter().filter_map(|m| match m {
+            Message::Assistant(a) => Some(&a.usage),
+            _ => None,
+        }));
         self.session = Some(crate::session::SessionWriter::resume(l));
         self.session_failed = false;
         self.last_error = None;
@@ -1749,6 +1862,14 @@ impl Buffer for ChatBuffer {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
+        let show = (ed.var("chat-cache-indicator").and_then(Value::as_bool).unwrap_or(true), ed.var("chat-cache-status").and_then(Value::as_bool).unwrap_or(true));
+        if show != self.show_cache {
+            self.show_cache = show;
+            self.dirty = true;
+        }
+        if show.1 && matches!(self.cache.state(Instant::now()), Some(crate::cache_watch::State::Warm(_))) {
+            ui.ctx().request_repaint_after(Duration::from_secs(30));
+        }
         // A centered reading column; tables are laid out for its width.
         let k = ed.theme.ui_scale();
         self.view.padding = egui::vec2(24.0 * k, 18.0 * k);
@@ -2000,12 +2121,14 @@ impl Buffer for ChatBuffer {
     fn modeline(&self) -> Modeline {
         // The model: clicking it chooses another, as the composer's model pill does.
         let model = self.model.as_ref().map(|m| short_model(&m.id).to_string()).unwrap_or_else(|| "Choose a model".into());
-        Modeline {
-            title: self.title.clone(),
-            status: vec![model],
-            status_commands: vec![Some("chat-select-model".into())],
-            busy: self.running(),
+        let mut status = vec![model];
+        let mut status_commands = vec![Some("chat-select-model".into())];
+        // The cache: clicking it lists its recent misses.
+        if let Some(c) = self.cache_status().filter(|_| self.show_cache.1) {
+            status.insert(0, c);
+            status_commands.insert(0, Some("chat-cache-report".into()));
         }
+        Modeline { title: self.title.clone(), status, status_commands, busy: self.running() }
     }
 
     fn activity(&self) -> Activity {
@@ -2152,6 +2275,17 @@ impl TextSurface for ChatBuffer {
             Focus::Prompt => self.prompt.reveal_cursor(),
         }
     }
+}
+
+/// Whether to warn about `action` throwing away a cache worth `cost` dollars (cache-warn,
+/// cache-warn-actions, cache-warn-threshold).
+pub fn cache_warning_applies(ed: &Editor, action: &str, cost: f64) -> bool {
+    if ed.var_str("cache-warn").as_deref() == Some("off") {
+        return false;
+    }
+    let listed = ed.var("cache-warn-actions").and_then(Value::as_array).is_none_or(|a| a.iter().any(|x| x.as_str() == Some(action)));
+    let threshold = ed.var("cache-warn-threshold").and_then(Value::as_f64).unwrap_or(0.10);
+    listed && cost >= threshold
 }
 
 /// `agent-cache-retention` for `provider`: a level, or {"default": level, "<provider>": level}.

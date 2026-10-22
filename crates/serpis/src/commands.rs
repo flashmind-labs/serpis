@@ -103,6 +103,53 @@ pub fn with_terminal<R>(ed: &mut Editor, f: impl FnOnce(&mut TerminalBuffer, &mu
     ed.with_buffer_as::<TerminalBuffer, R>(id, f).ok_or_else(|| anyhow::anyhow!("Not in a terminal buffer"))
 }
 
+pub const CACHE_WARN_ACTIONS: [&str; 5] = ["model", "thinking", "tools", "refresh", "expired"];
+
+/// Run `act` on the current chat, warning first if it throws a warm prompt cache away (above
+/// cache-warn-threshold, for actions in cache-warn-actions). cache-warn "confirm" asks before,
+/// "notice" says so after; a before-cache-invalidate handler can veto (false) or reword it.
+pub fn guard_cache(ed: &mut Editor, action: &'static str, what: &str, act: impl FnOnce(&mut Editor) + 'static) {
+    let id = current_chat(ed);
+    let est = id.and_then(|id| ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.cache.invalidation(std::time::Instant::now()))).flatten();
+    let Some((tokens, cost)) = est.filter(|(_, cost)| crate::buffers::chat::cache_warning_applies(ed, action, *cost)) else {
+        return act(ed);
+    };
+    let mut msg = format!("{what} re-caches {} tokens on the next message ({})", crate::buffers::chat::fmt_tokens(tokens), crate::cache_watch::fmt_cost(cost));
+    let payload = serde_json::json!({"buffer": id.map(crate::editor::buffer_id_to_u64), "action": action, "tokens": tokens, "cost": cost, "message": msg});
+    for r in ed.run_hook("before-cache-invalidate", &payload) {
+        match r {
+            Value::Bool(false) => {
+                ed.message(format!("Kept the prompt cache: a before-cache-invalidate hook stopped the {action} change"));
+                return;
+            }
+            Value::String(m) => msg = m,
+            _ => {}
+        }
+    }
+    if ed.var_str("cache-warn").as_deref() != Some("confirm") {
+        act(ed);
+        ed.message(msg);
+        return;
+    }
+    let cands = vec![Candidate::new("yes"), Candidate::new("no"), Candidate::new("always").detail(format!("yes, and stop warning about {action} changes"))];
+    ed.completing_read(&format!("{msg}. Go ahead? "), cands, true, move |ed, c, _| match c.map(|c| c.value).as_deref() {
+        Some("yes") => act(ed),
+        Some("always") => {
+            let actions: Vec<Value> = ed
+                .var("cache-warn-actions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_else(|| CACHE_WARN_ACTIONS.iter().map(|a| Value::from(*a)).collect())
+                .into_iter()
+                .filter(|a| a.as_str() != Some(action))
+                .collect();
+            ed.set_var("cache-warn-actions", Value::Array(actions));
+            act(ed);
+        }
+        _ => ed.message("Kept the prompt cache"),
+    });
+}
+
 fn show_page(ed: &mut Editor, name: &str, text: &str) {
     let id = match ed.buffer_by_name(name) {
         Some(id) => {
@@ -726,11 +773,50 @@ pub fn install(ed: &mut Editor) {
         "Re-read AGENTS.md / CLAUDE.md and the system prompt vars with the next message. A chat keeps the system prompt it started with, so the provider can reuse its cache; refreshing rewrites the cache once.",
         o,
         |ed, _| {
-            with_chat(ed, |c, _| c.refresh_context())?;
-            ed.message("The next message re-reads the project's instructions (rewrites the prompt cache once)");
+            with_chat(ed, |_, _| ())?;
+            guard_cache(ed, "refresh", "Refreshing the context", |ed| {
+                let _ = with_chat(ed, |c, _| c.refresh_context());
+                ed.message("The next message re-reads the project's instructions (rewrites the prompt cache once)");
+            });
             Ok(())
         },
     );
+    ed.define_command("chat-cache-report", "Show this chat's prompt cache: hit rate, whether it is warm, and its recent misses with their causes.", o, |ed, _| {
+        let (rate, state, misses) = with_chat(ed, |c, _| {
+            let rate = c.cache.hit_rate();
+            let state = c.cache.state(std::time::Instant::now());
+            let misses: Vec<String> = c.cache.misses.iter().rev().map(|m| format!("- {}", m.notice())).collect();
+            (rate, state, misses)
+        })?;
+        let mut text = String::from("Prompt cache\n\n");
+        text.push_str(&match rate {
+            Some(r) => format!("{:.1}% of this chat's prompt tokens were read from the cache.\n", r * 100.0),
+            None => "Nothing sent yet.\n".into(),
+        });
+        text.push_str(&match state {
+            Some(crate::cache_watch::State::Warm(left)) => format!("Warm: it expires in {} unless the next message reads it first.\n", crate::cache_watch::fmt_duration(left)),
+            Some(crate::cache_watch::State::Cold) => "Cold: the next message rewrites it.\n".into(),
+            None => String::new(),
+        });
+        text.push_str("\nRecent misses (newest first):\n");
+        text.push_str(&if misses.is_empty() { "- none".to_string() } else { misses.join("\n") });
+        text.push_str("\n\nSettings: chat-cache-indicator, chat-cache-status, chat-cache-miss-notice, cache-warn, cache-warn-threshold, cache-warn-actions, agent-cache-retention.\n");
+        show_page(ed, "*cache*", &text);
+        Ok(())
+    });
+    // Toggling tools throws the cache away (tools come first in every request): say what it costs.
+    ed.add_hook("variable-changed", o, |ed, p| {
+        let name = p.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name != "agent-disabled-tools" && name != "agent-native-web-search" {
+            return None;
+        }
+        let id = current_chat(ed)?;
+        let (tokens, cost) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.cache.invalidation(std::time::Instant::now())).flatten()?;
+        if crate::buffers::chat::cache_warning_applies(ed, "tools", cost) {
+            ed.message(format!("Changing the tools re-caches {} tokens on the next message ({})", crate::buffers::chat::fmt_tokens(tokens), crate::cache_watch::fmt_cost(cost)));
+        }
+        None
+    });
     ed.define_command("chat-toggle-thinking", "Show or hide the model's thinking in chats (chat-show-thinking).", o, |ed, _| {
         let show = !ed.var_bool("chat-show-thinking");
         ed.set_var("chat-show-thinking", serde_json::json!(show));
@@ -738,17 +824,27 @@ pub fn install(ed: &mut Editor) {
         Ok(())
     });
     ed.define_command("chat-cycle-thinking", "Cycle the thinking level.", o, |ed, _| {
-        let lvl = with_chat(ed, |c, _| {
-            c.cycle_thinking();
-            c.thinking
-        })?;
-        ed.message(format!("Thinking: {}", lvl.as_str()));
+        with_chat(ed, |_, _| ())?;
+        guard_cache(ed, "thinking", "Changing the thinking level", |ed| {
+            if let Ok(lvl) = with_chat(ed, |c, _| {
+                c.cycle_thinking();
+                c.thinking
+            }) {
+                ed.message(format!("Thinking: {}", lvl.as_str()));
+            }
+        });
         Ok(())
     });
     ed.define_command("chat-select-thinking", "Choose the thinking level from a picker (param: level, e.g. \"high\").", o, |ed, a| {
-        if let Some(level) = a.str(0) {
+        if let Some(level) = a.str(0).map(str::to_string) {
             let id = ed.chat_id(None)?;
-            return ed.set_chat_thinking(id, level);
+            serpis_ai::ThinkingLevel::parse(&level).ok_or_else(|| anyhow::anyhow!("Unknown thinking level {level}"))?;
+            guard_cache(ed, "thinking", "Changing the thinking level", move |ed| {
+                if let Err(e) = ed.set_chat_thinking(id, &level) {
+                    ed.error(format!("{e:#}"));
+                }
+            });
+            return Ok(());
         }
         let (levels, current) = with_chat(ed, |c, _| {
             let levels = c.model.as_ref().map(serpis_ai::supported_thinking_levels).unwrap_or_else(|| serpis_ai::ThinkingLevel::ALL.to_vec());
@@ -764,11 +860,16 @@ pub fn install(ed: &mut Editor) {
         ed.completing_read("Thinking: ", cands, true, move |ed, c, _| {
             let Some(c) = c else { return };
             let Some(l) = serpis_ai::ThinkingLevel::parse(&c.value) else { return };
-            let Ok(l) = with_chat(ed, |chat, _| {
-                chat.set_thinking(l);
-                l
-            }) else { return };
-            ed.message(format!("Thinking: {}", l.as_str()));
+            if l == current {
+                return;
+            }
+            guard_cache(ed, "thinking", "Changing the thinking level", move |ed| {
+                let Ok(l) = with_chat(ed, |chat, _| {
+                    chat.set_thinking(l);
+                    chat.thinking
+                }) else { return };
+                ed.message(format!("Thinking: {}", l.as_str()));
+            });
         });
         Ok(())
     });
@@ -796,9 +897,14 @@ pub fn install(ed: &mut Editor) {
     ed.define_command("chat-history-previous", "Recall the previous prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_prev()));
     ed.define_command("chat-history-next", "Recall the next prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_next()));
     ed.define_command("chat-select-model", "Choose the model for this chat (param: provider/model-id).", o, |ed, a| {
-        if let Some(spec) = a.str(0) {
+        if let Some(spec) = a.str(0).map(str::to_string) {
             let id = ed.chat_id(None)?;
-            return ed.set_chat_model(id, spec);
+            guard_cache(ed, "model", "Switching the model", move |ed| {
+                if let Err(e) = ed.set_chat_model(id, &spec) {
+                    ed.error(format!("{e:#}"));
+                }
+            });
+            return Ok(());
         }
         let configured = ed.registry.configured_providers();
         let mut models: Vec<serpis_ai::Model> = ed
@@ -820,9 +926,13 @@ pub fn install(ed: &mut Editor) {
         ed.completing_read("Model: ", cands, true, move |ed, c, _| {
             let Some(c) = c else { return };
             let Some(m) = models.into_iter().find(|m| format!("{}/{}", m.provider, m.id) == c.value) else { return };
-            ed.set_var("agent-model", Value::String(c.value.clone()));
-            let _ = with_chat(ed, |chat, _| chat.set_model(m));
-            ed.message(format!("Model: {}", c.value));
+            let same = with_chat(ed, |chat, _| chat.model.as_ref().is_some_and(|x| x.provider == m.provider && x.id == m.id)).unwrap_or(false);
+            let change = move |ed: &mut Editor| {
+                ed.set_var("agent-model", Value::String(c.value.clone()));
+                let _ = with_chat(ed, |chat, _| chat.set_model(m));
+                ed.message(format!("Model: {}", c.value));
+            };
+            if same { change(ed) } else { guard_cache(ed, "model", "Switching the model", change) }
         });
         Ok(())
     });

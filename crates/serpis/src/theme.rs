@@ -35,6 +35,9 @@ pub enum Face {
     PromptMarker,
     /// Small secondary text: usage, timestamps, notices.
     Meta,
+    /// Meta text that reports something good (a cache hit) or worth a look (a cache miss).
+    MetaGood,
+    MetaWarn,
     /// Small medium-weight labels (who is speaking, card titles).
     Label,
     /// Syntax highlighting (monospace, colored from the theme's palette).
@@ -282,6 +285,8 @@ impl Theme {
             Face::Link => (self.prop(), self.blue, t),
             Face::PromptMarker => (self.mono(), self.accent, t),
             Face::Meta => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.fg_faint, t),
+            Face::MetaGood => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.green, t),
+            Face::MetaWarn => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.yellow, t),
             Face::Label => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.fg_dim, t),
             Face::SynKeyword => (self.mono(), self.purple, t),
             Face::SynString => (self.mono(), self.green, t),
