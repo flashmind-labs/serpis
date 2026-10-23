@@ -98,8 +98,9 @@ fn node_builds(ed: &mut Editor) -> Vec<serpis_node::deploy::NodeBinary> {
         return Vec::new();
     }
     let dir = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into()));
-    // One directory per serpis version: a node is installed with the serpis it belongs to.
-    let dir = dir.join(serpis_node::VERSION);
+    // One directory per node source stamp: a node built from other sources is never taken for
+    // this serpis's.
+    let dir = dir.join(serpis_node::STAMP);
     let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
     if let Some((d, m, builds)) = &ed.remote.builds
         && *d == dir
@@ -126,7 +127,7 @@ fn obtain(ed: &Editor) -> Option<serpis_node::client::Obtain> {
         return None;
     }
     let root = source_root()?;
-    let store = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into())).join(serpis_node::VERSION);
+    let store = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into())).join(serpis_node::STAMP);
     Some(Arc::new(move |system: String| {
         let (root, store) = (root.clone(), store.clone());
         Box::pin(async move { build_node(&root, &store, &system).await })
@@ -655,8 +656,9 @@ pub fn request(ed: &mut Editor, machine: &str, request: Request, done: impl FnOn
             ed.remote.next_answer += 1;
             ed.remote.answers.insert(token, Box::new(done));
             let main = ed.main_sender();
+            let older = c.hello.host.clone();
             ed.rt.spawn(async move {
-                let r = c.call(request).await.map_err(|e| format!("{e:#}"));
+                let r = c.call(request).await.map_err(|e| older_node(&older, format!("{e:#}")));
                 main.send(move |ed| {
                     if let Some(done) = ed.remote.answers.remove(&token) {
                         done(ed, r);
@@ -665,6 +667,15 @@ pub fn request(ed: &mut Editor, machine: &str, request: Request, done: impl FnOn
             });
         }
     });
+}
+
+/// What an older node's "can't read that call" means for whoever asked.
+fn older_node(host: &str, error: String) -> String {
+    if error.contains("can't read that call") {
+        format!("{host} runs an older serpis-node that can't do this yet: it updates once its chats are idle (or stop them there)")
+    } else {
+        error
+    }
 }
 
 /// Send `request` to `machine`'s node and report a failure (for actions on a chat).
@@ -918,7 +929,7 @@ async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: S
             let size = std::fs::metadata(&file)?.len();
             (Some(file), None, size, serde_json::to_value(packed)?)
         }
-        Some(s) => match s.call(Request::Pack { dir }).await? {
+        Some(s) => match s.call(Request::Pack { dir }).await.map_err(|e| anyhow::anyhow!(older_node(&s.hello.host, format!("{e:#}"))))? {
             Response::Packed { name, size, packed } => (None, Some(name), size, packed),
             other => bail!("unexpected answer {other:?}"),
         },
@@ -1171,7 +1182,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-rayfish-command", json!(""), "The ray command for remote-rayfish (\"\": ray on PATH, else the one in /Applications/Rayfish.app).");
     ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh, instead of the node serpis installs there (\"\": serpis's own, else serpis-node from PATH, ~/.local/bin or ~/.cargo/bin).");
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
-    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<serpis version>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (from serpis's source, when it runs from a checkout), or by scripts/build-node.sh --store.");
+    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<node source stamp>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (from serpis's source, when it runs from a checkout), or by scripts/build-node.sh --store.");
     ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"alice\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
     ed.defvar("remote-offer-setup", json!(true), "When a machine has no models or API keys, offer to copy this machine's there (remote-setup does it any time).");
     ed.defvar("remote-setup-declined", Editor::persisted_state("remote-setup-declined").unwrap_or_else(|| json!([])), "Machines not to offer setting up again.");

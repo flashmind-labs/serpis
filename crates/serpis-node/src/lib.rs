@@ -32,3 +32,7 @@ pub fn socket_path() -> PathBuf {
 
 /// This build, as `0.1.0`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The sources this node is built from, as `0.1.0-<hash>`: node builds are kept under it, so
+/// one built from other sources is never taken for this one (build.rs).
+pub const STAMP: &str = env!("SERPIS_NODE_STAMP");

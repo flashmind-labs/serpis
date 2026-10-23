@@ -848,12 +848,10 @@ impl Node {
 }
 
 /// This node's build: the SHA-256 of its executable (`SERPIS_NODE_BUILD` overrides it, for
-/// tests of upgrades).
+/// tests of upgrades; set empty, the node says none, as nodes before build ids did).
 pub fn build_id() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ID.get_or_init(|| {
-        std::env::var("SERPIS_NODE_BUILD").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| std::env::current_exe().ok().and_then(|e| crate::deploy::sha256_file(&e).ok()).unwrap_or_default())
-    })
+    ID.get_or_init(|| std::env::var("SERPIS_NODE_BUILD").unwrap_or_else(|_| std::env::current_exe().ok().and_then(|e| crate::deploy::sha256_file(&e).ok()).unwrap_or_default()))
 }
 
 fn notice_level(l: Level) -> NoticeLevel {

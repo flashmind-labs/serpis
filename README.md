@@ -239,8 +239,8 @@ machine's models. Closing such a chat's window only stops showing it. The sideba
 
 serpis installs its node (`serpis-node`, one file, no GUI) on a machine the first time it
 connects: into `~/.serpis/bin` there, named by its SHA-256 and checked before every start. The
-first machine of each system (Linux x86-64 or arm64, macOS) has it built then, once per serpis
-version, into `~/.serpis/nodes`: serpis run from its source builds it with `scripts/build-node.sh`
+first machine of each system (Linux x86-64 or arm64, macOS) has it built then, once per build of
+its sources, into `~/.serpis/nodes`: serpis run from its source builds it with `scripts/build-node.sh`
 (other systems need `cargo install cargo-zigbuild` and `rustup target add <target>`, and say so).
 Without a build, a `serpis-node` already installed there is used. `remote-deploy` turns
 installing off, and `remote-node-command` runs something else there. On the machine, the

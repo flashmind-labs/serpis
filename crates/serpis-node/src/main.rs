@@ -20,12 +20,17 @@ fn main() -> anyhow::Result<()> {
         }
         // stdout is the protocol: logs go to stderr, which ssh shows the client.
         Some("agent") => rt.block_on(serpis_node::bridge::agent(&serpis_node::socket_path())),
+        // What node builds of these sources are kept under (scripts/build-node.sh --store).
+        Some("stamp") => {
+            println!("{}", serpis_node::STAMP);
+            Ok(())
+        }
         Some("version" | "--version" | "-V") => {
             println!("serpis-node {} (protocol {})", serpis_node::VERSION, serpis_proto::wire::VERSION);
             Ok(())
         }
         _ => {
-            eprintln!("usage: serpis-node serve | agent | version");
+            eprintln!("usage: serpis-node serve | agent | version | stamp");
             std::process::exit(2);
         }
     }

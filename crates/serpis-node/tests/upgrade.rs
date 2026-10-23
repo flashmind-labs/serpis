@@ -43,12 +43,13 @@ fn an_older_node_is_restarted_on_the_new_build_when_idle() {
     let env = vec![("HOME".to_string(), home.to_string_lossy().into_owned()), ("SERPIS_NODE_SOCKET".to_string(), socket.to_string_lossy().into_owned())];
     let target = Target::Ssh { host: "box".into(), ssh: vec![fake_ssh.to_string_lossy().into_owned()], ssh_args: vec![], env, command: None, deploy: vec![node.clone()], ask: false };
 
-    // The older node, running.
+    // An older node with a build id, then one from before build ids (it says none).
+    for old_build in ["an-older-build", ""] {
     let mut old = std::process::Command::new(exe)
         .arg("serve")
         .env("HOME", &home)
         .env("SERPIS_NODE_SOCKET", &socket)
-        .env("SERPIS_NODE_BUILD", "an-older-build")
+        .env("SERPIS_NODE_BUILD", old_build)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -59,7 +60,7 @@ fn an_older_node_is_restarted_on_the_new_build_when_idle() {
     rt.block_on(async {
         // A chat there, mid-turn (its tool sleeps for a while).
         let (c, mut events) = Client::connect(&Target::Local(socket.clone()), "upgrade-test").await.unwrap();
-        assert_eq!(c.hello.build, "an-older-build");
+        assert_eq!(c.hello.build, old_build);
         let Response::Chat { chat } = c.call(Request::New { cwd: work.to_string_lossy().into_owned(), model: Some("mock/anthropic/claude-sonnet-4.5".into()), thinking: None }).await.unwrap() else { panic!() };
         c.call(Request::Attach { chat: chat.clone() }).await.unwrap();
         c.call(Request::Prompt { chat: chat.clone(), text: "SLEEP".into(), images: vec![], follow_up: false, request_id: None }).await.unwrap();
@@ -68,7 +69,7 @@ fn an_older_node_is_restarted_on_the_new_build_when_idle() {
         // Busy: the newer client keeps it, and knows it's outdated.
         let (busy, _) = Client::connect_with(&target, "upgrade-test", None, |_| {}).await.unwrap();
         assert!(busy.hello.outdated, "a node with a chat mid-turn isn't restarted");
-        assert_eq!(busy.hello.build, "an-older-build");
+        assert_eq!(busy.hello.build, old_build);
         drop(busy);
 
         // Idle: restarted on the new build, and the chat is there again.
@@ -82,9 +83,13 @@ fn an_older_node_is_restarted_on_the_new_build_when_idle() {
         assert!(!new.hello.outdated);
         assert!(stages.lock().unwrap().contains(&Stage::Upgrading));
         let Response::Chats { chats } = new.call(Request::List).await.unwrap() else { panic!() };
-        assert_eq!(chats.iter().map(|c| c.chat.clone()).collect::<Vec<_>>(), [chat], "its open chat came back");
+        assert!(chats.iter().any(|c| c.chat == chat), "its open chat came back ({old_build:?})");
         new.call(Request::Stop).await.unwrap();
     });
     assert!(old.wait().unwrap().success(), "the older node exited by itself");
+    while socket.exists() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

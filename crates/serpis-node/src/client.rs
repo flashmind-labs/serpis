@@ -162,10 +162,20 @@ impl Client {
     async fn upgrade(c: (Client, mpsc::UnboundedReceiver<Event>), target: &Target, name: &str, stage: &impl Fn(Stage)) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
         let Target::Ssh { deploy, command: None, .. } = target else { return Ok(c) };
         let (mut client, events) = c;
-        if deploy.is_empty() || client.hello.build.is_empty() || deploy.iter().any(|n| n.sha256 == client.hello.build) {
+        if deploy.is_empty() || deploy.iter().any(|n| n.sha256 == client.hello.build) {
             return Ok((client, events));
         }
-        if client.restart().await.is_err() {
+        // A node that doesn't say its build predates Restart too: it is stopped as any node can
+        // be, when none of its chats is busy (its open chats come back in the new one all the same).
+        let restarted = if client.hello.build.is_empty() {
+            match client.call(Request::List).await {
+                Ok(Response::Chats { chats }) if chats.iter().all(|c| !c.state.running && !c.state.compacting) => client.call(Request::Stop).await.is_ok(),
+                _ => false,
+            }
+        } else {
+            client.restart().await.is_ok()
+        };
+        if !restarted {
             client.hello.outdated = true;
             return Ok((client, events));
         }
