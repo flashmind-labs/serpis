@@ -328,9 +328,14 @@ Steps:
       (through a temporary index and ref: nothing of it changes), and is checked out there with
       the work uncommitted again; any other folder as a tar.gz. In 4 MB chunks over the nodes'
       own connections (Pack, Fetch, Put, Unpack, Drop; packing off the node's thread), into a
-      new folder in the home there. Follow-ups: into an existing clone there (a worktree,
-      fetching only what it lacks, instead of the whole history), and environment variables
-      from an allowlist (needs per-chat environments in the agent's tools).
+      folder that keeps its identity: a registry on each machine
+      (`~/.serpis/carried.json`) says where each repository (by first commit) and branch lives
+      there and the state serpis left it in, so it returns to the same folder (or the one it
+      came from), beside a clone it becomes a worktree, else `remote-carry-directory`
+      (`~/.serpis/worktrees/{project}/{branch}`). Changes made there meanwhile are stashed or kept
+      on a branch, never lost. Follow-ups: sending only what a machine lacks (today the bundle
+      holds the branch's whole history), and environment variables from an allowlist (needs
+      per-chat environments in the agent's tools).
    d. *Done* (`tests/ui/remote_resume.lua`): sessions of every machine in one list, chat-resume's
       "every machine" scope: this machine's at once, the others' as they answer (listing never
       asks for a username), moved ones hidden, a picked one resumed where it is.

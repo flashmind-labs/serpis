@@ -226,9 +226,15 @@ the same chat (its id keeps provider caches warm), with that folder's instructio
 it left keeps its session, marked as moved. Only an idle chat moves. Its folder can come along ("Bring
 <folder> with it"): a git repository as its current branch plus its uncommitted work (changes,
 deletions, untracked files; ignored ones stay), made without touching its index, working tree or
-refs, and checked out there with the work uncommitted again; any other folder as its files. It
-lands in a new folder in the home there (`name-2` when `name` is taken), and the chat continues
-in the same subfolder. Or it continues in a folder already there. `chat-resume`'s
+refs, and checked out there with the work uncommitted again; any other folder as its files. A
+carried folder keeps its identity: each machine remembers where it put it (`~/.serpis/carried.json`),
+so it goes back to the folder it was in before, or came from, brought up to date in place. On a
+machine it hasn't been on, beside a clone of the same repository at the same place in the home it
+becomes a worktree of that clone; otherwise it goes to `remote-carry-directory`
+(`~/.serpis/worktrees/{project}/{branch}`; `"~/{path}"` keeps the home's layout) or, for other
+folders, `remote-carry-directory-plain` (`~/.serpis/carried/{project}`). Nothing there is lost:
+changes made there since are stashed (`git stash list`), commits kept on a `serpis/kept/...`
+branch, a changed plain folder moved aside, and the message says so. Or it continues in a folder already there. `chat-resume`'s
 "every machine" scope (TAB to it, or `chat-resume-scope` = `"everywhere"`) lists the saved
 sessions of this machine and of every other one together, newest first, each saying where it is;
 one picked there resumes there. Sessions whose chat moved on aren't listed

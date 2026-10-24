@@ -64,7 +64,10 @@ local function transcript() return serpis.chat.transcript(chat) end
 -- Lines that are exactly `text` ("ok" is the mock's answer; "tokens" is not one).
 local function count(text) local n = 0; for l in (transcript() .. "\n"):gmatch("([^\n]*)\n") do if l:match("^%s*(.-)%s*$") == text then n = n + 1 end end; return n end
 local function idle() return not serpis.chat.running(chat) end
-local function said(text) for _, m in ipairs(d.messages()) do if m:find(text, 1, true) then return true end end end
+-- Whether a message since the last `mark()` says `text`.
+local seen = 0
+local function mark() seen = #d.messages() end
+local function said(text) local ms = d.messages(); for i = seen + 1, #ms do if ms[i]:find(text, 1, true) then return true end end end
 -- Ask `text` and wait for the answer ("ok" from the mock).
 local function ask(text, answers)
   return function(go)
@@ -79,6 +82,7 @@ local function keys(text) return (text:gsub(".", "%0 "):gsub("   ", " SPC ")) en
 local function move(machine, folder, wait_for)
   local list = {
     function(go)
+      mark()
       click("machine")
       when(function() return prompt():find("Move this chat to", 1, true) ~= nil end, go)
       return false
@@ -129,7 +133,7 @@ add({
   function()
     local info = serpis.chat.info(chat)
     T.check("here -> box1: it runs there", info.machine, "box1")
-    T.check("in its folder, brought along", info.cwd, boxes.box1.home .. "/" .. repo)
+    T.check("in its folder, brought along to serpis's place for it", info.cwd, boxes.box1.home .. "/.serpis/worktrees/" .. repo .. "/feature")
     T.check("on its branch, with its work uncommitted", git_state(info.cwd), "feature\n M app.txt\n?? notes.md\nv2\n")
     T.check("as the same chat", info.session_id, id)
     T.check("with its conversation", count("hello") >= 1 and count("ok") == 1, true)
@@ -143,7 +147,8 @@ add({
   function()
     local info = serpis.chat.info(chat)
     T.check("box1 -> box2", info.machine, "box2")
-    T.check("its folder brought from one machine to another", git_state(info.cwd), "feature\n M app.txt\n?? notes.md\nv2\n")
+    T.check("its folder brought from one machine to another", info.cwd, boxes.box2.home .. "/.serpis/worktrees/" .. repo .. "/feature")
+    T.check("as it was", git_state(info.cwd), "feature\n M app.txt\n?? notes.md\nv2\n")
     T.check("still the same chat", info.session_id, id)
     T.check("with all of it", count("hello") >= 1 and count("next") >= 1 and count("ok") == 2, true)
     T.check("box1 kept its session, marked as moved", sessions_of(boxes.box1.home .. "/.serpis/agent/sessions"):find('"serpis-moved"', 1, true) ~= nil, true)
@@ -160,8 +165,15 @@ add({
     T.check("with everything said on three machines", count("ok") == 3 and count("again") >= 1, true)
   end,
   ask("home", 4),
+  function() T.check("and it answers here again", count("ok"), 4) end,
+})
+-- To box1 again: the same folder there, brought up to date, not a copy.
+add(move("box1", nil, "box1"))
+add({
   function()
-    T.check("and it answers here again", count("ok"), 4)
+    T.check("box1 again: its folder there, not a copy", serpis.chat.info(chat).cwd, boxes.box1.home .. "/.serpis/worktrees/" .. repo .. "/feature")
+    T.check("no second copy", sh("ls '" .. boxes.box1.home .. "/.serpis/worktrees/" .. repo .. "'"), "feature\n")
+    T.check("the message says where", said("in " .. boxes.box1.home .. "/.serpis/worktrees/" .. repo .. "/feature") == true, true)
     serpis.command.run("remote-stop-node", "box1")
     serpis.command.run("remote-stop-node", "box2")
   end,

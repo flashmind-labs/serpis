@@ -69,6 +69,8 @@ pub struct Remotes {
     pub sessions_pending: usize,
     /// Called as each machine's sessions arrive (an open picker shows them).
     pub on_sessions: Option<Box<dyn Fn(&mut Editor)>>,
+    /// What carrying a moving chat's folder kept aside, for the message when it is done.
+    move_notes: HashMap<String, String>,
     /// The node builds serpis installs on machines, as last scanned: (directory, when it
     /// changed, builds).
     builds: Option<(std::path::PathBuf, Option<std::time::SystemTime>, Vec<serpis_node::deploy::NodeBinary>)>,
@@ -784,14 +786,19 @@ fn move_chat(ed: &mut Editor, id: BufferId, from: Option<String>, to: String) {
     let name = std::path::Path::new(&dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let there = to.clone().unwrap_or_else(|| "this machine".into());
     let cands = vec![
-        Candidate::new(format!("Bring {name} with it")).detail(format!("into ~/{name} on {there} (its git branch and uncommitted work, or its files)")).value("bring"),
+        Candidate::new(format!("Bring {name} with it")).detail(format!("to its place on {there}: where it was before, beside a clone of it, or serpis's folder (remote-carry-directory)")).value("bring"),
         Candidate::new(format!("Use a folder that is on {there}")).value("pick"),
     ];
     ed.completing_read("Its folder: ", cands, true, move |ed, c, _| match c.map(|c| c.value).as_deref() {
         Some("bring") => {
             let (f2, t2) = (from.clone(), to.clone());
             carry(ed, id, from, to, dir, move |ed, r| match r {
-                Ok(cwd) => fetch_session(ed, id, f2, t2, cwd),
+                Ok((cwd, note)) => {
+                    if let Some(n) = note {
+                        ed.remote.move_notes.insert(format!("{id:?}"), n);
+                    }
+                    fetch_session(ed, id, f2, t2, cwd)
+                }
                 Err(e) => moved_failed(ed, id, format!("bringing its folder: {e}")),
             });
         }
@@ -865,9 +872,14 @@ fn clients(ed: &mut Editor, mut machines: Vec<String>, mut got: Vec<Arc<Client>>
     });
 }
 
-/// Carry folder `dir` (on `from`, None: here) to a new folder in the home of `to` (None:
-/// here), over the nodes' own connections; `done` gets the chat's folder there.
-fn carry(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String, done: impl FnOnce(&mut Editor, Result<String, String>) + 'static) {
+/// Carry folder `dir` (on `from`, None: here) to its place on `to` (None: here; see
+/// serpis_node::workspace), over the nodes' own connections; `done` gets the chat's folder
+/// there, and what was kept aside on the way.
+fn carry(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String, done: impl FnOnce(&mut Editor, Result<(String, Option<String>), String>) + 'static) {
+    let places = serpis_node::workspace::Places {
+        repo: ed.var_str("remote-carry-directory").filter(|s| !s.is_empty()).unwrap_or_else(|| serpis_node::workspace::Places::default().repo),
+        plain: ed.var_str("remote-carry-directory-plain").filter(|s| !s.is_empty()).unwrap_or_else(|| serpis_node::workspace::Places::default().plain),
+    };
     let key = format!("remote-move:{id:?}");
     ed.busy_start(&key, "Packing the folder…");
     let machines: Vec<String> = from.iter().chain(to.iter()).cloned().collect();
@@ -883,7 +895,7 @@ fn carry(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>
         let token = ed.remote.next_answer;
         ed.remote.next_answer += 1;
         ed.remote.answers.insert(token, Box::new(move |ed, r| done(ed, r.and_then(|r| match r {
-            Response::Unpacked { cwd } => Ok(cwd),
+            Response::Unpacked { cwd, note } => Ok((cwd, note)),
             other => Err(format!("unexpected answer {other:?}")),
         }))));
         let main = ed.main_sender();
@@ -895,7 +907,7 @@ fn carry(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>
             }
         };
         ed.rt.spawn(async move {
-            let r = carry_folder(src, dst, dir, progress).await.map(|cwd| Response::Unpacked { cwd }).map_err(|e| format!("{e:#}"));
+            let r = carry_folder(src, dst, dir, places, progress).await.map(|(cwd, note)| Response::Unpacked { cwd, note }).map_err(|e| format!("{e:#}"));
             main.send(move |ed| {
                 if let Some(done) = ed.remote.answers.remove(&token) {
                     done(ed, r);
@@ -916,7 +928,7 @@ fn transfer_dir() -> std::path::PathBuf {
 const CHUNK: u64 = 4 << 20;
 
 /// The work of [`carry`]: pack where the folder is, move the bytes, unpack where it goes.
-async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: String, progress: impl Fn(String)) -> anyhow::Result<String> {
+async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: String, places: serpis_node::workspace::Places, progress: impl Fn(String)) -> anyhow::Result<(String, Option<String>)> {
     use anyhow::{Context, bail};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
@@ -925,7 +937,8 @@ async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: S
     // Packed: here (a local file), or there (a name on the source node).
     let (local, remote, size, packed) = match &src {
         None => {
-            let (file, packed) = tokio::task::spawn_blocking(move || serpis_node::workspace::pack(std::path::Path::new(&dir), &transfer_dir())).await??;
+            let h = home.clone();
+            let (file, packed) = tokio::task::spawn_blocking(move || serpis_node::workspace::pack(std::path::Path::new(&dir), &transfer_dir(), &h)).await??;
             let size = std::fs::metadata(&file)?.len();
             (Some(file), None, size, serde_json::to_value(packed)?)
         }
@@ -971,8 +984,8 @@ async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: S
                 }
             }
             progress("Unpacking the folder…".into());
-            match t.call(Request::Unpack { name, packed, under: "~".into() }).await? {
-                Response::Unpacked { cwd } => Ok(cwd),
+            match t.call(Request::Unpack { name, packed, under: String::new(), places: Some(serde_json::to_value(&places)?) }).await? {
+                Response::Unpacked { cwd, note } => Ok((cwd, note)),
                 other => Err(anyhow::anyhow!("unexpected answer {other:?}")),
             }
         }
@@ -993,9 +1006,9 @@ async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: S
             progress("Unpacking the folder…".into());
             let packed: serpis_node::workspace::Packed = serde_json::from_value(packed)?;
             let f2 = file.clone();
-            let r = tokio::task::spawn_blocking(move || serpis_node::workspace::unpack(&f2, &packed, &home)).await.context("unpacking")?;
+            let r = tokio::task::spawn_blocking(move || serpis_node::workspace::place(&f2, &packed, &places, &home)).await.context("unpacking")?;
             let _ = std::fs::remove_file(&file);
-            r.map(|p| p.to_string_lossy().into_owned())
+            r.map(|p| (p.cwd.to_string_lossy().into_owned(), p.note))
         }
     };
     // What was packed is no longer needed, whichever way it went.
@@ -1055,19 +1068,19 @@ fn deliver(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<Strin
                 Ok(l) => {
                     leave(ed);
                     ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.continue_here(ed, &l));
-                    moved(ed, id, "this machine");
+                    moved(ed, id, "this machine", &dir);
                 }
                 Err(e) => moved_failed(ed, id, format!("{e:#}")),
             }
         }
         Some(m) => {
-            let m2 = m.clone();
+            let (m2, dir2) = (m.clone(), dir.clone());
             request(ed, &m, Request::Import { session: text, cwd: dir }, move |ed, r| match r {
                 Ok(Response::Chat { chat }) => {
                     leave(ed);
                     ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &m2, &chat));
                     send(ed, &m2, Request::Attach { chat });
-                    moved(ed, id, &m2);
+                    moved(ed, id, &m2, &dir2);
                 }
                 Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
                 Err(e) => moved_failed(ed, id, e),
@@ -1076,13 +1089,15 @@ fn deliver(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<Strin
     }
 }
 
-fn moved(ed: &mut Editor, id: BufferId, to: &str) {
+fn moved(ed: &mut Editor, id: BufferId, to: &str, cwd: &str) {
     ed.busy_stop(&format!("remote-move:{id:?}"));
-    ed.message(format!("The chat continues on {to}"));
+    let note = ed.remote.move_notes.remove(&format!("{id:?}")).map(|n| format!(" ({n})")).unwrap_or_default();
+    ed.message(format!("The chat continues on {to}, in {cwd}{note}"));
 }
 
 fn moved_failed(ed: &mut Editor, id: BufferId, error: String) {
     ed.busy_stop(&format!("remote-move:{id:?}"));
+    ed.remote.move_notes.remove(&format!("{id:?}"));
     ed.error(format!("The chat couldn't move: {error}"));
 }
 
@@ -1184,6 +1199,8 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
     ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<node source stamp>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (from serpis's source, when it runs from a checkout), or by scripts/build-node.sh --store.");
     ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"alice\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
+    ed.defvar("remote-carry-directory", json!("~/.serpis/worktrees/{project}/{branch}"), "Where a repository brought along with a moving chat goes on a machine it hasn't been on: {project}, {branch}, and {path} (where it was, relative to the home there: \"~/{path}\" keeps the same layout). Where it was before, or where it came from, it goes back to; beside a clone of it at the same place it becomes a worktree of that clone. Nothing there is overwritten: changes made there are stashed, commits kept on a branch.");
+    ed.defvar("remote-carry-directory-plain", json!("~/.serpis/carried/{project}"), "Where a folder that isn't a repository goes when brought along ({project}, {path}); one changed there since is moved aside first.");
     ed.defvar("remote-offer-setup", json!(true), "When a machine has no models or API keys, offer to copy this machine's there (remote-setup does it any time).");
     ed.defvar("remote-setup-declined", Editor::persisted_state("remote-setup-declined").unwrap_or_else(|| json!([])), "Machines not to offer setting up again.");
     ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");

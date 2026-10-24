@@ -102,9 +102,17 @@ pub enum Request {
     Fetch { name: String, offset: u64, len: u64 },
     /// Bytes of a file being carried here (base64), written at `offset`.
     Put { name: String, offset: u64, data: String },
-    /// Unpack a carried file into a new folder under `under` (a path here): answered with
-    /// `Unpacked`, the chat's folder in it.
-    Unpack { name: String, packed: serde_json::Value, under: String },
+    /// Put a carried folder in its place here (where it was before, beside a clone of it, or
+    /// a new folder as `places` says: {repo, plain} templates): answered with `Unpacked`, the
+    /// chat's folder in it, and what was kept aside on the way.
+    Unpack {
+        name: String,
+        packed: serde_json::Value,
+        #[serde(default)]
+        under: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        places: Option<serde_json::Value>,
+    },
     /// Forget a packed or carried file.
     Drop { name: String },
     /// Stop the node so a newer build can start, unless a chat is mid-turn (then an error says
@@ -161,7 +169,11 @@ pub enum Response {
     Packed { name: String, size: u64, packed: serde_json::Value },
     /// Bytes of a packed file (base64).
     Chunk { data: String },
-    Unpacked { cwd: String },
+    Unpacked {
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// What a `Setup` added (`auth:openrouter`, `models:local`, `settings:agent-model`).
     Setup { added: Vec<String> },
 }

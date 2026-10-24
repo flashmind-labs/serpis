@@ -701,17 +701,20 @@ impl Node {
                 match request {
                     Request::Pack { dir } => {
                         let dir = from_home(&dir);
-                        let (path, packed) = crate::workspace::pack(&dir, &transfer).map_err(|e| format!("{e:#}"))?;
+                        let home = dirs::home_dir().unwrap_or_default();
+                        let (path, packed) = crate::workspace::pack(&dir, &transfer, &home).map_err(|e| format!("{e:#}"))?;
                         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         Ok(Response::Packed { name, size, packed: serde_json::to_value(packed).map_err(|e| e.to_string())? })
                     }
-                    Request::Unpack { packed, under, .. } => {
+                    Request::Unpack { packed, places, .. } => {
                         let file = file?.ok_or("no file")?;
                         let packed: crate::workspace::Packed = serde_json::from_value(packed).map_err(|e| e.to_string())?;
-                        let cwd = crate::workspace::unpack(&file, &packed, &from_home(&under)).map_err(|e| format!("{e:#}"));
+                        let places: crate::workspace::Places = places.and_then(|p| serde_json::from_value(p).ok()).unwrap_or_default();
+                        let placed = crate::workspace::place(&file, &packed, &places, &dirs::home_dir().unwrap_or_default()).map_err(|e| format!("{e:#}"));
                         let _ = std::fs::remove_file(&file);
-                        Ok(Response::Unpacked { cwd: cwd?.to_string_lossy().into_owned() })
+                        let placed = placed?;
+                        Ok(Response::Unpacked { cwd: placed.cwd.to_string_lossy().into_owned(), note: placed.note })
                     }
                     _ => Err("not answered later".into()),
                 }

@@ -270,10 +270,21 @@ steps({
     settled(other, go, 16)
     return false
   end,
-  function()
-    local t = serpis.chat.transcript(other)
-    T.check("thinking shown by default", t:find("step 6", 1, true) ~= nil, true)
-    d.key("T", { "ctrl" })
+  function(go)
+    -- The transcript's text is what the last frame drew: wait for the frame after the answer.
+    local tries = 0
+    local function check()
+      local t = serpis.chat.transcript(other)
+      if t:find("step 6", 1, true) == nil and tries < 30 then
+        tries = tries + 1
+        return serpis.defer(100, check)
+      end
+      T.check("thinking shown by default", t:find("step 6", 1, true) ~= nil, true)
+      d.key("T", { "ctrl" })
+      serpis.defer(300, go)
+    end
+    check()
+    return false
   end,
   function()
     local t = serpis.chat.transcript(other)
