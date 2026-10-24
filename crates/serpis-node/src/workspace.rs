@@ -213,7 +213,9 @@ pub fn pack(dir: &Path, into: &Path, home: &Path) -> Result<(PathBuf, Packed)> {
         let file = into.join(format!("{name}.tar.gz"));
         let parent = dir.parent().context("a folder at the root can't be carried")?;
         let base = dir.file_name().context("no folder name")?;
-        run(Command::new("tar").arg("-czf").arg(&file).arg("-C").arg(parent).arg(base))?;
+        // macOS's tar would add a `._name` file beside each file with extended attributes, which
+        // other machines unpack as files of their own.
+        run(Command::new("tar").env("COPYFILE_DISABLE", "1").arg("-czf").arg(&file).arg("-C").arg(parent).arg(base))?;
         let home_path = home_rel(&dir, home);
         // A folder that came here leaves under the key it came with.
         let key = load_registry(home).into_iter().find(|(_, e)| e.path == dir).map(|(k, _)| k).unwrap_or_else(|| format!("dir:{}", home_path.as_deref().unwrap_or(&base.to_string_lossy())));
@@ -583,6 +585,21 @@ mod tests {
         assert_eq!(placed.cwd, there);
         assert!(placed.note.as_deref().is_some_and(|n| n.contains("serpis-old")), "{placed:?}");
         assert_eq!(std::fs::read_to_string(there.join("sub/a.txt")).unwrap(), "hi");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_packed_on_a_mac_carries_no_apple_metadata_files() {
+        let root = std::env::temp_dir().join(format!("ws-{}", uuid::Uuid::now_v7().simple())).canonicalize_or_self();
+        let dir = root.join("notes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hi").unwrap();
+        sh(&dir, "xattr -w com.apple.metadata:test v a.txt");
+        let (file, _) = pack(&dir, &root.join(".transfer"), &root).unwrap();
+        // (The Mac's own tar hides `._` entries when listing, so the archive's bytes are read.)
+        let listing = sh(&root, &format!("gzip -dc '{}' | LC_ALL=C grep -a -c '\\._a.txt' || true", file.display()));
+        assert_eq!(listing, "0", "the archive has a ._a.txt entry");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
