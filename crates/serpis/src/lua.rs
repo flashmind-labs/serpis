@@ -42,6 +42,9 @@ serpis.command.define("insert-date", function()
   serpis.buffer.insert(os.date("%Y-%m-%d"))
 end, "Insert today's date.")
 
+-- Chats run in this machine's node, which loads this file too (serpis.where is "node" there):
+-- agent tools and chat hooks below take effect there; keys and commands, in the window.
+
 -- Give the agent a new tool, written in Lua.
 serpis.agent.tool({
   name = "current_time",
@@ -242,6 +245,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     let s = lua.create_table()?;
     s.set("version", env!("CARGO_PKG_VERSION"))?;
     s.set("config_dir", crate::config_dir().to_string_lossy().into_owned())?;
+    s.set("where", "window")?;
 
     s.set("message", lua.create_function(|_, msg: String| ed(|e| e.message(msg)))?)?;
     s.set("error", lua.create_function(|_, msg: String| ed(|e| e.error(msg)))?)?;
@@ -1068,7 +1072,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     )?;
     agent.set("model", lua.create_function(|_, spec: String| ed(|e| e.set_var("agent-model", Value::String(spec))))?)?;
     // serpis.agent.reload_models(): re-read models.json and auth.json.
-    agent.set("reload_models", lua.create_function(|_, ()| ed(|e| e.registry.reload()))?)?;
+    agent.set("reload_models", lua.create_function(|_, ()| ed(|e| {
+        e.registry.reload();
+        crate::remote::models_changed(e);
+    }))?)?;
     // serpis.agent.models(): every known model, {spec, provider, id, name, reasoning, configured}.
     agent.set("models", lua.create_function(|lua, ()| {
         let v = ed(|e| {
@@ -1161,7 +1168,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     // serpis.chat.transcript(buf?): the transcript's text as shown.
     chat.set("transcript", lua.create_function(move |_, id: Option<u64>| {
         let id = chat_id(id)?;
-        ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.transcript_text()))?
+        ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.transcript_text(ed)))?
             .ok_or_else(|| mlua::Error::runtime("the chat is busy"))
     })?)?;
     // serpis.chat.append(buf?, type, data): add a custom entry to the chat's session (pi's
@@ -1455,10 +1462,11 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     debug.set("cache_age", lua.create_function(|_, (id, secs): (u64, f64)| {
         ed(|e| {
             let id = buffer_id_from_u64(id);
-            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| {
-                c.chat.cache.age(std::time::Duration::from_secs_f64(secs));
-                c.publish(ed, id);
-            });
+            // The chat's node keeps its cache's clock; what it then says comes back as usual.
+            let node = e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| (c.node.machine.clone(), c.chat_id()));
+            if let Some((machine, chat)) = node {
+                crate::remote::send(e, &machine, serpis_proto::wire::Request::AgeCache { chat, secs });
+            }
         })
     })?)?;
     // Record views' scroll positions as they are drawn: trace_scroll(true) starts, then
@@ -1594,8 +1602,7 @@ pub fn reload(ed: &mut Editor) {
     let setup = || -> mlua::Result<()> {
         let package: Table = lua.globals().get("package")?;
         let path: String = package.get("path")?;
-        let d = dir.display();
-        package.set("path", format!("{d}/lua/?.lua;{d}/lua/?/init.lua;{d}/extensions/?.lua;{d}/extensions/?/init.lua;{path}"))?;
+        package.set("path", serpis_chat::config::package_path(&dir, &path))?;
         lua.globals().set("serpis", api(&lua)?)?;
         Ok(())
     };
@@ -1651,33 +1658,14 @@ pub fn reload(ed: &mut Editor) {
         }
     }
     ed.loaded_extensions = loaded;
+    crate::remote::config_reloaded(ed);
     ed.run_hook("config-loaded", &Value::Null);
     if r.is_ok() {
         ed.message(format!("Loaded {}", init.display()));
     }
 }
 
-/// The extensions in `<config>/extensions`, by name: `name.lua` files and `name/init.lua`
-/// directories (which can `require` their own modules), sorted.
-pub fn extensions(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
-    let mut out: Vec<(String, PathBuf)> = std::fs::read_dir(dir.join("extensions"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            let name = p.file_stem()?.to_string_lossy().into_owned();
-            if p.is_dir() {
-                let init = p.join("init.lua");
-                init.exists().then_some((name, init))
-            } else {
-                (p.extension()? == "lua").then_some((name, p))
-            }
-        })
-        .collect();
-    out.sort();
-    out
-}
+pub use serpis_chat::config::extensions;
 
 /// Debounced hot reload when config files change, with config-auto-reload on. Off (the
 /// default), nothing watches the config: it reloads on reload-config only.

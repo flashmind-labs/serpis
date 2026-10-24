@@ -61,7 +61,7 @@ fn an_older_node_is_restarted_on_the_new_build_when_idle() {
         // A chat there, mid-turn (its tool sleeps for a while).
         let (c, mut events) = Client::connect(&Target::Local(socket.clone()), "upgrade-test").await.unwrap();
         assert_eq!(c.hello.build, old_build);
-        let Response::Chat { chat } = c.call(Request::New { cwd: work.to_string_lossy().into_owned(), model: Some("mock/anthropic/claude-sonnet-4.5".into()), thinking: None }).await.unwrap() else { panic!() };
+        let Response::Chat { chat } = c.call(Request::New { cwd: work.to_string_lossy().into_owned(), model: Some("mock/anthropic/claude-sonnet-4.5".into()), thinking: None, chat: None }).await.unwrap() else { panic!() };
         c.call(Request::Attach { chat: chat.clone() }).await.unwrap();
         c.call(Request::Prompt { chat: chat.clone(), text: "SLEEP".into(), images: vec![], follow_up: false, request_id: None }).await.unwrap();
         wait(&mut events, true).await;

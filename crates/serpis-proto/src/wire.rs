@@ -43,9 +43,12 @@ pub enum Request {
     /// The chats running on the node.
     List,
     /// A new chat in `cwd` (a path on the node's machine). `model` is `provider/id`; without
-    /// one, the node's default.
+    /// one, the node's default. `chat`: its id, chosen by the client (a UUID), so it can send
+    /// what it has for the chat before the answer comes; without one, the node picks.
     New {
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,7 +58,13 @@ pub enum Request {
     Resume { session: String },
     /// Send this client the chat's transcript and state, then every change to them.
     Attach { chat: String },
-    Detach { chat: String },
+    /// Stop sending this client the chat. `close`: also close the chat, when it is idle and no
+    /// other client shows it (its session stays, to resume).
+    Detach {
+        chat: String,
+        #[serde(default)]
+        close: bool,
+    },
     /// A user message: starts a run, or steers the running one (`follow_up`: after it).
     Prompt {
         chat: String,
@@ -76,6 +85,14 @@ pub enum Request {
         instructions: Option<String>,
     },
     SetModel { chat: String, model: String },
+    /// Read the project's instructions again with the next message (rewrites the prompt cache).
+    RefreshContext { chat: String },
+    /// Name the chat's session.
+    Rename { chat: String, name: String },
+    /// Move the chat's cache clock back `secs` seconds (for tests of expiry).
+    AgeCache { chat: String, secs: f64 },
+    /// Read models.json and auth.json again.
+    ReloadModels,
     SetThinking { chat: String, level: String },
     /// Stop the chat and drop it from the node (its session stays on disk).
     Close { chat: String },
@@ -128,6 +145,24 @@ pub enum Request {
         #[serde(default)]
         settings: serde_json::Map<String, serde_json::Value>,
     },
+    /// Settings for the node's chats, over what its config says (null: unset): the settings of
+    /// the window on the node's own machine, which runs the same config, and what it changes.
+    SetVars { vars: serde_json::Map<String, serde_json::Value> },
+    /// Load the node's Lua config again (init.lua and extensions): answered with `Reloaded`.
+    Reload,
+    /// Add a custom entry to a chat's session (`serpis.chat.append`).
+    Append { chat: String, kind: String, data: serde_json::Value },
+    /// Tools this client runs for the chats it shows (a window's `serpis_lua`): its agents get
+    /// them while this client is attached, and calls come as `ToolCall` events. Replaces what
+    /// it lent before.
+    Lend { tools: Vec<ToolSpec> },
+    /// The result of a `ToolCall`.
+    ToolDone {
+        call: u64,
+        text: String,
+        #[serde(default)]
+        is_error: bool,
+    },
     /// The folders in a directory on the node (`~` and relative paths start from its home),
     /// for picking where a chat runs.
     Dirs { path: String },
@@ -157,6 +192,9 @@ pub enum Response {
         /// This node's build: the SHA-256 of its binary (the name serpis installs it under).
         #[serde(default)]
         build: String,
+        /// What went wrong loading its Lua config.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
     },
     Chats { chats: Vec<ChatSummary> },
     /// The chat a `New` or `Resume` made.
@@ -174,6 +212,8 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// The Lua config loaded again: what went wrong, if anything.
+    Reloaded { errors: Vec<String> },
     /// What a `Setup` added (`auth:openrouter`, `models:local`, `settings:agent-model`).
     Setup { added: Vec<String> },
 }
@@ -197,6 +237,18 @@ pub enum Event {
     Closed { chat: String },
     /// Something to tell whoever shows the chat (a refused prompt, a cache warning).
     Notice { chat: String, level: NoticeLevel, text: String },
+    /// Something to tell every client (the node's Lua said it, outside any chat).
+    Message { level: NoticeLevel, text: String },
+    /// Run a tool this client lent (`Lend`) for `chat`, and answer with `ToolDone`.
+    ToolCall { chat: String, call: u64, name: String, args: serde_json::Value },
+}
+
+/// A tool a client lends: what the model is told about it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +273,11 @@ pub struct ModelInfo {
     pub name: String,
     pub reasoning: bool,
     pub images: bool,
+    #[serde(default)]
+    pub context_window: u64,
+    /// Dollars per million tokens: input, output.
+    #[serde(default)]
+    pub cost: (f64, f64),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +293,11 @@ pub struct SessionInfo {
     /// The machine the chat moved to, when it continues elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_to: Option<String>,
+    /// Open on the node now (a client can attach to it); `running`: working on a turn.
+    #[serde(default)]
+    pub open: bool,
+    #[serde(default)]
+    pub running: bool,
 }
 
 /// One frame's bytes.
@@ -305,6 +367,23 @@ mod tests {
     }
 
     #[test]
+    fn requests_round_trip_inside_calls() {
+        // A request's fields sit beside the call's own `id`: none may be named so.
+        let requests = [
+            Request::New { cwd: "~".into(), model: None, thinking: None, chat: Some("c1".into()) },
+            Request::Detach { chat: "c1".into(), close: true },
+            Request::ToolDone { call: 3, text: "t".into(), is_error: false },
+            Request::SetVars { vars: serde_json::Map::from_iter([("a".to_string(), serde_json::json!(1))]) },
+        ];
+        for request in requests {
+            let call = Call { id: 9, request };
+            let json = serde_json::to_string(&call).unwrap();
+            assert_eq!(json.matches("\"id\"").count(), 1, "{json}");
+            assert_eq!(serde_json::from_str::<Call>(&json).unwrap(), call);
+        }
+    }
+
+    #[test]
     fn oversized_frames_are_refused() {
         let mut d = Decoder::default();
         d.push(&[tag::CALL, 0xff, 0xff, 0xff, 0xff]);
@@ -314,7 +393,7 @@ mod tests {
     #[test]
     fn calls_read_as_documented() {
         let c: Call = serde_json::from_str(r#"{"id":7,"op":"new","cwd":"~/src/app"}"#).unwrap();
-        assert_eq!(c, Call { id: 7, request: Request::New { cwd: "~/src/app".into(), model: None, thinking: None } });
+        assert_eq!(c, Call { id: 7, request: Request::New { cwd: "~/src/app".into(), model: None, thinking: None, chat: None } });
         let r = serde_json::to_value(Reply { id: 7, response: Response::Chat { chat: "x".into() } }).unwrap();
         assert_eq!(r, serde_json::json!({"id": 7, "kind": "chat", "chat": "x"}));
     }

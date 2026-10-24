@@ -18,10 +18,12 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use serpis_chat::{Chat, ChatInit, Host, Level};
-use serpis_proto::wire::{self, Call, ChatSummary, Event, ModelInfo, NoticeLevel, Reply, Request, Response, SessionInfo, tag};
+use serpis_proto::wire::{self, Call, ChatSummary, Event, ModelInfo, NoticeLevel, Reply, Request, Response, SessionInfo, ToolSpec, tag};
 use serpis_proto::ChatState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc as tmpsc;
+
+use crate::lua::{Action, Info, NodeLua};
 
 /// How many frames a client may have waiting before it is treated as lagging.
 const QUEUE: usize = 1024;
@@ -35,11 +37,13 @@ pub struct Config {
     pub dir: PathBuf,
     /// Models, credentials and sessions: `~/.serpis/agent` unless set.
     pub agent_dir: Option<PathBuf>,
+    /// The Lua config (init.lua, extensions): the window's, `~/.config/serpis`, unless set.
+    pub config_dir: Option<PathBuf>,
 }
 
 impl Config {
     pub fn default_paths() -> Config {
-        Config { socket: crate::socket_path(), dir: crate::node_dir(), agent_dir: None }
+        Config { socket: crate::socket_path(), dir: crate::node_dir(), agent_dir: None, config_dir: None }
     }
 }
 
@@ -51,6 +55,8 @@ enum Msg {
     Wake,
     /// The answer to a call that took a while (packing, unpacking), done off this thread.
     Reply { client: u64, id: u64, response: Response },
+    /// Work for the node's thread from elsewhere (tool calls and their hooks, from agents).
+    Run(Box<dyn FnOnce(&mut Node) + Send>),
     Stop,
 }
 
@@ -81,6 +87,8 @@ impl Running {
 
 /// Start a node on `rt`: bind its socket, reopen the chats it had open, and serve.
 pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
+    // Its build is the binary it started from: hashed now, before an update replaces the file.
+    let _ = build_id();
     // Its settings and open chats live here, wherever the socket is.
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -102,31 +110,38 @@ pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
             tracing::warn!("model catalog: {e}");
         }
     });
-    let wake_tx = tx.clone();
-    let msgs = tx.clone();
-    let mut node = Node {
-        msgs,
-        transfer: config.dir.join("transfer"),
-        chats: BTreeMap::new(),
-        clients: HashMap::new(),
-        settings: Settings::load(config.dir.join("settings.json")),
-        registry,
-        rt: rt.clone(),
-        wake: Arc::new(move || {
-            let _ = wake_tx.send(Msg::Wake);
-        }),
-        open_file: config.dir.join("open.json"),
-        open_written: Vec::new(),
-        session_cache: HashMap::new(),
-    };
-    node.reopen();
-    let conn_tx = tx.clone();
-    rt.spawn(accept(listener, conn_tx));
+    let (wake_tx, msgs) = (tx.clone(), tx.clone());
     let socket = config.socket.clone();
+    let config_dir = config.config_dir.clone().unwrap_or_else(serpis_chat::config::config_dir);
+    let rt2 = rt.clone();
+    // Lua lives on the node's thread, so the node is made there.
     let thread = std::thread::Builder::new().name("serpis-node".into()).spawn(move || {
+        let settings = Settings::load(config.dir.join("settings.json"));
+        let lua = NodeLua::load(&config_dir, registry.clone(), settings.vars.clone());
+        let mut node = Node {
+            msgs,
+            transfer: config.dir.join("transfer"),
+            chats: BTreeMap::new(),
+            clients: HashMap::new(),
+            settings,
+            registry,
+            rt: rt2,
+            wake: Arc::new(move || {
+                let _ = wake_tx.send(Msg::Wake);
+            }),
+            open_file: config.dir.join("open.json"),
+            open_written: Vec::new(),
+            session_cache: HashMap::new(),
+            lua,
+            config_dir,
+            tool_calls: HashMap::new(),
+            next_call: 0,
+        };
+        node.reopen();
         node.run(rx);
         let _ = std::fs::remove_file(&socket);
     })?;
+    rt.spawn(accept(listener, tx.clone()));
     Ok(Running { tx, thread: Some(thread), socket: config.socket })
 }
 
@@ -241,14 +256,17 @@ impl Settings {
         };
     }
 
-    fn refresh(&mut self) {
+    /// Read the file again if it changed: whether it did.
+    fn refresh(&mut self) -> bool {
         if self.checked.elapsed() < Duration::from_secs(1) {
-            return;
+            return false;
         }
         self.checked = Instant::now();
-        if std::fs::metadata(&self.path).and_then(|m| m.modified()).ok() != self.modified {
+        let changed = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok() != self.modified;
+        if changed {
             self.reload();
         }
+        changed
     }
 }
 
@@ -257,6 +275,8 @@ struct Slot {
     /// The state clients were last sent.
     sent_state: Option<ChatState>,
     notices: Vec<(Level, String)>,
+    /// Its last view closed while it worked: it closes once it is done, unless shown again.
+    close_when_idle: bool,
 }
 
 struct Client {
@@ -264,6 +284,8 @@ struct Client {
     attached: BTreeSet<String>,
     /// Its queue filled: it is sent nothing until it has room, then everything afresh.
     lagging: bool,
+    /// Tools it runs for the chats it shows (`Lend`).
+    lends: Vec<ToolSpec>,
 }
 
 struct Node {
@@ -281,34 +303,57 @@ struct Node {
     open_file: PathBuf,
     open_written: Vec<String>,
     session_cache: HashMap<PathBuf, serpis_chat::session::Info>,
+    /// The config's chat side: hooks, tools, settings.
+    lua: NodeLua,
+    config_dir: PathBuf,
+    /// Calls of lent tools waiting for their client: by call id, (client, where the answer goes).
+    tool_calls: HashMap<u64, (u64, tokio::sync::oneshot::Sender<serpis_agent::ToolResult>)>,
+    next_call: u64,
 }
 
 /// What a chat on the node gets from it.
 struct NodeHost<'a> {
-    settings: &'a Settings,
     registry: &'a serpis_ai::Registry,
     rt: &'a tokio::runtime::Handle,
     notices: &'a mut Vec<(Level, String)>,
     chat: &'a str,
+    lua: &'a NodeLua,
+    msgs: &'a mpsc::Sender<Msg>,
+    /// Tools lent by the clients showing this chat: (client, tool).
+    lent: Vec<(u64, ToolSpec)>,
 }
 
 impl Host for NodeHost<'_> {
     fn var(&self, name: &str) -> Option<Value> {
-        self.settings.vars.get(name).cloned()
+        self.lua.var(name)
     }
-    fn hook(&mut self, _: &Chat, _: &str, _: &Value) -> Vec<Value> {
-        // Hooks come with the node's own Lua config (later); none run yet.
-        Vec::new()
+    fn hook(&mut self, chat: &Chat, name: &str, payload: &Value) -> Vec<Value> {
+        // Handlers read the chat as it is now (serpis.chat.info).
+        self.lua.state.borrow_mut().chats.insert(self.chat.to_string(), Info::of(self.chat, chat));
+        self.lua.run_hook_for(Some(self.chat), name, payload)
     }
     fn notify(&mut self, level: Level, text: String) {
         self.notices.push((level, text));
     }
     fn tools(&self) -> Vec<serpis_agent::ToolRef> {
+        // Built in, then the config's (which replace built-ins of the same name), then the ones
+        // a client lends that the node has no tool of that name for.
+        let mut tools = serpis_agent::builtin_tools();
+        for spec in self.lua.tool_specs() {
+            tools.retain(|t| t.name() != spec.name);
+            tools.push(Arc::new(crate::lua::LuaTool { spec, chat: self.chat.to_string(), post: post(self.msgs) }));
+        }
+        for (client, spec) in &self.lent {
+            if !tools.iter().any(|t| t.name() == spec.name) {
+                tools.push(Arc::new(LentTool { spec: spec.clone(), client: *client, chat: self.chat.to_string(), msgs: self.msgs.clone() }));
+            }
+        }
         let disabled: Vec<String> = self.var("agent-disabled-tools").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        serpis_agent::builtin_tools().into_iter().filter(|t| !disabled.iter().any(|d| d == t.name())).collect()
+        tools.retain(|t| !disabled.iter().any(|d| d == t.name()));
+        tools
     }
     fn tool_hooks(&self) -> Option<Arc<dyn serpis_agent::ToolHooks>> {
-        None
+        Some(Arc::new(NodeToolHooks { msgs: self.msgs.clone(), chat: self.chat.to_string() }))
     }
     fn registry(&self) -> &serpis_ai::Registry {
         self.registry
@@ -321,11 +366,113 @@ impl Host for NodeHost<'_> {
     }
 }
 
+/// How the node's Lua is reached from an agent's task.
+fn post(msgs: &mpsc::Sender<Msg>) -> crate::lua::Post {
+    let msgs = msgs.clone();
+    Arc::new(move |f| {
+        let _ = msgs.send(Msg::Run(Box::new(move |node: &mut Node| {
+            node.refresh_infos();
+            f(&node.lua);
+            node.after_lua();
+        })));
+    })
+}
+
+/// `before-tool-call` / `after-tool-call`, run by the node's Lua.
+struct NodeToolHooks {
+    msgs: mpsc::Sender<Msg>,
+    chat: String,
+}
+
+impl serpis_agent::ToolHooks for NodeToolHooks {
+    fn before_tool_call(&self, name: &str, args: Value) -> futures::future::BoxFuture<'static, serpis_agent::ToolGate> {
+        use futures::FutureExt;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (name, a, chat) = (name.to_string(), args.clone(), self.chat.clone());
+        let _ = self.msgs.send(Msg::Run(Box::new(move |node: &mut Node| {
+            if !node.lua.has_hook("before-tool-call") {
+                let _ = tx.send(None);
+                return;
+            }
+            // The response asking for this tool first, so hooks see what it cost.
+            let _ = node.with_chat(&chat, |c, h| c.poll(h));
+            node.refresh_infos();
+            let results = node.lua.run_hook_for(Some(&chat), "before-tool-call", &json!({"buffer": chat, "chat": chat, "name": name, "args": a}));
+            node.after_lua();
+            let gate = results.into_iter().find_map(|r| match r.get("block").and_then(Value::as_str) {
+                Some(reason) => Some(serpis_agent::ToolGate::Block(reason.to_string())),
+                None => r.get("args").cloned().map(serpis_agent::ToolGate::Allow),
+            });
+            let _ = tx.send(gate);
+        })));
+        async move { rx.await.ok().flatten().unwrap_or(serpis_agent::ToolGate::Allow(args)) }.boxed()
+    }
+
+    fn after_tool_call(&self, name: &str, result: serpis_agent::ToolResult) -> futures::future::BoxFuture<'static, serpis_agent::ToolResult> {
+        use futures::FutureExt;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (name, text, is_error, chat) = (name.to_string(), result.text_content(), result.is_error, self.chat.clone());
+        let _ = self.msgs.send(Msg::Run(Box::new(move |node: &mut Node| {
+            if !node.lua.has_hook("after-tool-call") {
+                let _ = tx.send(None);
+                return;
+            }
+            node.refresh_infos();
+            let results = node.lua.run_hook_for(Some(&chat), "after-tool-call", &json!({"buffer": chat, "chat": chat, "name": name, "text": text, "isError": is_error}));
+            node.after_lua();
+            let _ = tx.send(results.into_iter().find_map(|r| r.get("text").and_then(Value::as_str).map(str::to_string)));
+        })));
+        async move {
+            match rx.await.ok().flatten() {
+                Some(text) => {
+                    let mut r = serpis_agent::ToolResult::text(text);
+                    r.is_error = result.is_error;
+                    r
+                }
+                None => result,
+            }
+        }
+        .boxed()
+    }
+}
+
+/// A tool a client lends (`Lend`): run there, through a `ToolCall` event.
+struct LentTool {
+    spec: ToolSpec,
+    client: u64,
+    chat: String,
+    msgs: mpsc::Sender<Msg>,
+}
+
+impl serpis_agent::AgentTool for LentTool {
+    fn name(&self) -> &str {
+        &self.spec.name
+    }
+    fn description(&self) -> String {
+        self.spec.description.clone()
+    }
+    fn parameters(&self) -> Value {
+        self.spec.parameters.clone()
+    }
+    fn prompt_snippet(&self) -> Option<String> {
+        Some(self.spec.description.lines().next().unwrap_or("").to_string())
+    }
+    fn execute(&self, _id: String, args: Value, _ctx: serpis_agent::ToolContext) -> futures::future::BoxFuture<'static, anyhow::Result<serpis_agent::ToolResult>> {
+        use futures::FutureExt;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (client, chat, name) = (self.client, self.chat.clone(), self.spec.name.clone());
+        let _ = self.msgs.send(Msg::Run(Box::new(move |node: &mut Node| node.call_lent(client, chat, name, args, tx))));
+        async move { rx.await.map_err(|_| anyhow::anyhow!("the node stopped")) }.boxed()
+    }
+}
+
 impl Node {
     fn run(mut self, rx: mpsc::Receiver<Msg>) {
         let mut last = Instant::now();
+        let mut next_timer: Option<Instant> = None;
         loop {
-            let msg = match rx.recv_timeout(Duration::from_secs(1)) {
+            let wait = next_timer.map_or(Duration::from_secs(1), |t| t.saturating_duration_since(Instant::now()).min(Duration::from_secs(1)));
+            let msg = match rx.recv_timeout(wait) {
                 Ok(m) => Some(m),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -334,19 +481,24 @@ impl Node {
             for m in msg.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
                 match m {
                     Msg::Connected { client, tx } => {
-                        self.clients.insert(client, Client { tx, attached: BTreeSet::new(), lagging: false });
+                        self.clients.insert(client, Client { tx, attached: BTreeSet::new(), lagging: false, lends: Vec::new() });
                     }
                     Msg::Call { client, body } => stop |= self.call(client, &body),
-                    Msg::Gone { client } => {
-                        self.clients.remove(&client);
-                    }
+                    Msg::Gone { client } => self.gone(client),
                     Msg::Wake => {}
                     Msg::Reply { client, id, response } => self.reply(client, id, response),
+                    Msg::Run(f) => f(&mut self),
                     Msg::Stop => stop = true,
                 }
             }
-            self.settings.refresh();
+            if self.settings.refresh() {
+                self.lua.state.borrow_mut().file = self.settings.vars.clone();
+            }
+            self.refresh_infos();
+            next_timer = self.lua.run_timers();
             self.poll();
+            self.after_lua();
+            self.close_idle();
             self.flush();
             self.remember_open();
             if stop {
@@ -364,17 +516,116 @@ impl Node {
         }
     }
 
-    fn host<'a>(settings: &'a Settings, registry: &'a serpis_ai::Registry, rt: &'a tokio::runtime::Handle, id: &'a str, slot: &'a mut Slot) -> (&'a mut Chat, NodeHost<'a>) {
-        let Slot { chat, notices, .. } = slot;
-        (chat, NodeHost { settings, registry, rt, notices, chat: id })
-    }
-
     /// Run `f` on chat `id` with the node as its host.
     fn with_chat<R>(&mut self, id: &str, f: impl FnOnce(&mut Chat, &mut NodeHost) -> R) -> Result<R, String> {
-        let Node { chats, settings, registry, rt, .. } = self;
+        let lent: Vec<(u64, ToolSpec)> = self.clients.iter().filter(|(_, c)| c.attached.contains(id)).flat_map(|(k, c)| c.lends.iter().map(|t| (*k, t.clone()))).collect();
+        let Node { chats, registry, rt, lua, msgs, .. } = self;
         let slot = chats.get_mut(id).ok_or_else(|| format!("no chat {id} on this node"))?;
-        let (chat, mut host) = Self::host(settings, registry, rt, id, slot);
+        let Slot { chat, notices, .. } = slot;
+        let mut host = NodeHost { registry, rt, notices, chat: id, lua, msgs, lent };
         Ok(f(chat, &mut host))
+    }
+
+    /// The chats as Lua reads them, before it runs.
+    fn refresh_infos(&mut self) {
+        let mut s = self.lua.state.borrow_mut();
+        s.chats = self.chats.iter().map(|(id, slot)| (id.clone(), Info::of(id, &slot.chat))).collect();
+    }
+
+    /// Do what Lua asked (it may ask again, from the hooks that runs), and pass on what it said.
+    fn after_lua(&mut self) {
+        for _ in 0..8 {
+            let actions = std::mem::take(&mut self.lua.state.borrow_mut().actions);
+            if actions.is_empty() {
+                break;
+            }
+            for a in actions {
+                let r = match a {
+                    Action::Prompt { chat, text } => self.with_chat(&chat, |c, h| c.submit(h, text, Vec::new(), false, None)).and_then(|r| r),
+                    Action::SetModel { chat, spec } => self.find_model(&spec).and_then(|m| self.with_chat(&chat, |c, _| c.set_model(m))),
+                    Action::SetThinking { chat, level } => match serpis_ai::ThinkingLevel::parse(&level) {
+                        Some(l) => self.with_chat(&chat, |c, _| c.set_thinking(l)),
+                        None => Err(format!("unknown thinking level {level}")),
+                    },
+                    Action::Append { chat, kind, data } => self.with_chat(&chat, |c, h| c.append_entry(h, &kind, data)),
+                    Action::ReloadModels => {
+                        self.registry.reload();
+                        Ok(())
+                    }
+                    Action::Reload => {
+                        self.reload_config();
+                        Ok(())
+                    }
+                };
+                if let Err(e) = r {
+                    self.lua.state.borrow_mut().notices.push((None, Level::Error, format!("lua: {e}")));
+                }
+            }
+        }
+        let notices = std::mem::take(&mut self.lua.state.borrow_mut().notices);
+        for (chat, level, text) in notices {
+            match chat.and_then(|c| self.chats.get_mut(&c)) {
+                Some(slot) => slot.notices.push((level, text)),
+                None => {
+                    let frame = wire::encode(tag::EVENT, &Event::Message { level: notice_level(level), text });
+                    let all: Vec<u64> = self.clients.keys().copied().collect();
+                    for c in all {
+                        self.send_event(c, frame.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close the chats whose last view closed, once they are idle (their sessions stay).
+    fn close_idle(&mut self) {
+        self.chats.retain(|_, s| !(s.close_when_idle && !s.chat.running() && !s.chat.compacting()));
+    }
+
+    /// Load the Lua config again: what went wrong, if anything.
+    fn reload_config(&mut self) -> Vec<String> {
+        let dir = self.config_dir.clone();
+        self.lua.reload(&dir);
+        self.lua.errors.clone()
+    }
+
+    /// A client left: its lent tools' calls fail, and the chats it alone showed may close.
+    fn gone(&mut self, client: u64) {
+        let shown = self.clients.remove(&client).map(|c| c.attached).unwrap_or_default();
+        // A chat it showed that never got a message (its session isn't written) and nobody else
+        // shows is gone with it.
+        for chat in shown {
+            let unsaved = self.chats.get(&chat).is_some_and(|s| !s.chat.running() && s.chat.session.as_ref().is_none_or(|w| !w.exists()));
+            if unsaved && !self.clients.values().any(|c| c.attached.contains(&chat)) {
+                self.chats.remove(&chat);
+            }
+        }
+        let calls: Vec<u64> = self.tool_calls.iter().filter(|(_, (c, _))| *c == client).map(|(k, _)| *k).collect();
+        for k in calls {
+            if let Some((_, tx)) = self.tool_calls.remove(&k) {
+                let mut r = serpis_agent::ToolResult::text("The window running this tool closed before it finished");
+                r.is_error = true;
+                let _ = tx.send(r);
+            }
+        }
+    }
+
+    /// Ask `client` to run tool `name` it lent, for `chat`.
+    fn call_lent(&mut self, client: u64, chat: String, name: String, args: Value, tx: tokio::sync::oneshot::Sender<serpis_agent::ToolResult>) {
+        // The client that lent it, or another showing the chat that lends it too.
+        let by = std::iter::once(client)
+            .chain(self.clients.iter().filter(|(_, c)| c.attached.contains(&chat)).map(|(k, _)| *k))
+            .find(|k| self.clients.get(k).is_some_and(|c| c.lends.iter().any(|t| t.name == name)));
+        let Some(by) = by else {
+            let mut r = serpis_agent::ToolResult::text(format!("{name} runs in a serpis window showing this chat, and none does now"));
+            r.is_error = true;
+            let _ = tx.send(r);
+            return;
+        };
+        self.next_call += 1;
+        let call = self.next_call;
+        self.tool_calls.insert(call, (by, tx));
+        self.send_event(by, wire::encode(tag::EVENT, &Event::ToolCall { chat, call, name, args }));
     }
 
     fn poll(&mut self) {
@@ -466,6 +717,7 @@ impl Node {
 
     /// Answer a call; true when it asked the node to stop.
     fn call(&mut self, client: u64, body: &[u8]) -> bool {
+        tracing::debug!("client {client}: {}", String::from_utf8_lossy(&body[..body.len().min(160)]));
         let call: Call = match serde_json::from_slice(body) {
             Ok(c) => c,
             Err(e) => {
@@ -503,32 +755,40 @@ impl Node {
                     home: dirs::home_dir().unwrap_or_default().to_string_lossy().into_owned(),
                     setup: self.setup(),
                     build: build_id().to_string(),
+                    notes: self.lua.errors.clone(),
                 }
             }
             Request::List => Response::Chats { chats: self.chats.iter().map(|(id, s)| ChatSummary { chat: id.clone(), state: s.chat.state() }).collect() },
-            Request::New { cwd, model, thinking } => {
+            Request::New { cwd, model, thinking, chat: id } => {
+                if let Some(id) = &id
+                    && (uuid::Uuid::parse_str(id).is_err() || self.chats.contains_key(id))
+                {
+                    return Err(format!("{id} can't be a new chat's id here"));
+                }
                 let cwd = from_home(&cwd);
                 if !cwd.is_dir() {
                     return Err(format!("{} isn't a folder on this machine", cwd.display()));
                 }
                 let model = match model {
                     Some(spec) => Some(self.find_model(&spec)?),
-                    None => serpis_chat::default_model(&self.registry, self.settings.vars.get("agent-model").and_then(Value::as_str)),
+                    None => serpis_chat::default_model(&self.registry, self.lua.var("agent-model").as_ref().and_then(Value::as_str)),
                 };
                 let thinking = thinking
-                    .or_else(|| self.settings.vars.get("agent-thinking").and_then(Value::as_str).map(str::to_string))
+                    .or_else(|| self.lua.var("agent-thinking").as_ref().and_then(Value::as_str).map(str::to_string))
                     .and_then(|t| serpis_ai::ThinkingLevel::parse(&t))
                     .unwrap_or(serpis_ai::ThinkingLevel::Medium);
-                let chat = Chat::new(ChatInit { cwd, model, thinking }, self.wake.clone());
+                let mut chat = Chat::new(ChatInit { cwd, model, thinking }, self.wake.clone());
+                if let Some(id) = id {
+                    chat.session_id = id;
+                }
                 let id = chat.session_id.clone();
-                self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new() });
+                self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new(), close_when_idle: false });
                 Response::Chat { chat: id }
             }
             Request::Resume { session } => Response::Chat { chat: self.resume(&from_home(&session))? },
             Request::Attach { chat } => {
-                if !self.chats.contains_key(&chat) {
-                    return Err(format!("no chat {chat} on this node"));
-                }
+                let Some(slot) = self.chats.get_mut(&chat) else { return Err(format!("no chat {chat} on this node")) };
+                slot.close_when_idle = false;
                 // Others are sent what changed first, so the splices after this one apply on top
                 // of it for everyone.
                 self.flush();
@@ -537,10 +797,15 @@ impl Node {
                 self.send_whole(client, &chat);
                 Response::Ok
             }
-            Request::Detach { chat } => {
+            Request::Detach { chat, close } => {
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.attached.remove(&chat);
                 }
+                let watched = self.clients.values().any(|c| c.attached.contains(&chat));
+                if close && !watched && let Some(slot) = self.chats.get_mut(&chat) {
+                    slot.close_when_idle = true;
+                }
+                self.close_idle();
                 Response::Ok
             }
             Request::Prompt { chat, text, images, follow_up, request_id } => {
@@ -558,6 +823,22 @@ impl Node {
             Request::SetModel { chat, model } => {
                 let m = self.find_model(&model)?;
                 self.with_chat(&chat, |c, _| c.set_model(m))?;
+                Response::Ok
+            }
+            Request::RefreshContext { chat } => {
+                self.with_chat(&chat, |c, _| c.refresh_context())?;
+                Response::Ok
+            }
+            Request::Rename { chat, name } => {
+                self.with_chat(&chat, |c, h| c.set_session_name(h, &name))?;
+                Response::Ok
+            }
+            Request::AgeCache { chat, secs } => {
+                self.with_chat(&chat, |c, _| c.cache.age(Duration::from_secs_f64(secs.max(0.0))))?;
+                Response::Ok
+            }
+            Request::ReloadModels => {
+                self.registry.reload();
                 Response::Ok
             }
             Request::SetThinking { chat, level } => {
@@ -582,14 +863,25 @@ impl Node {
                     .models()
                     .into_iter()
                     .filter(|m| configured.contains(&m.provider))
-                    .map(|m| ModelInfo { model: format!("{}/{}", m.provider, m.id), name: m.name.clone(), reasoning: m.reasoning, images: m.input.iter().any(|i| i == "image") })
+                    .filter(|m| serpis_ai::api::SUPPORTED_APIS.contains(&m.api.as_str()) || m.api == "azure-openai-responses")
+                    .map(|m| ModelInfo {
+                        model: format!("{}/{}", m.provider, m.id),
+                        name: m.display_name().to_string(),
+                        reasoning: m.reasoning,
+                        images: m.input.iter().any(|i| i == "image"),
+                        context_window: m.context_window,
+                        cost: (m.cost.input, m.cost.output),
+                    })
                     .collect();
                 Response::Models { models }
             }
             Request::Sessions { limit } => {
+                let open: HashMap<PathBuf, bool> = self.chats.values().filter_map(|s| Some((s.chat.session.as_ref()?.path.clone(), s.chat.running() || s.chat.compacting()))).collect();
                 let mut sessions: Vec<SessionInfo> = serpis_chat::session::list(&[self.session_root()], &mut self.session_cache)
                     .into_iter()
                     .map(|i| SessionInfo {
+                        open: open.contains_key(&i.path),
+                        running: open.get(&i.path).copied().unwrap_or(false),
                         title: i.title(),
                         path: i.path.to_string_lossy().into_owned(),
                         id: i.id,
@@ -663,6 +955,33 @@ impl Node {
                 Response::Ok
             }
             Request::Setup { auth, models, settings } => Response::Setup { added: self.apply_setup(auth, models, settings)? },
+            Request::SetVars { vars } => {
+                let mut s = self.lua.state.borrow_mut();
+                for (name, value) in vars {
+                    if value.is_null() {
+                        s.pushed.remove(&name);
+                    } else {
+                        s.pushed.insert(name, value);
+                    }
+                }
+                Response::Ok
+            }
+            Request::Reload => Response::Reloaded { errors: self.reload_config() },
+            Request::Append { chat, kind, data } => {
+                self.with_chat(&chat, |c, h| c.append_entry(h, &kind, data))?;
+                Response::Ok
+            }
+            Request::Lend { tools } => {
+                self.clients.get_mut(&client).ok_or("gone")?.lends = tools;
+                Response::Ok
+            }
+            Request::ToolDone { call, text, is_error } => {
+                let (_, tx) = self.tool_calls.remove(&call).ok_or_else(|| format!("no tool call {call} waits"))?;
+                let mut r = serpis_agent::ToolResult::text(text);
+                r.is_error = is_error;
+                let _ = tx.send(r);
+                Response::Ok
+            }
             Request::Dirs { path } => {
                 let dir = from_home(&path);
                 let mut dirs: Vec<String> = std::fs::read_dir(&dir)
@@ -793,6 +1112,7 @@ impl Node {
         }
         if added.len() > n {
             write(&self.settings.path.clone(), &Value::Object(self.settings.vars.clone()))?;
+            self.lua.state.borrow_mut().file = self.settings.vars.clone();
         }
         self.registry.reload();
         Ok(added)
@@ -804,7 +1124,7 @@ impl Node {
     }
 
     fn session_root(&self) -> PathBuf {
-        let host = NodeHost { settings: &self.settings, registry: &self.registry, rt: &self.rt, notices: &mut Vec::new(), chat: "" };
+        let host = NodeHost { registry: &self.registry, rt: &self.rt, notices: &mut Vec::new(), chat: "", lua: &self.lua, msgs: &self.msgs, lent: Vec::new() };
         host.session_root()
     }
 
@@ -819,7 +1139,7 @@ impl Node {
         if self.chats.contains_key(&id) {
             return Err(format!("chat {id} is already open from another file"));
         }
-        self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new() });
+        self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new(), close_when_idle: false });
         self.with_chat(&id, |c, h| c.restore(h, &loaded))?;
         Ok(id)
     }

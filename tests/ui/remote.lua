@@ -143,19 +143,33 @@ steps({
       T.check("serpis installed its node there", far("ls " .. home .. "/.serpis/bin"):find("serpis-node-", 1, true) ~= nil, true)
     end
   end,
-  -- Closing the view leaves the chat running on the box; it comes back whole.
+  -- Closing the view of a working chat leaves it working on the box; it comes back whole.
   function()
+    T.press("S L E E P RET")
+    return 1000
+  end,
+  function()
+    T.check("it works on the box", serpis.chat.running(chat), true)
     serpis.buffer.kill(chat)
   end,
   function(go)
     serpis.command.run("remote-attach-chat", "box", remote_id)
     chat = serpis.buffer.current()
-    when(function() return has("done") end, go)
+    when(function() return has("SLEEP") and not serpis.chat.running(chat) end, go)
     return false
   end,
   function()
-    T.check("reattached, the chat shows everything", has("READ 2") and has("f1.txt") and has("done"), true)
+    T.check("reattached, the chat shows everything", has("READ 2") and has("f1.txt") and has("SLEEP"), true)
     T.check("as the same chat", serpis.chat.info(chat).session_id, remote_id)
+    -- An idle chat nobody shows any more is closed there; its session stays, to resume.
+    serpis.buffer.kill(chat)
+  end,
+  function()
+    serpis.command.run("remote-attach-chat", "box")
+  end,
+  function()
+    local ms = d.messages()
+    T.check("closing its last view closed the idle chat", ms[#ms], "No chats are running on box")
   end,
   function(go)
     serpis.command.run("remote-stop-node", "box")

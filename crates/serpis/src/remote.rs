@@ -1,5 +1,10 @@
-//! Chats on other machines: the machines you can use, a connection to the node on each, and the
-//! chat buffers that show their chats.
+//! Where chats run: the node of each machine, this one's included, a connection to each, and
+//! the chat buffers that show their chats.
+//!
+//! Every chat runs in a node, and this window only shows it. This machine's node ([`LOCAL`]) is
+//! reached at its socket and started when none runs (from the `serpis-node` next to serpis,
+//! else one serpis builds); it outlives the window, so a chat keeps going when the window
+//! closes, and any window or phone that reaches this machine can show it and drive it.
 //!
 //! A machine is an ssh destination (`remote-hosts`, and rayfish peers when `ray` is installed
 //! and `remote-rayfish` is on). Its node is reached with `ssh <host> serpis-node agent`, so
@@ -23,6 +28,9 @@ use crate::buffer::BufferId;
 use crate::buffers::chat::ChatBuffer;
 use crate::editor::{BUILTIN, Editor};
 use crate::minibuffer::Candidate;
+
+/// This machine, as a machine name: its own node.
+pub const LOCAL: &str = "local";
 
 /// A machine chats can run on.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +82,13 @@ pub struct Remotes {
     /// The node builds serpis installs on machines, as last scanned: (directory, when it
     /// changed, builds).
     builds: Option<(std::path::PathBuf, Option<std::time::SystemTime>, Vec<serpis_node::deploy::NodeBinary>)>,
+    /// The tools this window lends changed: lent again to every node at the next tick.
+    pub tools_changed: bool,
+    /// Settings changed since they were last sent to this machine's node.
+    vars_changed: serde_json::Map<String, Value>,
+    /// How many times this window loaded the config: after the first, this machine's node loads
+    /// it again too.
+    config_loads: u32,
 }
 
 /// The machines chats can run on: `remote-hosts`, then rayfish peers.
@@ -268,6 +283,39 @@ pub fn rayfish_peers(status: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// This machine's node: its socket and the `serpis-node` to start it from, found or built.
+async fn local_target(root: Option<std::path::PathBuf>, store: std::path::PathBuf, configured: Option<String>, stage: impl Fn(serpis_node::client::Stage)) -> anyhow::Result<Target> {
+    let socket = serpis_node::socket_path();
+    let exe = match configured {
+        Some(c) => crate::expand_home(&c),
+        None => own_node(root, store, stage).await?,
+    };
+    anyhow::ensure!(exe.is_file(), "no serpis-node at {}", exe.display());
+    Ok(Target::Own { socket, exe })
+}
+
+/// The `serpis-node` built from these sources: beside serpis (how it is installed, and where
+/// cargo builds it), else in the node store, else built there now from serpis's source.
+async fn own_node(root: Option<std::path::PathBuf>, store: std::path::PathBuf, stage: impl Fn(serpis_node::client::Stage)) -> anyhow::Result<std::path::PathBuf> {
+    // A node of other sources (a stale build) speaks another protocol: its stamp says so.
+    async fn ours(exe: &std::path::Path) -> bool {
+        let out = tokio::process::Command::new(exe).arg("stamp").stdin(std::process::Stdio::null()).output().await;
+        out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == serpis_node::STAMP)
+    }
+    if let Some(beside) = std::env::current_exe().and_then(|e| e.canonicalize()).ok().and_then(|e| Some(e.parent()?.join("serpis-node"))) {
+        if beside.is_file() && ours(&beside).await {
+            return Ok(beside);
+        }
+    }
+    let here = tokio::process::Command::new("uname").arg("-sm").output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if let Some(n) = serpis_node::deploy::scan(&store).into_iter().find(|n| n.os_arch == here) {
+        return Ok(n.path);
+    }
+    let Some(root) = root else { anyhow::bail!("serpis-node isn't installed beside serpis, and serpis has no source to build it from") };
+    stage(serpis_node::client::Stage::Building(here.clone()));
+    Ok(build_node(&root, &store, &here).await?.path)
+}
+
 fn target_of(ed: &mut Editor, name: &str) -> Target {
     match machines(ed).into_iter().find(|m| m.name == name) {
         // Built now, not when the peer was found: the account to try may have changed since.
@@ -289,9 +337,14 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
     }
     ed.remote.conns.insert(machine.to_string(), Conn::Connecting(vec![Box::new(f)]));
     let key = busy_key(machine);
-    ed.busy_start(&key, &format!("Connecting to {machine}…"));
+    let local = machine == LOCAL;
+    // This machine's node answers at once; the card is for building it, should it come to that.
+    if !local {
+        ed.busy_start(&key, &format!("Connecting to {machine}…"));
+    }
     tracing::info!("connecting to {machine}");
-    let target = target_of(ed, machine);
+    let target = if local { None } else { Some(target_of(ed, machine)) };
+    let local_parts = (source_root(), crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into())).join(serpis_node::STAMP), ed.var_str("local-node-binary").filter(|s| !s.is_empty()));
     let obtain = obtain(ed);
     let (main, name) = (ed.main_sender(), machine.to_string());
     ed.rt.spawn(async move {
@@ -309,7 +362,17 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
                 main.send(move |ed| ed.busy_start(&key, &label));
             }
         };
-        let result = Client::connect_with(&target, "serpis", obtain, stage).await;
+        let target = match target {
+            Some(t) => Ok(t),
+            None => {
+                let (root, store, configured) = local_parts;
+                local_target(root, store, configured, &stage).await
+            }
+        };
+        let result = match target {
+            Ok(target) => Client::connect_with(&target, "serpis", obtain, stage).await,
+            Err(e) => Err(e),
+        };
         let (client, events) = match result {
             Ok((c, e)) => (Ok(Arc::new(c)), Some(e)),
             Err(e) => (Err(format!("{e:#}")), None),
@@ -358,9 +421,24 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
     match &client {
         Ok(c) => {
             ed.remote.conns.insert(machine.to_string(), Conn::Up(c.clone()));
-            // A machine with no models or keys can't run a chat: offer to copy this one's.
-            if c.hello.setup.providers.is_empty() {
+            lend(ed, c);
+            if machine == LOCAL {
+                // This machine's node runs the same config: it gets this window's settings, and
+                // whatever changes them from now on.
+                let vars: serde_json::Map<String, Value> = ed.vars.iter().map(|(k, v)| (k.clone(), v.value.clone())).collect();
+                ed.remote.vars_changed.clear();
+                c.send(Request::SetVars { vars });
+                // A node that was already running may have read them before they changed.
+                c.send(Request::ReloadModels);
+                if ed.remote.config_loads > 1 {
+                    reload_node_config(ed);
+                }
+            } else if c.hello.setup.providers.is_empty() {
+                // A machine with no models or keys can't run a chat: offer to copy this one's.
                 offer_setup(ed, machine, false);
+            }
+            for note in &c.hello.notes {
+                ed.warn(format!("{}: {note}", if machine == LOCAL { "this machine's node" } else { machine }));
             }
             // An older node a chat kept busy: it restarts on the new build once they are idle.
             if c.hello.outdated {
@@ -554,8 +632,8 @@ fn copy_setup(ed: &mut Editor, machine: &str, setup: Setup) {
                 if let Some(model) = default_model {
                     for id in chats_on(ed, &m) {
                         ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| {
-                            if c.remote.as_ref().is_some_and(|r| r.state.model.is_none()) {
-                                c.set_remote_model(&model);
+                            if c.node.state.model.is_none() {
+                                c.set_model_spec(&model);
                             }
                         });
                     }
@@ -626,7 +704,7 @@ pub fn reconnect(ed: &mut Editor, machine: &str) {
     with_client(ed, machine, move |ed, c| match c {
         Ok(c) => {
             for id in chats_on(ed, &name) {
-                if let Some(chat) = ed.with_buffer_as::<ChatBuffer, _>(id, |b, _| b.remote_chat_id()).flatten() {
+                if let Some(chat) = ed.with_buffer_as::<ChatBuffer, _>(id, |b, _| b.chat_id()) {
                     c.send(Request::Attach { chat });
                 }
             }
@@ -659,8 +737,11 @@ pub fn request(ed: &mut Editor, machine: &str, request: Request, done: impl FnOn
             ed.remote.answers.insert(token, Box::new(done));
             let main = ed.main_sender();
             let older = c.hello.host.clone();
+            // Sent now: requests reach the node in the order they are made.
+            let answer = c.call(request);
             ed.rt.spawn(async move {
-                let r = c.call(request).await.map_err(|e| older_node(&older, format!("{e:#}")));
+                let r = answer.await.map_err(|e| older_node(&older, format!("{e:#}")));
+                tracing::debug!("answer {token}: {r:?}");
                 main.send(move |ed| {
                     if let Some(done) = ed.remote.answers.remove(&token) {
                         done(ed, r);
@@ -685,7 +766,7 @@ pub fn send(ed: &mut Editor, machine: &str, request: Request) {
     let name = machine.to_string();
     self::request(ed, machine, request, move |ed, r| {
         if let Err(e) = r {
-            ed.error(format!("{name}: {e}"));
+            ed.error(if name == LOCAL { e } else { format!("{name}: {e}") });
         }
     });
 }
@@ -694,14 +775,15 @@ pub fn send(ed: &mut Editor, machine: &str, request: Request) {
 pub fn chats_on(ed: &Editor, machine: &str) -> Vec<BufferId> {
     ed.buffers
         .iter()
-        .filter(|(_, s)| s.buf.as_ref().and_then(|b| b.as_any().downcast_ref::<ChatBuffer>()).and_then(|c| c.remote.as_ref()).is_some_and(|r| r.machine == machine))
+        .filter(|(_, s)| s.buf.as_ref().and_then(|b| b.as_any().downcast_ref::<ChatBuffer>()).is_some_and(|c| c.node.machine == machine))
         .map(|(id, _)| id)
         .collect()
 }
 
-fn chat_buffer(ed: &Editor, machine: &str, chat: &str) -> Option<BufferId> {
+/// The buffer showing `chat` of `machine`, if one does.
+pub fn chat_buffer(ed: &Editor, machine: &str, chat: &str) -> Option<BufferId> {
     ed.buffers.iter().find_map(|(id, s)| {
-        let r = s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?.remote.as_ref()?;
+        let r = &s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?.node;
         (r.machine == machine && r.chat == chat).then_some(id)
     })
 }
@@ -709,11 +791,13 @@ fn chat_buffer(ed: &Editor, machine: &str, chat: &str) -> Option<BufferId> {
 fn route(ed: &mut Editor, machine: &str, ev: Event) {
     let chat = match &ev {
         Event::Splice { chat, .. } | Event::State { chat, .. } | Event::Closed { chat } | Event::Notice { chat, .. } => chat.clone(),
+        Event::Message { level, text } => return say(ed, machine, *level, text),
+        Event::ToolCall { chat, call, name, args } => return run_lent(ed, machine, chat.clone(), *call, name.clone(), args.clone()),
     };
     let Some(id) = chat_buffer(ed, machine, &chat) else { return };
     let ev = Some(ev);
     let mut ev = ev;
-    if ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.remote_event(ed, ev.take().unwrap())).is_none() {
+    if ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.node_event(ed, ev.take().unwrap())).is_none() {
         // The buffer is busy (its own hook is running): try again next tick.
         if let Some(ev) = ev {
             let m = machine.to_string();
@@ -722,12 +806,23 @@ fn route(ed: &mut Editor, machine: &str, ev: Event) {
     }
 }
 
+/// What a machine's node said, outside any chat.
+fn say(ed: &mut Editor, machine: &str, level: serpis_proto::wire::NoticeLevel, text: &str) {
+    use serpis_proto::wire::NoticeLevel;
+    let text = if machine == LOCAL { text.to_string() } else { format!("{machine}: {text}") };
+    match level {
+        NoticeLevel::Info => ed.message(text),
+        NoticeLevel::Warn => ed.warn(text),
+        NoticeLevel::Error => ed.error(text),
+    }
+}
+
 /// Open a buffer showing `chat` on `machine` (the one that already does, if any).
 pub fn open_chat(ed: &mut Editor, machine: &str, chat: &str, show: bool) -> BufferId {
     let id = match chat_buffer(ed, machine, chat) {
         Some(id) => id,
         None => {
-            let buf = ChatBuffer::new_remote(ed, machine, chat);
+            let buf = ChatBuffer::new(ed, &json!({"machine": machine, "chat": chat}));
             let id = ed.add_buffer("*chat*", Box::new(buf));
             send(ed, machine, Request::Attach { chat: chat.to_string() });
             id
@@ -739,29 +834,86 @@ pub fn open_chat(ed: &mut Editor, machine: &str, chat: &str, show: bool) -> Buff
     id
 }
 
-/// Start a chat in `dir` on `machine` and show it.
-pub fn new_chat(ed: &mut Editor, machine: &str, dir: &str, model: Option<String>) {
-    let m = machine.to_string();
-    request(ed, machine, Request::New { cwd: dir.to_string(), model, thinking: None }, move |ed, r| match r {
-        Ok(Response::Chat { chat }) => {
-            open_chat(ed, &m, &chat, true);
+/// Start chat `chat` (an id this window chose) in `cwd` on `machine`, and show it in the buffer
+/// that has it. Messages for it can go meanwhile: the node takes them in order.
+pub fn start_chat(ed: &mut Editor, machine: &str, chat: &str, cwd: &str, model: Option<String>, thinking: Option<String>) {
+    let (m, c) = (machine.to_string(), chat.to_string());
+    request(ed, machine, Request::New { cwd: cwd.to_string(), model, thinking, chat: Some(chat.to_string()) }, move |ed, r| match r {
+        Ok(_) => {}
+        Err(e) => {
+            ed.error(format!("{}: {e}", if m == LOCAL { "Starting the chat" } else { &m }));
+            if let Some(id) = chat_buffer(ed, &m, &c) {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |b, _| b.set_online(false));
+            }
         }
-        Ok(other) => ed.error(format!("{m}: unexpected answer {other:?}")),
-        Err(e) => ed.error(format!("{m}: {e}")),
     });
+    // Right behind it, so this window shows it, and lends it its tools, from its first message.
+    send(ed, machine, Request::Attach { chat: chat.to_string() });
 }
 
-/// Turn an empty chat buffer into one showing a new chat on `machine`.
-fn move_empty_chat(ed: &mut Editor, id: BufferId, machine: &str, dir: &str) {
-    let m = machine.to_string();
-    request(ed, machine, Request::New { cwd: dir.to_string(), model: None, thinking: None }, move |ed, r| match r {
+/// Continue saved session `path` of `machine` in the buffer that shows chat `chat` (the id the
+/// session has, as far as this window knows).
+pub fn resume_into(ed: &mut Editor, machine: &str, path: &str, chat: &str) {
+    let (m, expected) = (machine.to_string(), chat.to_string());
+    request(ed, machine, Request::Resume { session: path.to_string() }, move |ed, r| match r {
+        // Mostly the id the session has, and attached right behind; else the one the node gave.
+        Ok(Response::Chat { chat }) if chat == expected => {}
         Ok(Response::Chat { chat }) => {
-            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &m, &chat));
+            if let Some(id) = chat_buffer(ed, &m, &expected) {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |b, ed| b.become_remote(ed, &m, &chat));
+            }
             send(ed, &m, Request::Attach { chat });
         }
         Ok(other) => ed.error(format!("{m}: unexpected answer {other:?}")),
-        Err(e) => ed.error(format!("{m}: {e}")),
+        Err(e) => ed.error(format!("{}: {e}", if m == LOCAL { "Resuming the chat" } else { &m })),
     });
+    // A session without an id resumes under another, and that one is attached above instead.
+    if !chat.is_empty() {
+        let (m, c) = (machine.to_string(), chat.to_string());
+        request(ed, machine, Request::Attach { chat: chat.to_string() }, move |ed, r| {
+            if r.is_err() && chat_buffer(ed, &m, &c).is_some() {
+                tracing::debug!("{m}: {c} resumed under another id");
+            }
+        });
+    }
+}
+
+/// Start a chat in `dir` on `machine` and show it.
+pub fn new_chat(ed: &mut Editor, machine: &str, dir: &str, model: Option<String>) {
+    let buf = ChatBuffer::new(ed, &json!({"machine": machine, "cwd": dir, "model": model}));
+    let id = ed.add_buffer("*chat*", Box::new(buf));
+    ed.show_buffer(id);
+}
+
+/// Turn chat buffer `id`, a chat with no messages yet, into a new chat in `dir` on `machine`.
+fn move_empty_chat(ed: &mut Editor, id: BufferId, machine: &str, dir: &str) {
+    let m = machine.to_string();
+    let chat = uuid::Uuid::now_v7().to_string();
+    request(ed, machine, Request::New { cwd: dir.to_string(), model: None, thinking: None, chat: Some(chat.clone()) }, move |ed, r| match r {
+        Ok(_) => {
+            // The empty chat it showed is closed where it was.
+            if let Some((was, old)) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| (c.node.machine.clone(), c.chat_id())) {
+                send(ed, &was, Request::Detach { chat: old, close: true });
+            }
+            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &m, &chat));
+            send(ed, &m, Request::Attach { chat });
+        }
+        Err(e) => ed.error(format!("{}: {e}", if m == LOCAL { "this machine" } else { &m })),
+    });
+}
+
+/// A fresh conversation in chat buffer `id`: a new chat where it runs, in its folder, with its
+/// model and thinking level (chat-clear). The one it showed is closed there, its session kept.
+pub fn fresh_chat(ed: &mut Editor, id: BufferId) {
+    let Some((machine, old, state)) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| (c.node.machine.clone(), c.chat_id(), c.state_now())) else { return };
+    let chat = uuid::Uuid::now_v7().to_string();
+    send(ed, &machine, Request::Detach { chat: old, close: true });
+    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| {
+        c.become_remote(ed, &machine, &chat);
+        c.node.state.model = state.model.clone();
+        c.node.state.thinking = state.thinking.clone();
+    });
+    start_chat(ed, &machine, &chat, &state.cwd, state.model, Some(state.thinking));
 }
 
 /// Move chat buffer `id` (running on `from`, None for here) to machine `to` ("local": here),
@@ -819,7 +971,9 @@ pub fn listable(ed: &mut Editor) -> Vec<String> {
 }
 
 /// Ask every listable machine for its saved sessions, quietly; `on_sessions` runs as they come.
+/// This machine's node is asked too: which of its sessions are open or running.
 pub fn fetch_sessions(ed: &mut Editor) {
+    fetch_local_sessions(ed);
     let list = listable(ed);
     ed.remote.sessions_pending = list.len();
     for m in list {
@@ -843,6 +997,20 @@ pub fn fetch_sessions(ed: &mut Editor) {
             }
         });
     }
+}
+
+/// Ask this machine's node which of its sessions are open or running (another device may be
+/// running one); `on_sessions` runs when it answers.
+pub fn fetch_local_sessions(ed: &mut Editor) {
+    request(ed, LOCAL, Request::Sessions { limit: Some(500) }, |ed, r| {
+        if let Ok(Response::Sessions { sessions }) = r {
+            ed.remote.sessions.insert(LOCAL.into(), sessions);
+            if let Some(f) = ed.remote.on_sessions.take() {
+                f(ed);
+                ed.remote.on_sessions.get_or_insert(f);
+            }
+        }
+    });
 }
 
 /// Resume session `path` (a file on `machine`) there, and show it.
@@ -1021,72 +1189,36 @@ async fn carry_folder(src: Option<Arc<Client>>, dst: Option<Arc<Client>>, dir: S
     result
 }
 
-/// The chat's session text: from its file here, or exported by its node.
+/// The chat's session text, exported by its node (`from`; None: this machine's).
 fn fetch_session(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String) {
     let key = format!("remote-move:{id:?}");
     ed.busy_start(&key, &format!("Moving the chat to {}…", to.as_deref().unwrap_or("this machine")));
-    match &from {
-        None => {
-            let text = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.session_path()).flatten().and_then(|p| std::fs::read_to_string(p).ok());
-            match text {
-                Some(text) => deliver(ed, id, from, to, dir, text),
-                None => {
-                    ed.busy_stop(&key);
-                    ed.error("This chat isn't saved (session-save is off), so it can't move");
-                }
-            }
-        }
-        Some(m) => {
-            let chat = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.remote_chat_id()).flatten().unwrap_or_default();
-            request(ed, &m.clone(), Request::Export { chat }, move |ed, r| match r {
-                Ok(Response::Session { text }) => deliver(ed, id, from, to, dir, text),
-                Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
-                Err(e) => moved_failed(ed, id, e),
-            });
-        }
-    }
+    let node = from.clone().unwrap_or_else(|| LOCAL.into());
+    let chat = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat_id()).unwrap_or_default();
+    request(ed, &node, Request::Export { chat }, move |ed, r| match r {
+        Ok(Response::Session { text }) => deliver(ed, id, from, to, dir, text),
+        Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
+        Err(e) => moved_failed(ed, id, e),
+    });
 }
 
-/// Continue the session on `to`, then let the machine it left know.
+/// Continue the session on `to` (None: here), then let the machine it left know.
 fn deliver(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<String>, dir: String, text: String) {
-    let to_name = to.clone().unwrap_or_else(|| "local".into());
-    let leave = move |ed: &mut Editor| match &from {
-        // Marked as moved, and closed there.
-        Some(m) => {
-            let chat = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.remote_chat_id()).flatten().unwrap_or_default();
-            send(ed, &m.clone(), Request::Moved { chat, to: to_name.clone() });
+    let to_name = to.clone().unwrap_or_else(|| LOCAL.into());
+    let (from_node, to_node) = (from.unwrap_or_else(|| LOCAL.into()), to.clone().unwrap_or_else(|| LOCAL.into()));
+    let shown = to.clone().unwrap_or_else(|| "this machine".into());
+    request(ed, &to_node.clone(), Request::Import { session: text, cwd: dir.clone() }, move |ed, r| match r {
+        Ok(Response::Chat { chat }) => {
+            // Marked as moved, and closed where it was.
+            let old = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat_id()).unwrap_or_default();
+            send(ed, &from_node, Request::Moved { chat: old, to: to_name });
+            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &to_node, &chat));
+            send(ed, &to_node, Request::Attach { chat });
+            moved(ed, id, &shown, &dir);
         }
-        None => {
-            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.append_entry(ed, crate::session::MOVED_ENTRY, json!({"to": to_name})));
-        }
-    };
-    match to {
-        None => {
-            let root = crate::session_ui::session_root(ed);
-            let loaded = crate::session::import(&root, &text, std::path::Path::new(&dir)).and_then(|p| crate::session::load(&p));
-            match loaded {
-                Ok(l) => {
-                    leave(ed);
-                    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.continue_here(ed, &l));
-                    moved(ed, id, "this machine", &dir);
-                }
-                Err(e) => moved_failed(ed, id, format!("{e:#}")),
-            }
-        }
-        Some(m) => {
-            let (m2, dir2) = (m.clone(), dir.clone());
-            request(ed, &m, Request::Import { session: text, cwd: dir }, move |ed, r| match r {
-                Ok(Response::Chat { chat }) => {
-                    leave(ed);
-                    ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &m2, &chat));
-                    send(ed, &m2, Request::Attach { chat });
-                    moved(ed, id, &m2, &dir2);
-                }
-                Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
-                Err(e) => moved_failed(ed, id, e),
-            });
-        }
-    }
+        Ok(other) => moved_failed(ed, id, format!("unexpected answer {other:?}")),
+        Err(e) => moved_failed(ed, id, e),
+    });
 }
 
 fn moved(ed: &mut Editor, id: BufferId, to: &str, cwd: &str) {
@@ -1172,22 +1304,119 @@ fn pick_dir(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, String) 
     });
 }
 
-/// Remote chats that were open, to reopen next time (`session-restore-on-start`).
+/// The chats that are open, to show again next time (`session-restore-on-start`): where each
+/// runs, and its session, to resume should its node have closed it meanwhile.
 pub fn open_chats(ed: &Editor) -> Value {
     let list: Vec<Value> = ed
         .buffers
         .values()
-        .filter_map(|s| s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?.remote.as_ref().map(|r| json!({"machine": r.machine, "chat": r.chat})))
+        .filter_map(|s| {
+            let r = &s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?.node;
+            Some(json!({"machine": r.machine, "chat": r.chat, "session": r.state.session}))
+        })
         .collect();
     Value::Array(list)
 }
 
 pub fn reopen(ed: &mut Editor, list: &Value) {
     for v in list.as_array().into_iter().flatten() {
-        if let (Some(m), Some(c)) = (v["machine"].as_str(), v["chat"].as_str()) {
-            open_chat(ed, m, c, false);
+        let (Some(m), Some(c)) = (v["machine"].as_str(), v["chat"].as_str()) else { continue };
+        if chat_buffer(ed, m, c).is_some() {
+            continue;
+        }
+        let buf = ChatBuffer::new(ed, &json!({"machine": m, "chat": c}));
+        ed.add_buffer("*chat*", Box::new(buf));
+        let (m2, c2, session) = (m.to_string(), c.to_string(), v["session"].as_str().map(str::to_string));
+        request(ed, m, Request::Attach { chat: c.to_string() }, move |ed, r| {
+            // Closed there meanwhile (its node stopped, or it was idle and nobody showed it):
+            // it continues from its session.
+            if r.is_err()
+                && let Some(path) = session
+            {
+                resume_into(ed, &m2, &path, &c2);
+            }
+        });
+    }
+}
+
+/// The tools this window runs for the chats it shows, wherever they run: `serpis_lua` and
+/// `serpis_api`, and the ones its Lua defines (a node uses its own of the same name).
+fn lent_specs(ed: &Editor) -> Vec<serpis_proto::wire::ToolSpec> {
+    ed.agent_tools.iter().map(|(_, t)| serpis_proto::wire::ToolSpec { name: t.name().to_string(), description: t.description(), parameters: t.parameters() }).collect()
+}
+
+fn lend(ed: &Editor, c: &Arc<Client>) {
+    c.send(Request::Lend { tools: lent_specs(ed) });
+}
+
+/// Run tool `name` this window lent, for `chat` on `machine`, and answer its node.
+fn run_lent(ed: &mut Editor, machine: &str, chat: String, call: u64, name: String, args: Value) {
+    let tool = ed.agent_tools.iter().find(|(_, t)| t.name() == name).map(|(_, t)| t.clone());
+    let Some(tool) = tool else {
+        return send(ed, machine, Request::ToolDone { call, text: format!("{name} isn't defined in this window any more"), is_error: true });
+    };
+    let mut ctx = serpis_agent::ToolContext::new(ed.cwd.clone());
+    // How serpis_lua finds the chat it runs for.
+    ctx.env.insert("SERPIS_SESSION_ID".into(), chat);
+    let (main, m) = (ed.main_sender(), machine.to_string());
+    ed.rt.spawn(async move {
+        let (text, is_error) = match tool.execute(format!("lent-{call}"), args, ctx).await {
+            Ok(r) => (r.text_content(), r.is_error),
+            Err(e) => (format!("{e:#}"), true),
+        };
+        main.send(move |ed| send(ed, &m, Request::ToolDone { call, text, is_error }));
+    });
+}
+
+/// Once a frame: what changed for the nodes goes to them (tools lent, this machine's settings).
+pub fn tick(ed: &mut Editor) {
+    let up = |ed: &Editor, m: &str| match ed.remote.conns.get(m) {
+        Some(Conn::Up(c)) if c.is_open() => Some(c.clone()),
+        _ => None,
+    };
+    if std::mem::take(&mut ed.remote.tools_changed) {
+        let conns: Vec<Arc<Client>> = ed.remote.conns.values().filter_map(|c| if let Conn::Up(c) = c { Some(c.clone()) } else { None }).collect();
+        for c in conns {
+            lend(ed, &c);
         }
     }
+    if !ed.remote.vars_changed.is_empty()
+        && let Some(c) = up(ed, LOCAL)
+    {
+        c.send(Request::SetVars { vars: std::mem::take(&mut ed.remote.vars_changed) });
+    }
+}
+
+/// The window loaded its config again: so does this machine's node, when it runs.
+pub fn config_reloaded(ed: &mut Editor) {
+    ed.remote.config_loads += 1;
+    if ed.remote.config_loads > 1 && matches!(ed.remote.conns.get(LOCAL), Some(Conn::Up(_))) {
+        reload_node_config(ed);
+    }
+}
+
+fn reload_node_config(ed: &mut Editor) {
+    request(ed, LOCAL, Request::Reload, |ed, r| match r {
+        Ok(Response::Reloaded { errors }) => {
+            for e in errors {
+                ed.warn(format!("this machine's node: {e}"));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => ed.error(format!("this machine's node: {e}")),
+    });
+}
+
+/// models.json or auth.json changed here: this machine's node reads them again.
+pub fn models_changed(ed: &mut Editor) {
+    if matches!(ed.remote.conns.get(LOCAL), Some(Conn::Up(_))) {
+        send(ed, LOCAL, Request::ReloadModels);
+    }
+}
+
+/// A setting changed: this machine's node gets it at the next tick.
+pub fn var_changed(ed: &mut Editor, name: &str, value: &Value) {
+    ed.remote.vars_changed.insert(name.to_string(), value.clone());
 }
 
 pub fn install(ed: &mut Editor) {
@@ -1203,6 +1432,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-carry-directory-plain", json!("~/.serpis/carried/{project}"), "Where a folder that isn't a repository goes when brought along ({project}, {path}); one changed there since is moved aside first.");
     ed.defvar("remote-offer-setup", json!(true), "When a machine has no models or API keys, offer to copy this machine's there (remote-setup does it any time).");
     ed.defvar("remote-setup-declined", Editor::persisted_state("remote-setup-declined").unwrap_or_else(|| json!([])), "Machines not to offer setting up again.");
+    ed.defvar("local-node-binary", json!(""), "The serpis-node this machine's chats run in (\"\": the one beside serpis, else one serpis builds into remote-node-builds). It keeps running when serpis quits; serpis restarts it on a newer build once its chats are idle.");
     ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 
@@ -1225,8 +1455,11 @@ pub fn install(ed: &mut Editor) {
             return Ok(());
         }
         pick_machine(ed, "Run this chat on: ", true, move |ed, m| {
-            if m == "local" {
-                ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_local(ed));
+            if m == LOCAL {
+                if ed.buffer_machine(id).is_some() {
+                    let here = ed.cwd.to_string_lossy().into_owned();
+                    move_empty_chat(ed, id, LOCAL, &here);
+                }
                 return;
             }
             pick_dir(ed, &m.clone(), move |ed, d| move_empty_chat(ed, id, &m, &d));
@@ -1296,10 +1529,10 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
-    ed.define_command("remote-close-chat", "Stop this chat on its machine and close it there (its session stays, to resume). Closing the window or killing the buffer only stops showing it.", o, |ed, _| {
+    ed.define_command("remote-close-chat", "Stop this chat where it runs and close it there (its session stays, to resume). Killing its buffer only stops showing it (and closes it when it is idle and nothing else shows it).", o, |ed, _| {
         let id = crate::commands::current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
-        let Some((m, chat)) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.remote.as_ref().map(|r| (r.machine.clone(), r.chat.clone()))).flatten() else {
-            anyhow::bail!("This chat runs here, not on another machine");
+        let Some((m, chat)) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| (c.node.machine.clone(), c.chat_id())) else {
+            anyhow::bail!("Not a chat buffer");
         };
         send(ed, &m, Request::Close { chat });
         ed.kill_buffer(id);

@@ -204,11 +204,25 @@ From Lua: `serpis.window.focus/move/layout/focus_parent/fullscreen/close/configu
 `serpis.workspace.switch/move_window/list/rename`, and the hooks `workspace-switched` and
 `window-layout-changed`.
 
-## Chats on other machines
+## Chats on any machine
 
-A chat can run on another machine: the agent, its tools and its LLM calls all run there, with
-that machine's files and API keys, and keep running when your laptop sleeps or serpis quits.
-This window shows it and sends what you type.
+Every chat runs in a node (`serpis-node`, one file, no GUI): one per machine and account, which
+runs the agent, its tools, its LLM calls and its session file, with that machine's files and API
+keys. The window only shows chats and sends what you type, chats on this machine included: their
+node is started when serpis needs it (the `serpis-node` beside serpis, `local-node-binary`) and
+keeps running when serpis quits, so a chat keeps going, and serpis on any other machine (or the
+phone) that reaches this one can show it and drive it, live, while you watch it here.
+`chat-resume` marks the chats that are open or running, wherever they run; picking one shows it.
+Closing a chat's window leaves it running if it is working; an idle one nobody else is showing is
+closed, its session kept. A rebuilt serpis restarts this machine's node on the new build once its
+chats are idle.
+
+The node runs the same `init.lua` and extensions as the window, for the chat's side of them: chat
+hooks (`before-prompt`, `before-tool-call`, `assistant-message`, ...), agent tools written in Lua,
+and settings; keymaps, commands and the UI do nothing there (`serpis.where` is `"node"` there,
+`"window"` here). Settings this window changes go to this machine's node, and `reload-config`
+reloads it too. Tools that need the window (`serpis_lua`, `serpis_api`, and Lua tools only the
+window defines) are lent by each window to the chats it shows, wherever they run.
 
 Machines are ssh destinations: `remote-hosts` (`serpis.var.set("remote-hosts", {"gpu-box",
 "me@lab"})`, or `{name, host, env = {...}}` tables), plus the peers of your
@@ -255,7 +269,8 @@ models and keys from `~/.serpis/agent` or `~/.pi/agent` there. When it has none,
 copy this machine's API keys, models.json and default model there (over the ssh connection, into
 files only that account can read), adding only what it lacks; OAuth logins aren't copied, since
 their tokens belong to one machine. `remote-setup` offers it any time, `remote-offer-setup` turns
-the offer off. Extensions aren't copied yet: chats on other machines don't run Lua there. `scripts/ssh-check.sh <host>`
+the offer off. A machine's chats run the Lua config that machine has (`~/.config/serpis` there);
+it isn't copied yet. `scripts/ssh-check.sh <host>`
 runs a whole chat over real ssh in a throwaway directory there, with a mock model.
 
 ## Images
@@ -297,6 +312,9 @@ crates/serpis-ai      pi-ai port: model catalog, auth, API adapters, streaming
 crates/serpis-agent   agent loop + tools (read, bash, edit, write, grep, find, ls, web_search)
 crates/serpis         editor core (dylib): buffers, windows, keymaps, Lua, plugins, UI, packages
 crates/serpis-bin     the `serpis` binary
+crates/serpis-chat    a chat without a window: conversation, agent, session, cache bookkeeping
+crates/serpis-proto   what nodes and their clients say to each other
+crates/serpis-node    the node: runs a machine's chats and their Lua; `serpis-node agent` for ssh
 tests/ui              scripted UI tests (scripts/ui-test.sh)
 docs/PLAN.md          design and roadmap
 ```

@@ -30,6 +30,8 @@ pub struct Sessions {
     cache: HashMap<PathBuf, Info>,
     pub scanned: Option<Instant>,
     scanning: bool,
+    /// A rescan was asked for while one ran: another follows it.
+    again: bool,
     /// Run once the scan in progress finishes.
     waiting: Vec<Box<dyn FnOnce(&mut Editor)>>,
 }
@@ -71,6 +73,8 @@ pub fn scan_then(ed: &mut Editor, force: bool, f: impl FnOnce(&mut Editor) + 'st
     }
     ed.sessions.waiting.push(Box::new(f));
     if ed.sessions.scanning {
+        // The scan under way may have started before what this is for: once more after it.
+        ed.sessions.again |= force;
         return;
     }
     ed.sessions.scanning = true;
@@ -112,41 +116,61 @@ pub fn scan_then(ed: &mut Editor, force: bool, f: impl FnOnce(&mut Editor) + 'st
             for f in std::mem::take(&mut ed.sessions.waiting) {
                 f(ed);
             }
+            // An open session picker shows what the scan found.
+            if let Some(f) = ed.remote.on_sessions.take() {
+                f(ed);
+                ed.remote.on_sessions.get_or_insert(f);
+            }
+            if std::mem::take(&mut ed.sessions.again) {
+                rescan(ed);
+            }
         });
     });
 }
 
-/// The chat showing session `path`, if one does.
+/// The chat showing session `path` (a file on this machine), if one does.
 pub fn chat_with_session(ed: &Editor, path: &Path) -> Option<BufferId> {
     ed.buffers.iter().find_map(|(id, s)| {
         let c = s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?;
-        (c.chat.session.as_ref()?.path == path).then_some(id)
+        (c.node.local() && c.session_path()? == path).then_some(id)
     })
 }
 
-/// The session file a chat records to, once it has one.
+/// The session file a chat of this machine records to, once it has one.
 pub fn session_of(ed: &Editor, id: BufferId) -> Option<PathBuf> {
     let c = ed.buffers.get(id)?.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?;
-    c.chat.session.as_ref().filter(|w| w.exists()).map(|w| w.path.clone())
+    c.node.local().then(|| c.session_path()).flatten()
 }
 
-/// Load session `path` into a chat without showing it: the chat that already has it, else the
-/// current chat when it is empty (`reuse`), else a new one.
+/// Continue session `path` in a chat without showing it: the chat that already has it, else the
+/// current chat when it is empty (`reuse`), else a new one. This machine's node continues it
+/// (or is already running it, for another window).
 pub fn restore(ed: &mut Editor, path: &Path, reuse: bool) -> anyhow::Result<BufferId> {
     if let Some(id) = chat_with_session(ed, path) {
         return Ok(id);
     }
     let loaded = session::load(path)?;
     let cur = ed.current_buffer();
-    let empty = ed.buffers.get(cur).and_then(|s| s.buf.as_ref()).and_then(|b| b.as_any().downcast_ref::<ChatBuffer>()).is_some_and(|c| c.chat.history.is_empty() && !c.running());
+    let empty = ed.buffers.get(cur).and_then(|s| s.buf.as_ref()).and_then(|b| b.as_any().downcast_ref::<ChatBuffer>()).is_some_and(|c| c.is_empty());
+    let chat = if loaded.id.is_empty() { uuid::Uuid::now_v7().to_string() } else { loaded.id.clone() };
+    let p = path.to_string_lossy().into_owned();
+    let cwd = if loaded.cwd.is_dir() { loaded.cwd.clone() } else { ed.cwd.clone() };
     let id = if reuse && empty {
+        let old = ed.with_buffer_as::<ChatBuffer, _>(cur, |c, _| (c.node.machine.clone(), c.chat_id()));
+        if let Some((machine, old)) = old {
+            crate::remote::send(ed, &machine, serpis_proto::wire::Request::Detach { chat: old, close: true });
+        }
+        ed.with_buffer_as::<ChatBuffer, _>(cur, |c, ed| {
+            c.become_remote(ed, crate::remote::LOCAL, &chat);
+            c.node.state.cwd = cwd.to_string_lossy().into_owned();
+            c.node.state.session = Some(p.clone());
+        });
+        crate::remote::resume_into(ed, crate::remote::LOCAL, &p, &chat);
         cur
     } else {
-        let cwd = if loaded.cwd.is_dir() { loaded.cwd.clone() } else { ed.cwd.clone() };
-        ed.create_buffer("chat", Some("*chat*"), &json!({"cwd": cwd.to_string_lossy()}))?
+        ed.create_buffer("chat", Some("*chat*"), &json!({"cwd": cwd.to_string_lossy(), "session": p, "chat": chat}))?
     };
     ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| {
-        c.restore(ed, &loaded);
         // Scripts see the restored chat (serpis.chat.*) at once.
         c.publish(ed, id);
     });
@@ -233,6 +257,12 @@ fn scopes(ed: &mut Editor) -> Vec<Scope> {
     out
 }
 
+/// Whether this machine's node has session `path` open, and running, as it last said (it can
+/// be another device's chat): (open, running).
+fn node_state(ed: &Editor, path: &Path) -> (bool, bool) {
+    ed.remote.sessions.get(crate::remote::LOCAL).and_then(|l| l.iter().find(|s| Path::new(&s.path) == path)).map_or((false, false), |s| (s.open, s.running))
+}
+
 /// The prompt and candidates for `scope` (with what TAB switches to).
 fn listing(ed: &mut Editor, scopes: &[Scope], at: usize) -> (String, Vec<Candidate>) {
     let scope = &scopes[at];
@@ -256,8 +286,11 @@ fn listing(ed: &mut Editor, scopes: &[Scope], at: usize) -> (String, Vec<Candida
                 detail.push_str(&format!(" · {}", m.rsplit('/').next().unwrap_or(m)));
             }
             detail.push_str(&format!(" · {}", source(ed, i)));
-            if open.contains(&i.path) {
-                detail.push_str(" · open");
+            match node_state(ed, &i.path) {
+                (_, true) => detail.push_str(" · running"),
+                (true, _) => detail.push_str(" · open"),
+                _ if open.contains(&i.path) => detail.push_str(" · open"),
+                _ => {}
             }
             Candidate::new(label).detail(detail).value(i.path.to_string_lossy().into_owned())
         })
@@ -272,14 +305,19 @@ fn everywhere(ed: &mut Editor, scopes: &[Scope], at: usize, here: Vec<Info>) -> 
     let show_moved = ed.var("chat-resume-show-moved").and_then(Value::as_bool).unwrap_or(false);
     let ms = |t: Option<std::time::SystemTime>| t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
     // (modified, title, where, detail, value)
+    let mark = |open: bool, running: bool| if running { " · running" } else if open { " · open" } else { "" };
     let mut rows: Vec<(u64, String, String, String, String)> = here
         .iter()
-        .map(|i| (ms(i.modified), i.title(), "here".to_string(), format!("{} · {} msgs", age(i), i.messages), i.path.to_string_lossy().into_owned()))
+        .map(|i| {
+            let (open, running) = node_state(ed, &i.path);
+            (ms(i.modified), i.title(), "here".to_string(), format!("{} · {} msgs{}", age(i), i.messages, mark(open, running)), i.path.to_string_lossy().into_owned())
+        })
         .collect();
-    for (m, list) in &ed.remote.sessions {
+    // This machine's own are listed from its files, above.
+    for (m, list) in ed.remote.sessions.iter().filter(|(m, _)| *m != crate::remote::LOCAL) {
         for s in list.iter().filter(|s| show_moved || s.moved_to.is_none()) {
             let ago = crate::sidebar::fmt_age(std::time::Duration::from_millis(serpis_ai::now_ms().saturating_sub(s.modified)));
-            rows.push((s.modified, s.title.clone(), format!("on {m}"), format!("{ago} · {} msgs", s.messages), format!("@{m}\u{1}{}", s.path)));
+            rows.push((s.modified, s.title.clone(), format!("on {m}"), format!("{ago} · {} msgs{}", s.messages, mark(s.open, s.running)), format!("@{m}\u{1}{}", s.path)));
         }
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0));
@@ -354,6 +392,9 @@ fn pick(ed: &mut Editor, all: bool) {
     }));
     if scopes[at] == Scope::Everywhere {
         show(ed, true);
+    } else {
+        // Which of this machine's are running (here or for another device) shows as it answers.
+        crate::remote::fetch_local_sessions(ed);
     }
     let cycle: crate::minibuffer::CycleFn = std::rc::Rc::new(move |ed: &mut Editor, dir: i32| {
         let n = scopes.len();
@@ -444,8 +485,12 @@ pub fn install(ed: &mut Editor) {
             if !yes {
                 return;
             }
+            // A chat showing it stops: it would write the file again.
             if let Some(id) = chat_with_session(ed, &path) {
-                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat.session = None);
+                if let Some(chat) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat_id()) {
+                    crate::remote::send(ed, crate::remote::LOCAL, serpis_proto::wire::Request::Close { chat });
+                }
+                ed.kill_buffer(id);
             }
             match std::fs::remove_file(&path) {
                 Ok(()) => {

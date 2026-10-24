@@ -77,7 +77,7 @@ fn a_node_over_real_ssh() {
         println!("node on {host}: {} (serpis-node {}), connected in {:?}", c.hello.host, c.hello.serpis, started.elapsed());
         assert_eq!(c.hello.home, format!("{dir}/home"), "the node runs in the throwaway home");
         assert!(far(&host, &ssh_args, &format!("ls {dir}/home/.serpis/bin")).contains("serpis-node-"), "serpis installed its node there");
-        let Response::Chat { chat } = c.call(Request::New { cwd: "~/proj".into(), model: None, thinking: None }).await.unwrap() else { panic!() };
+        let Response::Chat { chat } = c.call(Request::New { cwd: "~/proj".into(), model: None, thinking: None, chat: None }).await.unwrap() else { panic!() };
         c.call(Request::Attach { chat: chat.clone() }).await.unwrap();
         let t = std::time::Instant::now();
         c.call(Request::Prompt { chat: chat.clone(), text: "READ 2".into(), images: vec![], follow_up: false, request_id: Some("ssh-1".into()) }).await.unwrap();

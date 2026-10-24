@@ -13,7 +13,7 @@ pub async fn agent(socket: &Path) -> Result<()> {
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
         Err(_) => {
-            start_detached(socket)?;
+            start_node(&std::env::current_exe().context("finding serpis-node")?, socket)?;
             wait_for(socket).await?
         }
     };
@@ -28,11 +28,10 @@ pub async fn agent(socket: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Start `serpis-node serve` in the background, in a session of its own, so it outlives the
-/// ssh connection that started it; its output goes to `node.log` next to the socket.
-fn start_detached(socket: &Path) -> Result<()> {
+/// Start `exe serve` in the background, in a session of its own, so it outlives whatever
+/// started it (an ssh connection, a window); its output goes to `node.log` next to the socket.
+pub fn start_node(exe: &Path, socket: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let exe = std::env::current_exe().context("finding serpis-node")?;
     let dir = socket.parent().context("the socket path has no directory")?;
     std::fs::create_dir_all(dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("node.log"))?;
@@ -49,7 +48,7 @@ fn start_detached(socket: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for(socket: &Path) -> Result<UnixStream> {
+pub async fn wait_for(socket: &Path) -> Result<UnixStream> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(s) = UnixStream::connect(socket).await {

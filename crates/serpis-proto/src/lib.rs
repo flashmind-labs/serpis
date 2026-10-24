@@ -132,6 +132,15 @@ pub struct ChatState {
     pub cache: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// The session file on the chat's machine, once written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Custom session entries (`serpis.chat.append`): (type, data), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom: Vec<(String, serde_json::Value)>,
+    /// The prompt cache in detail: {hit_rate, state, left, misses}.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub cache_info: serde_json::Value,
 }
 
 #[cfg(test)]

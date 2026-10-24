@@ -1,9 +1,9 @@
 //! Agent chat buffer.
 //!
-//! The chat itself (conversation, agent, session file, cache bookkeeping, compaction) is a
-//! `serpis_chat::Chat`, which knows nothing of windows; this buffer shows its transcript and
-//! sends it what you type. The transcript arrives as `serpis_proto` splices, the same way a
-//! chat running on another machine reaches the window that shows it.
+//! The chat itself (conversation, agent, session file, cache bookkeeping, compaction) runs in a
+//! node, this machine's or another's ([`crate::remote`]); this buffer shows its transcript and
+//! sends it what you type. The transcript arrives as `serpis_proto` splices and the rest as its
+//! `ChatState`, the same for every window (or phone) that shows the chat.
 //!
 //! The transcript is generated styled text (Emacs-style faces and blocks): messages, thinking,
 //! foldable tool cards and diff views. The prompt is an editable area pinned to the bottom.
@@ -11,12 +11,11 @@
 //! motions, vim, search and yank move seamlessly between them.
 
 use std::ops::Range;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, Rect, Stroke, Vec2};
 use serde_json::Value;
-use serpis_agent::{ToolGate, ToolHooks, ToolResult};
+use serpis_proto::wire::Request;
 use serpis_ai::*;
 use serpis_proto::{CacheHit, Entry, Tone};
 
@@ -57,32 +56,61 @@ pub enum Focus {
     Prompt,
 }
 
-/// A chat running on another machine's node, which this buffer shows.
-pub struct RemoteChat {
-    /// The machine (as `remote-hosts` or rayfish names it).
+/// The chat a buffer shows: one running in a machine's node, this machine's
+/// ([`crate::remote::LOCAL`]) or another's.
+pub struct NodeChat {
+    /// The machine: [`crate::remote::LOCAL`], or one of `remote-hosts` / rayfish.
     pub machine: String,
-    /// The chat's id on its node.
+    /// The chat's id on its node (its session id).
     pub chat: String,
     /// The chat as its node last said.
     pub state: serpis_proto::ChatState,
     /// Whether the connection to the node is up.
     pub online: bool,
     main: MainSender,
+    /// Requests waiting for the next tick, where the editor is free to send them.
+    outbox: Vec<(Request, Option<Answer>)>,
 }
 
-impl RemoteChat {
-    /// Send a request about this chat to its node (at the next tick, where the editor is free).
-    fn post(&self, request: serpis_proto::wire::Request) {
-        let m = self.machine.clone();
-        self.main.send(move |ed| crate::remote::send(ed, &m, request));
+type Answer = Box<dyn FnOnce(&mut Editor, Result<serpis_proto::wire::Response, String>)>;
+
+impl NodeChat {
+    fn new(machine: String, chat: String, state: serpis_proto::ChatState, main: MainSender) -> NodeChat {
+        NodeChat { machine, chat, state, online: true, main, outbox: Vec::new() }
+    }
+
+    /// Send a request about this chat to its node, at the next tick. Everything a chat buffer
+    /// asks goes this way, so its requests reach the node in the order they were made.
+    fn post(&mut self, request: Request) {
+        self.outbox.push((request, None));
+        self.main.repaint();
+    }
+
+    /// [`NodeChat::post`], and `done` gets the answer.
+    fn post_then(&mut self, request: Request, done: impl FnOnce(&mut Editor, Result<serpis_proto::wire::Response, String>) + 'static) {
+        self.outbox.push((request, Some(Box::new(done))));
+        self.main.repaint();
+    }
+
+    /// Send what was posted.
+    fn flush(&mut self, ed: &mut Editor) {
+        for (request, done) in self.outbox.drain(..) {
+            match done {
+                Some(done) => crate::remote::request(ed, &self.machine, request, done),
+                None => crate::remote::send(ed, &self.machine, request),
+            }
+        }
+    }
+
+    /// Whether it runs on this machine.
+    pub fn local(&self) -> bool {
+        self.machine == crate::remote::LOCAL
     }
 }
 
 pub struct ChatBuffer {
-    /// The conversation and the agent working on it (unused while the chat runs elsewhere).
-    pub chat: serpis_chat::Chat,
-    /// Set when the chat runs on another machine: what is shown comes from its node.
-    pub remote: Option<RemoteChat>,
+    /// The chat this buffer shows, and where it runs.
+    pub node: NodeChat,
     /// The transcript as last received, and how each entry is shown here.
     entries: Vec<Entry>,
     views: Vec<View>,
@@ -112,101 +140,37 @@ pub struct ChatBuffer {
     show_cache: (bool, bool),
 }
 
-/// What a chat in this editor gets from it: variables, hooks, extension tools, the model
-/// registry, the runtime.
-struct EditorHost<'a>(&'a mut Editor);
-
-impl serpis_chat::Host for EditorHost<'_> {
-    fn var(&self, name: &str) -> Option<Value> {
-        self.0.var(name).cloned()
-    }
-    fn hook(&mut self, chat: &serpis_chat::Chat, name: &str, payload: &Value) -> Vec<Value> {
-        // Handlers read the chat (`serpis.chat.info`) and abort it through what is published.
-        if let Some(id) = self.0.this_buffer() {
-            self.0.chats.insert(id, info_of(chat));
-        }
-        self.0.run_hook(name, payload)
-    }
-    fn notify(&mut self, level: serpis_chat::Level, text: String) {
-        match level {
-            serpis_chat::Level::Info => self.0.message(text),
-            serpis_chat::Level::Warn => self.0.warn(text),
-            serpis_chat::Level::Error => self.0.error(text),
-        }
-    }
-    fn tools(&self) -> Vec<serpis_agent::ToolRef> {
-        agent_tools(self.0)
-    }
-    fn tool_hooks(&self) -> Option<Arc<dyn ToolHooks>> {
-        Some(Arc::new(EditorToolHooks { main: self.0.main_sender(), buffer: self.0.this_buffer().map(crate::editor::buffer_id_to_u64) }))
-    }
-    fn registry(&self) -> &Registry {
-        &self.0.registry
-    }
-    fn runtime(&self) -> tokio::runtime::Handle {
-        self.0.rt.clone()
-    }
-    fn chat_ref(&self) -> Value {
-        self.0.this_buffer().map(crate::editor::buffer_id_to_u64).into()
-    }
-    fn session_root(&self) -> std::path::PathBuf {
-        crate::session_ui::session_root(self.0)
-    }
-    fn session_created(&mut self, cwd: &std::path::Path) {
-        // A project you have chatted in stays in the sidebar with its sessions.
-        if self.0.var("project-remember").and_then(Value::as_bool).unwrap_or(true) {
-            if let Some(root) = self.0.project_root_of(cwd) {
-                crate::sidebar::add_project(self.0, &root);
-            }
-        }
-        crate::session_ui::rescan(self.0);
-    }
-}
-
-/// A chat as seen from outside (`Editor::chats`, `serpis.chat`).
-fn info_of(c: &serpis_chat::Chat) -> crate::chat_api::ChatInfo {
-    crate::chat_api::ChatInfo {
-        model: c.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
-        thinking: c.thinking.as_str().to_string(),
-        running: c.running(),
-        compacting: c.compacting(),
-        usage: c.totals.clone(),
-        title: c.title.clone(),
-        cwd: c.cwd.to_string_lossy().into_owned(),
-        session: c.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),
-        session_id: c.session_id.clone(),
-        entries: c.custom_entries.clone(),
-        agent: c.agent().cloned(),
-        context: c.context(),
-        cache: c.cache_json(),
-        machine: None,
-    }
-}
-
 const PREVIEW_LINES: usize = 10;
 
 impl ChatBuffer {
-    /// A chat in `params.cwd`, else in the editor's directory.
+    /// A chat buffer. `params`: `machine` (default: this one), and what it shows: `chat`, a chat
+    /// running there (attached by whoever made the buffer); `session`, a saved session there to
+    /// continue (its `chat` id when known); else a new chat in `cwd` (default: the editor's
+    /// directory).
     pub fn new(ed: &mut Editor, params: &Value) -> Self {
         let mut view = DocView::default();
         view.follow_tail = true;
         view.padding = egui::vec2(18.0, 12.0);
         let mut prompt = TextArea::new("");
         prompt.view.padding = egui::vec2(14.0, 10.0);
-        let thinking = ed
-            .var_str("agent-thinking")
-            .and_then(|s| ThinkingLevel::parse(&s))
-            .or_else(|| pi_setting("defaultThinkingLevel").and_then(|s| ThinkingLevel::parse(&s)))
-            .unwrap_or(ThinkingLevel::Medium);
-        let init = serpis_chat::ChatInit {
-            cwd: params.get("cwd").and_then(Value::as_str).map(crate::expand_home).unwrap_or_else(|| ed.cwd.clone()),
-            model: default_model(ed),
-            thinking,
+        let machine = params.get("machine").and_then(Value::as_str).unwrap_or(crate::remote::LOCAL).to_string();
+        let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ed.cwd.to_string_lossy().into_owned());
+        let given = params.get("chat").and_then(Value::as_str).map(str::to_string);
+        let session = params.get("session").and_then(Value::as_str).map(str::to_string);
+        // The client names a new chat, so what is typed into it can go before the node answers.
+        let chat = given.clone().unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let local = machine == crate::remote::LOCAL;
+        let state = serpis_proto::ChatState {
+            cwd: cwd.clone(),
+            session_id: chat.clone(),
+            // What the node will say, shown until it does.
+            model: if local { default_model(ed).map(|m| format!("{}/{}", m.provider, m.id)) } else { None },
+            thinking: default_thinking(ed).as_str().to_string(),
+            session: session.clone(),
+            ..Default::default()
         };
-        let main = ed.main_sender();
-        let mut chat = ChatBuffer {
-            chat: serpis_chat::Chat::new(init, Arc::new(move || main.repaint())),
-            remote: None,
+        let c = ChatBuffer {
+            node: NodeChat::new(machine.clone(), chat.clone(), state, ed.main_sender()),
             entries: Vec::new(),
             views: Vec::new(),
             prompt,
@@ -226,20 +190,24 @@ impl ChatBuffer {
             attachments: Vec::new(),
             show_cache: (true, true),
         };
-        chat.sync();
-        chat
-    }
-
-    /// A buffer showing `chat` on `machine` (attach it to receive the chat).
-    pub fn new_remote(ed: &mut Editor, machine: &str, chat: &str) -> Self {
-        let mut c = ChatBuffer::new(ed, &Value::Null);
-        c.become_remote(ed, machine, chat);
+        match (session, given) {
+            (Some(path), _) => crate::remote::resume_into(ed, &machine, &path, &chat),
+            (None, Some(_)) => {}
+            (None, None) => {
+                let model = params.get("model").and_then(Value::as_str).map(str::to_string).or_else(|| if local { ed.var_str("agent-model").filter(|m| !m.is_empty()) } else { None });
+                let thinking = if local { Some(default_thinking(ed).as_str().to_string()) } else { None };
+                crate::remote::start_chat(ed, &machine, &chat, &cwd, model, thinking);
+            }
+        }
         c
     }
 
-    /// Show `chat` on `machine` from now on (this buffer's own chat must be empty).
+    /// Show `chat` on `machine` from now on, instead of what this buffer showed.
     pub fn become_remote(&mut self, ed: &mut Editor, machine: &str, chat: &str) {
-        self.remote = Some(RemoteChat { machine: machine.to_string(), chat: chat.to_string(), state: Default::default(), online: true, main: ed.main_sender() });
+        // What was asked of the chat it showed goes first.
+        self.node.flush(ed);
+        let cwd = std::mem::take(&mut self.node.state.cwd);
+        self.node = NodeChat::new(machine.to_string(), chat.to_string(), serpis_proto::ChatState { cwd, ..Default::default() }, ed.main_sender());
         self.entries.clear();
         self.views.clear();
         self.dirty = true;
@@ -248,125 +216,89 @@ impl ChatBuffer {
         }
     }
 
-    /// Run here again: the (empty) chat on the other machine is closed there.
-    pub fn become_local(&mut self, ed: &mut Editor) {
-        let Some(r) = self.remote.take() else { return };
-        r.post(serpis_proto::wire::Request::Close { chat: r.chat.clone() });
-        self.entries.clear();
-        self.views.clear();
-        self.apply_splice(self.chat.full_splice());
-        if let Some(id) = ed.this_buffer() {
-            self.publish(ed, id);
-        }
-    }
-
-    /// Continue here a chat that ran elsewhere (its session written here): what this buffer showed
-    /// gives way to it, and its instructions are this folder's.
-    pub fn continue_here(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
-        self.remote = None;
-        self.chat.clear();
-        self.entries.clear();
-        self.views.clear();
-        self.restore(ed, l);
-        self.chat.refresh_context();
-    }
-
-    /// The session file this chat is saved in, when it runs here.
+    /// The session file this chat is saved in, on its machine.
     pub fn session_path(&self) -> Option<std::path::PathBuf> {
-        self.remote.is_none().then(|| self.chat.session.as_ref().filter(|w| w.exists()).map(|w| w.path.clone())).flatten()
+        self.node.state.session.as_ref().map(std::path::PathBuf::from)
     }
 
     /// No messages yet: the chat can still move to another machine as it is.
     pub fn is_empty(&self) -> bool {
-        match &self.remote {
-            Some(_) => !self.entries.iter().any(|e| matches!(e, Entry::User { .. })),
-            None => self.chat.history.is_empty() && !self.chat.running(),
-        }
+        !self.entries.iter().any(|e| matches!(e, Entry::User { .. })) && !self.node.state.running
     }
 
-    pub fn remote_chat_id(&self) -> Option<String> {
-        self.remote.as_ref().map(|r| r.chat.clone())
+    pub fn chat_id(&self) -> String {
+        self.node.chat.clone()
     }
 
     pub fn set_online(&mut self, online: bool) {
-        if let Some(r) = &mut self.remote {
-            r.online = online;
-            self.dirty = true;
-        }
+        self.node.online = online;
+        self.dirty = true;
     }
 
     /// Something the chat's node sent about it.
-    pub fn remote_event(&mut self, ed: &mut Editor, ev: serpis_proto::wire::Event) {
+    pub fn node_event(&mut self, ed: &mut Editor, ev: serpis_proto::wire::Event) {
         use serpis_proto::wire::{Event, NoticeLevel};
-        let Some(r) = &mut self.remote else { return };
+        let r = &mut self.node;
         r.online = true;
-        let machine = r.machine.clone();
+        let at = if r.local() { String::new() } else { format!("{}: ", r.machine) };
         match ev {
-            Event::Splice { splice, .. } => self.apply_splice(splice),
+            Event::Splice { splice, .. } => {
+                let users = |c: &ChatBuffer| c.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count();
+                let before = users(self);
+                self.apply_splice(splice);
+                // A message was sent (and written to the session): the session list changes.
+                if self.node.local() && self.node.state.session.is_some() && users(self) > before {
+                    crate::session_ui::rescan(ed);
+                }
+                // Up and down recall what was sent in this chat, wherever it was typed.
+                if self.prompt_history.is_empty() {
+                    self.prompt_history = self.entries.iter().filter_map(|e| if let Entry::User { text, .. } = e { Some(text.clone()) } else { None }).collect();
+                }
+            }
             Event::State { state, .. } => {
-                let was = r.state.running;
+                let (was, had_session) = (r.state.running, r.state.session.is_some());
                 r.state = state;
                 match (was, r.state.running) {
                     (false, true) => self.started = Some(Instant::now()),
                     (true, false) => self.started = None,
                     _ => {}
                 }
+                // Its first message wrote its session: it is listed with this machine's, and the
+                // list is read again as runs start and end (what it says changes).
+                if r.local() && r.state.session.is_some() {
+                    if !had_session {
+                        session_created(ed, std::path::Path::new(&r.state.cwd));
+                    } else if was != r.state.running {
+                        crate::session_ui::rescan(ed);
+                    }
+                }
                 self.dirty = true;
             }
             Event::Notice { level, text, .. } => match level {
-                NoticeLevel::Info => ed.message(format!("{machine}: {text}")),
-                NoticeLevel::Warn => ed.warn(format!("{machine}: {text}")),
-                NoticeLevel::Error => ed.error(format!("{machine}: {text}")),
+                NoticeLevel::Info => ed.message(format!("{at}{text}")),
+                NoticeLevel::Warn => ed.warn(format!("{at}{text}")),
+                NoticeLevel::Error => ed.error(format!("{at}{text}")),
             },
             Event::Closed { .. } => {
                 r.online = false;
-                ed.warn(format!("The chat was closed on {machine}"));
+                let m = if r.local() { "this machine".to_string() } else { r.machine.clone() };
+                ed.warn(format!("The chat was closed on {m}"));
             }
+            Event::Message { .. } | Event::ToolCall { .. } => {}
         }
         if let Some(id) = ed.this_buffer() {
             self.publish(ed, id);
         }
     }
 
-    /// The chat as the header, composer and sidebar show it, wherever it runs.
+    /// The chat as the header, composer and sidebar show it.
     pub fn state_now(&self) -> serpis_proto::ChatState {
-        match &self.remote {
-            Some(r) => r.state.clone(),
-            None => self.chat.state(),
-        }
+        self.node.state.clone()
     }
 
     /// The model's id without its provider, or None.
     fn model_short(&self) -> Option<String> {
-        match &self.remote {
-            Some(r) => r.state.model.as_deref().map(|m| short_model(m.split_once('/').map_or(m, |(_, id)| id)).to_string()),
-            None => self.chat.model.as_ref().map(|m| short_model(&m.id).to_string()),
-        }
-    }
-
-    /// Show what changed in the chat since the last time.
-    fn sync(&mut self) {
-        if self.remote.is_some() {
-            return;
-        }
-        if let Some(s) = self.chat.take_splice() {
-            self.apply_splice(s);
-        }
-        match (self.chat.running(), self.started) {
-            (true, None) => self.started = Some(Instant::now()),
-            (false, Some(_)) => self.started = None,
-            _ => {}
-        }
-    }
-
-    /// Run `f` on the chat with this editor as its host, then show what it changed.
-    fn with_host<R>(&mut self, ed: &mut Editor, f: impl FnOnce(&mut serpis_chat::Chat, &mut EditorHost) -> R) -> R {
-        let r = f(&mut self.chat, &mut EditorHost(ed));
-        self.sync();
-        if let Some(id) = ed.this_buffer() {
-            self.publish(ed, id);
-        }
-        r
+        self.node.state.model.as_deref().map(|m| short_model(m.split_once('/').map_or(m, |(_, id)| id)).to_string())
     }
 
     /// Show a transcript splice. Entries that stay the same thing (the same tool call, the
@@ -402,66 +334,47 @@ impl ChatBuffer {
     }
 
     pub fn running(&self) -> bool {
-        match &self.remote {
-            Some(r) => r.state.running,
-            None => self.chat.running(),
-        }
+        self.node.state.running
     }
 
     pub fn abort(&mut self) {
-        match &self.remote {
-            Some(r) => r.post(serpis_proto::wire::Request::Abort { chat: r.chat.clone() }),
-            None => self.chat.abort(),
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.chat.clear();
-        self.sync();
+        self.node.post(Request::Abort { chat: self.node.chat.clone() });
     }
 
     pub fn set_model(&mut self, m: Model) {
-        match &self.remote {
-            Some(r) => r.post(serpis_proto::wire::Request::SetModel { chat: r.chat.clone(), model: format!("{}/{}", m.provider, m.id) }),
-            None => self.chat.set_model(m),
-        }
+        self.set_model_spec(&format!("{}/{}", m.provider, m.id));
+    }
+
+    /// Use model `spec` (`provider/id`, one of the chat's machine).
+    pub fn set_model_spec(&mut self, spec: &str) {
+        self.node.post(Request::SetModel { chat: self.node.chat.clone(), model: spec.to_string() });
+        // Shown at once; the node says so too, or why not.
+        self.node.state.model = Some(spec.to_string());
         self.dirty = true;
     }
 
-    /// Use model `spec` (`provider/id`) on the chat's machine.
-    pub fn set_remote_model(&mut self, spec: &str) {
-        if let Some(r) = &self.remote {
-            r.post(serpis_proto::wire::Request::SetModel { chat: r.chat.clone(), model: spec.to_string() });
-        }
+    /// The thinking levels its model supports (all, when this window doesn't know the model).
+    pub fn thinking_levels(&self, ed: &Editor) -> Vec<ThinkingLevel> {
+        self.node.state.model.as_deref().and_then(|m| ed.find_model(m)).map(|m| serpis_ai::supported_thinking_levels(&m)).unwrap_or_else(|| ThinkingLevel::ALL.to_vec())
     }
 
-    pub fn cycle_thinking(&mut self) {
-        match &self.remote {
-            Some(r) => {
-                // The node clamps the level to what its model supports.
-                let levels = ThinkingLevel::ALL;
-                let now = ThinkingLevel::parse(&r.state.thinking).unwrap_or(ThinkingLevel::Medium);
-                let next = levels[(levels.iter().position(|l| *l == now).unwrap_or(0) + 1) % levels.len()];
-                r.post(serpis_proto::wire::Request::SetThinking { chat: r.chat.clone(), level: next.as_str().into() });
-            }
-            None => self.chat.cycle_thinking(),
-        }
+    pub fn cycle_thinking(&mut self, ed: &Editor) -> ThinkingLevel {
+        let levels = self.thinking_levels(ed);
+        let now = self.thinking_level();
+        let next = levels[(levels.iter().position(|l| *l == now).map_or(0, |p| p + 1)) % levels.len()];
+        self.set_thinking(next);
+        next
     }
 
     pub fn set_thinking(&mut self, level: ThinkingLevel) {
-        match &self.remote {
-            Some(r) => r.post(serpis_proto::wire::Request::SetThinking { chat: r.chat.clone(), level: level.as_str().into() }),
-            None => self.chat.set_thinking(level),
-        }
+        self.node.post(Request::SetThinking { chat: self.node.chat.clone(), level: level.as_str().into() });
+        self.node.state.thinking = level.as_str().to_string();
         self.dirty = true;
     }
 
     /// The thinking level, as shown.
     pub fn thinking_level(&self) -> ThinkingLevel {
-        match &self.remote {
-            Some(r) => ThinkingLevel::parse(&r.state.thinking).unwrap_or(ThinkingLevel::Medium),
-            None => self.chat.thinking,
-        }
+        ThinkingLevel::parse(&self.node.state.thinking).unwrap_or(ThinkingLevel::Medium)
     }
 
     /// Send the prompt: start a run, or steer the running one.
@@ -473,56 +386,53 @@ impl ChatBuffer {
         self.prompt.clear();
         self.prompt_history.push(text.clone());
         self.history_index = None;
-        if !self.submit(ed, text.clone(), follow_up) {
-            // Refused (a before-prompt hook): keep the text to edit or send later.
-            self.prompt.set_text(&text);
-            self.prompt.move_to_end();
-        }
+        self.submit(ed, text, follow_up);
     }
 
     /// Submit text as a user message (also used by Lua `serpis.agent.prompt`), with the images
-    /// waiting in the composer. Returns false when it was refused (a `before-prompt` hook's
-    /// `{block = "reason"}`, no model, a compaction running); the images stay attached then.
-    pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) -> bool {
-        let images: Vec<serpis_proto::Image> = self.attachments.iter().map(|a| serpis_proto::Image { mime: a.encoded.mime.clone(), data: a.encoded.data.to_string() }).collect();
-        if let Some(r) = &self.remote {
-            // The node answers refusals as notices; a lost reply is safe to retry with its id.
-            let request_id = Some(uuid::Uuid::now_v7().to_string());
-            crate::remote::send(ed, &r.machine.clone(), serpis_proto::wire::Request::Prompt { chat: r.chat.clone(), text, images, follow_up, request_id });
-            self.attachments.clear();
-            self.view.follow_tail = true;
-            return true;
-        }
-        let ok = self.with_host(ed, |c, h| c.submit(h, text, images, follow_up, None)).is_ok();
-        if ok {
-            self.attachments.clear();
-            self.view.follow_tail = true;
-        }
-        ok
+    /// waiting in the composer. Refused (a `before-prompt` hook's `{block = "reason"}`, no model,
+    /// a compaction running), the reason is shown and the text and images come back to the
+    /// composer, to edit or send later.
+    pub fn submit(&mut self, ed: &mut Editor, text: String, follow_up: bool) {
+        let attachments = std::mem::take(&mut self.attachments);
+        let images: Vec<serpis_proto::Image> = attachments.iter().map(|a| serpis_proto::Image { mime: a.encoded.mime.clone(), data: a.encoded.data.to_string() }).collect();
+        // A lost reply is safe to retry with its id.
+        let request_id = Some(uuid::Uuid::now_v7().to_string());
+        let request = Request::Prompt { chat: self.node.chat.clone(), text: text.clone(), images, follow_up, request_id };
+        self.view.follow_tail = true;
+        let (machine, chat, local) = (self.node.machine.clone(), self.node.chat.clone(), self.node.local());
+        self.node.post_then(request, move |ed, r| {
+            let Err(why) = r else { return };
+            ed.warn(if local { why } else { format!("{machine}: {why}") });
+            if let Some(id) = crate::remote::chat_buffer(ed, &machine, &chat) {
+                ed.with_buffer_as::<ChatBuffer, _>(id, move |c, _| {
+                    if c.prompt.doc.is_empty() {
+                        c.prompt.set_text(&text);
+                        c.prompt.move_to_end();
+                    }
+                    if c.attachments.is_empty() {
+                        c.attachments = attachments;
+                    }
+                });
+            }
+        });
+        // Sent now, after what was asked before it.
+        self.node.flush(ed);
     }
 
     /// Replace the messages before a cut point with a summary (chat-compact).
-    pub fn compact(&mut self, ed: &mut Editor, reason: CompactReason, instructions: Option<String>) {
-        if let Some(r) = &self.remote {
-            return r.post(serpis_proto::wire::Request::Compact { chat: r.chat.clone(), instructions });
-        }
-        self.with_host(ed, |c, h| c.compact(h, reason, instructions));
+    pub fn compact(&mut self, instructions: Option<String>) {
+        self.node.post(Request::Compact { chat: self.node.chat.clone(), instructions });
     }
 
     pub fn context(&self) -> (Option<u64>, u64) {
-        match &self.remote {
-            Some(r) => r.state.context,
-            None => self.chat.context(),
-        }
+        self.node.state.context
     }
 
     /// `↑12k ↓3.4k R1.2M W40k $1.234 45.2%/200k`, as pi's footer: the session's input, output,
     /// cache reads and writes, cost, then context used of the window.
     pub fn usage_label(&self) -> String {
-        let u = &match &self.remote {
-            Some(r) => r.state.usage.clone(),
-            None => self.chat.totals.clone(),
-        };
+        let u = &self.node.state.usage;
         let mut parts = vec![format!("↑{}", fmt_tokens(u.input)), format!("↓{}", fmt_tokens(u.output))];
         if u.cache_read > 0 {
             parts.push(format!("R{}", fmt_tokens(u.cache_read)));
@@ -538,18 +448,29 @@ impl ChatBuffer {
         parts.join(" ")
     }
 
-    /// The transcript as shown (as of the last frame that drew it).
-    pub fn transcript_text(&self) -> String {
+    /// The transcript as shown, brought up to date first when it changed since it was drawn (a
+    /// chat that isn't on screen).
+    pub fn transcript_text(&mut self, ed: &Editor) -> String {
+        if self.dirty {
+            self.rebuild(ed);
+        }
         self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 
     /// Rebuild the system prompt with the next message (AGENTS.md / CLAUDE.md, prompt vars).
     pub fn refresh_context(&mut self) {
-        self.chat.refresh_context();
+        self.node.post(Request::RefreshContext { chat: self.node.chat.clone() });
     }
 
+    /// The prompt cache: {hit_rate, state = "warm"|"cold"|nil, left (seconds), misses}.
     pub fn cache_json(&self) -> Value {
-        self.chat.cache_json()
+        serpis_chat::cache_json_at(&self.node.state.cache_info, std::time::SystemTime::now())
+    }
+
+    /// What throwing the warm cache away would cost on the next message: (tokens, dollars).
+    pub fn cache_invalidation(&self) -> Option<(u64, f64)> {
+        let i = self.node.state.cache_info.get("invalidation")?;
+        Some((i["tokens"].as_u64()?, i["cost"].as_f64()?))
     }
 
     /// Attach an image file to the next message.
@@ -563,8 +484,7 @@ impl ChatBuffer {
 
     /// This chat as seen from outside (`Editor::chats`, `serpis.chat`).
     pub fn info(&self) -> crate::chat_api::ChatInfo {
-        let Some(r) = &self.remote else { return info_of(&self.chat) };
-        let s = &r.state;
+        let s = &self.node.state;
         crate::chat_api::ChatInfo {
             model: s.model.clone(),
             thinking: s.thinking.clone(),
@@ -573,13 +493,13 @@ impl ChatBuffer {
             usage: s.usage.clone(),
             title: s.title.clone(),
             cwd: s.cwd.clone(),
-            session: None,
-            session_id: r.chat.clone(),
-            entries: Vec::new(),
-            agent: None,
+            session: s.session.clone(),
+            session_id: self.node.chat.clone(),
+            entries: s.custom.clone(),
             context: s.context,
-            cache: Value::Null,
-            machine: Some(r.machine.clone()),
+            cache: self.cache_json(),
+            machine: (!self.node.local()).then(|| self.node.machine.clone()),
+            node: (self.node.machine.clone(), self.node.chat.clone()),
         }
     }
 
@@ -588,24 +508,15 @@ impl ChatBuffer {
     }
 
     /// Record a custom entry in the session (created if needed) and keep it for resume.
-    pub fn append_entry(&mut self, ed: &mut Editor, kind: &str, data: Value) {
-        self.with_host(ed, |c, h| c.append_entry(h, kind, data));
+    pub fn append_entry(&mut self, kind: &str, data: Value) {
+        self.node.post(Request::Append { chat: self.node.chat.clone(), kind: kind.to_string(), data: data.clone() });
+        // Read back at once, before the node's next state says it.
+        self.node.state.custom.push((kind.to_string(), data));
     }
 
     /// Name the session (`session_info`), e.g. after `buffer-set-title`.
-    pub fn set_session_name(&mut self, ed: &mut Editor, name: &str) {
-        self.with_host(ed, |c, h| c.set_session_name(h, name));
-    }
-
-    /// Show a saved conversation and continue it: later messages append to the same file.
-    pub fn restore(&mut self, ed: &mut Editor, l: &crate::session::Loaded) {
-        self.with_host(ed, |c, h| c.restore(h, l));
-        for m in &l.messages {
-            if let Message::User { content, .. } = m {
-                self.prompt_history.push(serpis_chat::user_parts(content).0);
-            }
-        }
-        self.view.follow_tail = true;
+    pub fn set_session_name(&mut self, name: &str) {
+        self.node.post(Request::Rename { chat: self.node.chat.clone(), name: name.to_string() });
     }
 
     // ------------------------------------------------------------------
@@ -1457,59 +1368,28 @@ pub fn default_model(ed: &Editor) -> Option<Model> {
     serpis_chat::default_model(&ed.registry, ed.var_str("agent-model").as_deref())
 }
 
+/// `agent-thinking`, then pi's `defaultThinkingLevel`, else medium.
+pub fn default_thinking(ed: &Editor) -> ThinkingLevel {
+    ed.var_str("agent-thinking")
+        .and_then(|s| ThinkingLevel::parse(&s))
+        .or_else(|| pi_setting("defaultThinkingLevel").and_then(|s| ThinkingLevel::parse(&s)))
+        .unwrap_or(ThinkingLevel::Medium)
+}
+
+/// A chat on this machine wrote its session for the first time, in `cwd`.
+fn session_created(ed: &mut Editor, cwd: &std::path::Path) {
+    // A project you have chatted in stays in the sidebar with its sessions.
+    if ed.var("project-remember").and_then(Value::as_bool).unwrap_or(true) {
+        if let Some(root) = ed.project_root_of(cwd) {
+            crate::sidebar::add_project(ed, &root);
+        }
+    }
+    crate::session_ui::rescan(ed);
+}
+
 pub use serpis_chat::pi_setting;
 
 /// Runs `before-tool-call` / `after-tool-call` editor hooks on the UI thread.
-struct EditorToolHooks {
-    main: MainSender,
-    /// The chat whose agent calls the tools (hook payloads' `buffer`).
-    buffer: Option<u64>,
-}
-
-impl ToolHooks for EditorToolHooks {
-    fn before_tool_call(&self, name: &str, args: Value) -> futures::future::BoxFuture<'static, ToolGate> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let name = name.to_string();
-        let a = args.clone();
-        let buffer = self.buffer;
-        self.main.send(move |ed| {
-            // Apply the chat's pending events first (the response asking for this tool), so
-            // hooks see what it cost and what assistant-message hooks did about it.
-            if let Some(b) = buffer {
-                ed.with_buffer(crate::editor::buffer_id_from_u64(b), |c, ed| c.poll(ed));
-            }
-            let results = ed.run_hook("before-tool-call", &serde_json::json!({"buffer": buffer, "name": name, "args": a}));
-            let gate = results.into_iter().find_map(|r| {
-                if let Some(reason) = r.get("block").and_then(Value::as_str) {
-                    Some(ToolGate::Block(reason.to_string()))
-                } else {
-                    r.get("args").cloned().map(ToolGate::Allow)
-                }
-            });
-            let _ = tx.send(gate);
-        });
-        Box::pin(async move { rx.await.ok().flatten().unwrap_or(ToolGate::Allow(args)) })
-    }
-
-    fn after_tool_call(&self, name: &str, result: ToolResult) -> futures::future::BoxFuture<'static, ToolResult> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let name = name.to_string();
-        let text = result.text_content();
-        let is_error = result.is_error;
-        let buffer = self.buffer;
-        self.main.send(move |ed| {
-            let results = ed.run_hook("after-tool-call", &serde_json::json!({"buffer": buffer, "name": name, "text": text, "isError": is_error}));
-            let _ = tx.send(results.into_iter().find_map(|r| r.get("text").and_then(Value::as_str).map(str::to_string)));
-        });
-        Box::pin(async move {
-            match rx.await.ok().flatten() {
-                Some(text) => ToolResult { content: vec![UserContent::Text { text }], ..result },
-                None => result,
-            }
-        })
-    }
-}
-
 struct Lines<'a>(&'a [StyledLine]);
 impl LineSource for Lines<'_> {
     fn len(&self) -> usize {
@@ -1529,7 +1409,7 @@ impl Buffer for ChatBuffer {
     }
 
     fn poll(&mut self, ed: &mut Editor) {
-        self.with_host(ed, |c, h| c.poll(h));
+        self.node.flush(ed);
         if self.running() {
             // Keep elapsed timers ticking.
             self.dirty = true;
@@ -1543,7 +1423,7 @@ impl Buffer for ChatBuffer {
             self.show_cache = show;
             self.dirty = true;
         }
-        if show.1 && self.remote.is_none() && matches!(self.chat.cache.state(Instant::now()), Some(crate::cache_watch::State::Warm(_))) {
+        if show.1 && self.cache_json()["state"] == "warm" {
             ui.ctx().request_repaint_after(Duration::from_secs(30));
         }
         // A centered reading column; tables are laid out for its width.
@@ -1706,10 +1586,11 @@ impl Buffer for ChatBuffer {
             run = Some("chat-select-thinking");
         }
         // Where the chat runs: this machine, or another one's node.
-        let machine = match &self.remote {
-            Some(r) if r.online => format!("⇄ {}", r.machine),
-            Some(r) => format!("⇄ {} · offline", r.machine),
-            None => "local".to_string(),
+        let machine = match &self.node {
+            r if r.local() && r.online => "local".to_string(),
+            r if r.local() => "local · offline".to_string(),
+            r if r.online => format!("⇄ {}", r.machine),
+            r => format!("⇄ {} · offline", r.machine),
         };
         let (wr, clicked) = pill(ui, tr.right() + 2.0 * k, "machine", &machine, "Where this chat runs (chat-select-machine)", None);
         if clicked {
@@ -1810,7 +1691,8 @@ impl Buffer for ChatBuffer {
         let mut status = vec![model];
         let mut status_commands = vec![Some("chat-select-model".into())];
         // Where it runs: clicking it chooses another machine (for a chat with no messages yet).
-        if let Some(r) = &self.remote {
+        let r = &self.node;
+        if !r.local() {
             status.insert(0, if r.online { format!("⇄ {}", r.machine) } else { format!("⇄ {} · offline", r.machine) });
             status_commands.insert(0, Some("chat-select-machine".into()));
         }
@@ -1830,7 +1712,7 @@ impl Buffer for ChatBuffer {
         if s.running {
             return Activity { since: self.started, ..Activity::new(ActivityState::Working, s.step.unwrap_or_else(|| "working".into())) };
         }
-        if self.remote.as_ref().is_some_and(|r| !r.online) {
+        if !self.node.online {
             return Activity::new(ActivityState::Error, "offline");
         }
         match &s.last_error {
@@ -1841,23 +1723,19 @@ impl Buffer for ChatBuffer {
     }
 
     fn on_kill(&mut self, ed: &mut Editor) {
-        match &self.remote {
-            // Closing the view of a chat elsewhere leaves it running there (remote-close-chat
-            // stops it).
-            Some(r) => crate::remote::send(ed, &r.machine.clone(), serpis_proto::wire::Request::Detach { chat: r.chat.clone() }),
-            None => self.abort(),
-        }
+        // Closing the view leaves a running chat running (remote-close-chat stops it); an idle
+        // one nobody else shows is closed, its session kept to resume.
+        self.node.post(Request::Detach { chat: self.node.chat.clone(), close: true });
+        self.node.flush(ed);
     }
 
     fn directory(&self) -> Option<std::path::PathBuf> {
-        match &self.remote {
-            Some(r) => (!r.state.cwd.is_empty()).then(|| std::path::PathBuf::from(&r.state.cwd)),
-            None => Some(self.chat.cwd.clone()),
-        }
+        let cwd = &self.node.state.cwd;
+        (!cwd.is_empty()).then(|| std::path::PathBuf::from(cwd))
     }
 
     fn machine(&self) -> Option<String> {
-        self.remote.as_ref().map(|r| r.machine.clone())
+        (!self.node.local()).then(|| self.node.machine.clone())
     }
 
     fn parts(&self) -> usize {
@@ -1989,25 +1867,10 @@ impl TextSurface for ChatBuffer {
 
 /// The tools a chat's agent gets: the built-in ones, then extension tools (which replace
 /// built-ins of the same name), minus agent-disabled-tools.
-fn agent_tools(ed: &Editor) -> Vec<serpis_agent::ToolRef> {
-    let mut tools = serpis_agent::builtin_tools();
-    for (_, t) in &ed.agent_tools {
-        tools.retain(|x| x.name() != t.name());
-        tools.push(t.clone());
-    }
-    let disabled: Vec<String> = ed
-        .var("agent-disabled-tools")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-        .unwrap_or_default();
-    tools.retain(|t| !disabled.iter().any(|d| d == t.name()));
-    tools
-}
-
 /// Whether to warn about `action` throwing away a cache worth `cost` dollars (cache-warn,
 /// cache-warn-actions, cache-warn-threshold).
 pub fn cache_warning_applies(ed: &mut Editor, action: &str, cost: f64) -> bool {
-    serpis_chat::cache_warning_applies(&EditorHost(ed), action, cost)
+    serpis_chat::cache_warning_applies(&|name: &str| ed.var(name).cloned(), action, cost)
 }
 
 #[cfg(test)]

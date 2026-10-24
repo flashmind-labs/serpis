@@ -109,9 +109,16 @@ local function steps(list)
   go()
 end
 
--- Who served each response, from the assistant-message hook.
-local upstreams = {}
-serpis.hook.add("assistant-message", function(p) table.insert(upstreams, p.upstream or "?") end)
+-- Who served each response, from the assistant-message hook. A chat's hooks run where the chat
+-- does, in this machine's node, so it is an extension (the node loads the config when it starts),
+-- and it keeps what it sees in the chat's entries.
+do
+  os.execute("mkdir -p '" .. serpis.config_dir .. "/extensions'")
+  local f = io.open(serpis.config_dir .. "/extensions/upstreams.lua", "w")
+  f:write([[serpis.hook.add("assistant-message", function(p) serpis.chat.append(p.buffer, "upstream", { name = p.upstream or "?" }) end)]])
+  f:close()
+  serpis.reload()
+end
 
 steps({
   function()
@@ -254,7 +261,8 @@ steps({
     T.check("every request, before and after the resume, has one session id", n, 1)
     T.check("cache writes are 1-hour by default (agent-cache-retention)", long, true)
     T.check("no request was rejected", sh("grep -c rejected '" .. log .. "'"):gsub("%s+", ""), "0")
-    T.check("responses name their OpenRouter upstream", #upstreams > 0 and upstreams[1]:match("^upstream%-[ab]$") ~= nil, true)
+    local upstreams = serpis.chat.entries(chat, "upstream")
+    T.check("responses name their OpenRouter upstream", #upstreams > 0 and upstreams[1].name:match("^upstream%-[ab]$") ~= nil, true)
     -- For cache_restore.lua: the chat stays open, and CLAUDE.md changes while serpis is closed.
     local fh = io.open(os.getenv("SERPIS_TEST_OUT") .. ".path", "w")
     fh:write(serpis.session.of(chat))

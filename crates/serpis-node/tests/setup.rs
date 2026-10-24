@@ -22,7 +22,7 @@ fn a_machine_gets_what_it_lacks_and_keeps_what_it_has() {
     unsafe { std::env::set_var("HOME", &home) };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let socket = node_dir.join("n.sock");
-    let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(home.join(".serpis/agent")) }, rt.handle().clone()).unwrap();
+    let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(home.join(".serpis/agent")), config_dir: Some(home.join(".config/serpis")) }, rt.handle().clone()).unwrap();
     rt.block_on(async {
         let (c, _) = Client::connect(&Target::Local(socket.clone()), "setup-test").await.unwrap();
         let mut providers = c.hello.setup.providers.clone();

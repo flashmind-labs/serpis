@@ -3,6 +3,8 @@
 //! - `serpis-node serve`: run the node here, in the foreground.
 //! - `serpis-node agent`: join stdin and stdout to the node (what `ssh <host> serpis-node agent`
 //!   runs), starting it if none is running.
+//! - `serpis-node stop`: stop the node running here, if any (its open chats come back when it
+//!   starts again).
 //! - `serpis-node version`.
 
 fn main() -> anyhow::Result<()> {
@@ -20,6 +22,14 @@ fn main() -> anyhow::Result<()> {
         }
         // stdout is the protocol: logs go to stderr, which ssh shows the client.
         Some("agent") => rt.block_on(serpis_node::bridge::agent(&serpis_node::socket_path())),
+        Some("stop") => rt.block_on(async {
+            let target = serpis_node::client::Target::Local(serpis_node::socket_path());
+            match serpis_node::client::Client::connect(&target, "serpis-node stop").await {
+                Ok((c, _)) => c.call(serpis_proto::wire::Request::Stop).await.map(|_| ()),
+                // None running: nothing to stop.
+                Err(_) => Ok(()),
+            }
+        }),
         // What node builds of these sources are kept under (scripts/build-node.sh --store).
         Some("stamp") => {
             println!("{}", serpis_node::STAMP);
@@ -30,7 +40,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: serpis-node serve | agent | version | stamp");
+            eprintln!("usage: serpis-node serve | agent | stop | version | stamp");
             std::process::exit(2);
         }
     }

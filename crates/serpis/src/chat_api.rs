@@ -1,9 +1,8 @@
 //! Chats as an API: what each chat is doing (model, thinking, usage, session entries) and ways
 //! to act on it, for Lua (`serpis.chat`), plugins and the chat's own hooks.
 //!
-//! A chat is borrowed out of the editor while it handles agent events, so hooks it fires can't
-//! reach it directly. Reads use the snapshot it keeps in `Editor::chats`; aborts use the agent
-//! handle in it at once, and other actions on a busy chat run at the start of the next tick.
+//! Chats run in nodes (this machine's included), so reads use the snapshot each chat buffer keeps
+//! in `Editor::chats` from what its node last said, and actions are requests to its node.
 
 use serde_json::{Value, json};
 use serpis_ai::{Model, ThinkingLevel, Usage};
@@ -32,12 +31,12 @@ pub struct ChatInfo {
     pub entries: Vec<(String, Value)>,
     /// Tokens the conversation fills (None before any response) and the model's window.
     pub context: (Option<u64>, u64),
-    /// The running agent, so an abort takes effect at once (even from the chat's own hooks).
-    pub agent: Option<serpis_agent::AgentHandle>,
     /// The prompt cache: {hit_rate, state = "warm"|"cold"|nil, left (seconds), misses}.
     pub cache: Value,
     /// The machine the chat runs on, when it isn't this one (`remote-hosts`).
     pub machine: Option<String>,
+    /// Where it runs and its id there: what requests about it are sent with.
+    pub node: (String, String),
 }
 
 pub fn usage_json(u: &Usage) -> Value {
@@ -103,10 +102,10 @@ impl Editor {
         }
     }
 
-    /// Stop chat `id`'s agent now.
+    /// Stop chat `id`'s agent.
     pub fn abort_chat(&mut self, id: BufferId) {
-        if let Some(a) = self.chats.get(&id).and_then(|c| c.agent.as_ref()) {
-            a.abort();
+        if let Some((machine, chat)) = self.chats.get(&id).map(|c| c.node.clone()) {
+            crate::remote::send(self, &machine, serpis_proto::wire::Request::Abort { chat });
         }
     }
 
@@ -123,18 +122,16 @@ impl Editor {
 
     /// Switch chat `id` to model `spec`; errors when it is unknown or has no credentials.
     pub fn set_chat_model(&mut self, id: BufferId, spec: &str) -> anyhow::Result<()> {
-        // A chat on another machine: that machine knows its models.
-        if self.buffer_machine(id).is_some() {
-            let spec = spec.to_string();
-            self.with_chat_soon(id, move |c, _| c.set_remote_model(&spec));
-            return Ok(());
+        // This machine's models are known here; another machine knows its own (and says so).
+        if self.buffer_machine(id).is_none() {
+            let model = self.find_model(spec).ok_or_else(|| anyhow::anyhow!("Model {spec} not found (see serpis.agent.models())"))?;
+            if !self.provider_configured(&model.provider) {
+                anyhow::bail!("No credentials for provider {}", model.provider);
+            }
         }
-        let model = self.find_model(spec).ok_or_else(|| anyhow::anyhow!("Model {spec} not found (see serpis.agent.models())"))?;
-        if !self.provider_configured(&model.provider) {
-            anyhow::bail!("No credentials for provider {}", model.provider);
-        }
+        let spec = spec.to_string();
         self.with_chat_soon(id, move |c, ed| {
-            c.set_model(model);
+            c.set_model_spec(&spec);
             c.publish(ed, id);
         });
         Ok(())
@@ -158,7 +155,7 @@ impl Editor {
             info.entries.push((kind.clone(), data.clone()));
         }
         self.with_chat_soon(id, move |c, ed| {
-            c.append_entry(ed, &kind, data);
+            c.append_entry(&kind, data);
             c.publish(ed, id);
         });
     }

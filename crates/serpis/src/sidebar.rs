@@ -227,7 +227,7 @@ impl Editor {
             };
         }
         if let Some(t) = title {
-            self.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.set_session_name(ed, &t));
+            self.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.set_session_name(&t));
         }
     }
 

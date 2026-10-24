@@ -25,7 +25,8 @@ impl View {
             Event::Splice { splice, .. } => splice.apply(&mut self.entries),
             Event::State { state, .. } => self.state = Some(state),
             Event::Notice { text, .. } => self.notices.push(text),
-            Event::Closed { .. } => {}
+            Event::Message { text, .. } => self.notices.push(text),
+            Event::Closed { .. } | Event::ToolCall { .. } => {}
         }
     }
 
@@ -94,7 +95,7 @@ fn a_node_runs_chats_for_clients_anywhere() {
     std::fs::create_dir_all(&node_dir).unwrap();
     std::fs::write(node_dir.join("settings.json"), json!({"session-directory": root.join("sessions")}).to_string()).unwrap();
     let socket = node_dir.join("node.sock");
-    let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(agent.clone()) }, rt.handle().clone()).unwrap();
+    let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(agent.clone()), config_dir: Some(node_dir.join("config")) }, rt.handle().clone()).unwrap();
     rt.block_on(async {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&node_dir).unwrap().permissions().mode() & 0o777, 0o700, "only its user can reach the socket");
@@ -105,12 +106,12 @@ fn a_node_runs_chats_for_clients_anywhere() {
         assert!(models.iter().any(|m| m.model == "mock/anthropic/claude-sonnet-4.5"), "{models:?}");
 
         // Mistakes are answered, not fatal.
-        let err = a.call(Request::New { cwd: "/nowhere/at/all".into(), model: None, thinking: None }).await.unwrap_err();
+        let err = a.call(Request::New { cwd: "/nowhere/at/all".into(), model: None, thinking: None, chat: None }).await.unwrap_err();
         assert!(err.to_string().contains("isn't a folder"), "{err}");
         assert!(a.call(Request::Abort { chat: "nope".into() }).await.is_err());
 
         // `~` is this machine's home.
-        let chat = chat_of(a.call(Request::New { cwd: "~/project".into(), model: Some("mock/anthropic/claude-sonnet-4.5".into()), thinking: None }).await.unwrap());
+        let chat = chat_of(a.call(Request::New { cwd: "~/project".into(), model: Some("mock/anthropic/claude-sonnet-4.5".into()), thinking: None, chat: None }).await.unwrap());
         a.call(Request::Attach { chat: chat.clone() }).await.unwrap();
         let mut va = View::default();
         va.until(&mut a_events, |v| v.state.is_some()).await;
@@ -174,7 +175,7 @@ fn a_node_runs_chats_for_clients_anywhere() {
     });
     node.stop();
     // Reopened with the node: the chats that were open come back.
-    let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(agent.clone()) }, rt.handle().clone()).unwrap();
+    let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(agent.clone()), config_dir: Some(node_dir.join("config")) }, rt.handle().clone()).unwrap();
     rt.block_on(async {
         let (a, _) = Client::connect(&Target::Local(socket.clone()), "test-e").await.unwrap();
         let Response::Chats { chats } = a.call(Request::List).await.unwrap() else { panic!() };
@@ -197,7 +198,7 @@ fn a_node_runs_chats_for_clients_anywhere() {
             "agent".into(),
         ]);
         let (a, _) = Client::connect(&target, "test-f").await.unwrap();
-        let chat = chat_of(a.call(Request::New { cwd: work.to_string_lossy().into_owned(), model: None, thinking: None }).await.unwrap());
+        let chat = chat_of(a.call(Request::New { cwd: work.to_string_lossy().into_owned(), model: None, thinking: None, chat: None }).await.unwrap());
         drop(a);
         tokio::time::sleep(Duration::from_millis(200)).await;
         let (b, _) = Client::connect(&target, "test-g").await.unwrap();

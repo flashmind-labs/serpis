@@ -7,6 +7,7 @@
 //! hooks, tools, credentials, a runtime) comes through [`Host`].
 
 pub mod cache_watch;
+pub mod config;
 pub mod session;
 
 use std::collections::HashMap;
@@ -433,7 +434,7 @@ impl Chat {
         }
         let Some(cfg) = self.agent_config(host) else { return Err("No model selected".into()) };
         if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
-            if cache_warning_applies(host, "expired", cost) {
+            if cache_warning_applies(&|n: &str| host.var(n), "expired", cost) {
                 host.notify(Level::Info, format!("The prompt cache expired {} ago: this message re-caches {} tokens ({})", fmt_duration(ago), fmt_tokens(tokens), fmt_cost(cost)));
             }
         }
@@ -753,6 +754,19 @@ impl Chat {
         };
         let misses: Vec<Value> = self.cache.misses.iter().map(|m| json!({"cause": m.cause.word(), "text": m.cause.describe(), "tokens": m.tokens, "cost": m.cost})).collect();
         json!({"hit_rate": self.cache.hit_rate(), "state": state, "left": left, "misses": misses})
+    }
+
+    /// The cache for clients, without the clock: {hit_rate, cached, warm_until (seconds since
+    /// the epoch, while warm), misses}; [`cache_json_at`] turns it into what scripts see.
+    pub fn cache_info(&self) -> Value {
+        let state = self.cache.state(Instant::now());
+        let until = match state {
+            Some(cache_watch::State::Warm(d)) => std::time::SystemTime::now().checked_add(d).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs_f64().round() as u64),
+            _ => None,
+        };
+        let misses: Vec<Value> = self.cache.misses.iter().map(|m| json!({"cause": m.cause.word(), "text": m.cause.describe(), "tokens": m.tokens, "cost": m.cost})).collect();
+        let invalidation = self.cache.invalidation(Instant::now()).map(|(tokens, cost)| json!({"tokens": tokens, "cost": cost}));
+        json!({"hit_rate": self.cache.hit_rate(), "cached": state.is_some(), "warm_until": until, "misses": misses, "invalidation": invalidation})
     }
 
     /// The header's cache entry: "cache 94% · warm 41m" (None before anything was cached).
@@ -1090,8 +1104,22 @@ impl Chat {
             context: self.context(),
             cache: self.cache_status(),
             last_error: self.last_error.clone(),
+            session: self.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),
+            custom: self.custom_entries.clone(),
+            cache_info: self.cache_info(),
         }
     }
+}
+
+/// [`Chat::cache_json`] from a client's copy of [`Chat::cache_info`].
+pub fn cache_json_at(info: &Value, now: std::time::SystemTime) -> Value {
+    let now = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (state, left) = match (info["cached"].as_bool().unwrap_or(false), info["warm_until"].as_u64()) {
+        (false, _) => (None, 0),
+        (true, Some(until)) if until > now => (Some("warm"), until - now),
+        (true, _) => (Some("cold"), 0),
+    };
+    json!({"hit_rate": info["hit_rate"], "state": state, "left": left, "misses": info.get("misses").cloned().unwrap_or(json!([]))})
 }
 
 /// The text and images of a user message.
@@ -1199,12 +1227,12 @@ fn prompt_hash(prompt: &str) -> u64 {
 
 /// Whether to warn about `action` throwing away a cache worth `cost` dollars (cache-warn,
 /// cache-warn-actions, cache-warn-threshold).
-pub fn cache_warning_applies(host: &dyn Host, action: &str, cost: f64) -> bool {
-    if host.var_str("cache-warn").as_deref() == Some("off") {
+pub fn cache_warning_applies(var: &dyn Fn(&str) -> Option<Value>, action: &str, cost: f64) -> bool {
+    if var("cache-warn").as_ref().and_then(Value::as_str) == Some("off") {
         return false;
     }
-    let listed = host.var("cache-warn-actions").and_then(|v| v.as_array().cloned()).is_none_or(|a| a.iter().any(|x| x.as_str() == Some(action)));
-    let threshold = host.var("cache-warn-threshold").and_then(|v| v.as_f64()).unwrap_or(0.10);
+    let listed = var("cache-warn-actions").and_then(|v| v.as_array().cloned()).is_none_or(|a| a.iter().any(|x| x.as_str() == Some(action)));
+    let threshold = var("cache-warn-threshold").and_then(|v| v.as_f64()).unwrap_or(0.10);
     listed && cost >= threshold
 }
 

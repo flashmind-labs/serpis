@@ -247,7 +247,7 @@ steps({
   end,
   function()
     local r = requests()
-    T.check("serpis_api: hooks", r[13]:find("before-prompt: {buffer, text", 1, true) ~= nil, true)
+    T.check("serpis_api: hooks", r[13]:find("before-prompt: In the chat's node: {buffer, text", 1, true) ~= nil, true)
     -- An extension the agent wrote, loaded and used without leaving the chat.
     local code = "local f = io.open(serpis.config_dir .. '/extensions/hello.lua', 'w') "
       .. "f:write('serpis.command.define(\"hello-ext\", function() serpis.message(\"hello from an extension\") end, \"Say hi.\")') "

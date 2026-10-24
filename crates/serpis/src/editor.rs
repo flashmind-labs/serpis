@@ -472,6 +472,7 @@ impl Editor {
             }
         }
         if old.as_ref() != Some(&value) {
+            crate::remote::var_changed(self, name, &value);
             self.run_hook("variable-changed", &serde_json::json!({"name": name, "value": value}));
         }
     }
@@ -501,6 +502,7 @@ impl Editor {
     pub fn register_tool(&mut self, owner: &str, tool: serpis_agent::ToolRef) {
         self.agent_tools.retain(|(_, t)| t.name() != tool.name());
         self.agent_tools.push((owner.to_string(), tool));
+        self.remote.tools_changed = true;
     }
 
     /// Remove everything `owner` registered: commands, bindings, hooks, interceptors, buffer
@@ -513,7 +515,9 @@ impl Editor {
         }
         self.interceptors.retain(|i| i.owner != owner);
         self.buffer_kinds.retain(|_, k| k.owner != owner);
+        let tools = self.agent_tools.len();
         self.agent_tools.retain(|(o, _)| o != owner);
+        self.remote.tools_changed |= tools != self.agent_tools.len();
         self.overlays.retain(|o| o.owner != owner);
         self.status_segments.retain(|s| s.owner != owner);
         self.header_segments.retain(|s| s.owner != owner);
@@ -1268,6 +1272,7 @@ impl Editor {
         let segs = self.status_segments.clone();
         self.status_cache = segs.iter().filter_map(|s| (s.f)(self, None)).filter(|t| !t.is_empty()).collect();
         crate::plugins::poll_reload(self);
+        crate::remote::tick(self);
         if let Some((_, _, t)) = &self.echo {
             if t.elapsed() > Duration::from_secs(8) && self.minibuffer.is_none() {
                 self.echo = None;

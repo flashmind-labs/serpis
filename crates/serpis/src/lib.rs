@@ -61,12 +61,7 @@ pub use tokio;
 
 use std::path::PathBuf;
 
-/// `$SERPIS_CONFIG_DIR`, else `~/.config/serpis`.
-pub fn config_dir() -> PathBuf {
-    std::env::var_os("SERPIS_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config").join("serpis"))
-}
+pub use serpis_chat::config::config_dir;
 
 /// `s` as one shell word: unchanged when safe, else single-quoted.
 pub fn shell_quote(s: &str) -> String {

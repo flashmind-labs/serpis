@@ -27,6 +27,9 @@ export RUSTFLAGS="" CARGO_TARGET_DIR="$root/target/node"
 packages=()
 for p in ${SERPIS_BUILD_PACKAGES:-serpis-node}; do packages+=(-p "$p"); done
 if [[ $# -gt 0 ]]; then
+  # LuaJIT's makefile also links its own luajit executable, which needs the unwinder zig keeps
+  # in libunwind (its makefile takes overrides from the environment).
+  [[ "$1" == *linux* ]] && export TARGET_XLIBS="-lm -ldl -lunwind"
   cargo zigbuild --release -q --manifest-path "$root/Cargo.toml" "${packages[@]}" --target "$1"
   # A glibc version suffix (.2.28) is zigbuild's, not part of the target's directory.
   out="$CARGO_TARGET_DIR/${1%.2.*}/release/serpis-node"

@@ -3415,6 +3415,8 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "dirs",
+ "futures",
+ "mlua",
  "nix",
  "serde",
  "serde_json",

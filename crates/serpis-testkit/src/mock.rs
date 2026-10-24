@@ -69,7 +69,8 @@ pub fn last_user_text(wire: Wire, body: &Value) -> Option<String> {
     }
 }
 
-/// `READ <n>` reads f0.txt … f<n-1>.txt in one response, `SLEEP` runs `sleep 5`, `FAIL` answers
+/// `READ <n>` reads f0.txt … f<n-1>.txt in one response, `CALL <tool> <json>` calls any tool
+/// with those arguments, `SLEEP` runs `sleep 5`, `FAIL` answers
 /// with an error, `OVERFLOW` fails the first time with a context-overflow error, a compaction
 /// request gets a checkpoint summary, anything else gets "ok"; after tool results the model says
 /// "done".
@@ -82,6 +83,10 @@ pub fn commands() -> Script {
         Some(t) if t.starts_with("READ ") => {
             let n: usize = t[5..].trim().parse().unwrap_or(1);
             Reply::ToolCalls((0..n).map(|i| ("read".to_string(), json!({"path": format!("f{i}.txt")}))).collect())
+        }
+        Some(t) if t.starts_with("CALL ") => {
+            let (name, args) = t[5..].trim().split_once(' ').unwrap_or((t[5..].trim(), "{}"));
+            Reply::ToolCalls(vec![(name.to_string(), serde_json::from_str(args).unwrap_or(json!({})))])
         }
         Some(t) if t.starts_with("SLEEP") => Reply::ToolCalls(vec![("bash".into(), json!({"command": "sleep 5"}))]),
         Some(t) if t.starts_with("FAIL") => Reply::Error(400, "synthetic failure".into()),

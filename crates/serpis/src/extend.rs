@@ -19,6 +19,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     // Core.
     ("serpis.version", "string: serpis's version."),
     ("serpis.config_dir", "string: the config directory (init.lua, lua/, extensions/)."),
+    ("serpis.where", "string: \"window\" here. A machine's node runs the same config with \"node\": chat hooks and agent tools take effect there, window parts (keys, commands, the UI) do nothing there."),
     ("serpis.message", "(text): show a message in the echo area (and *Messages*)."),
     ("serpis.error", "(text): show an error."),
     ("serpis.reload", "(): reload the whole Lua config now (init.lua and extensions); errors become messages."),
@@ -69,22 +70,24 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.buffer.highlight", "({line, col}, {line, col}, {duration = ms, face = name}?): flash a range (end exclusive)."),
     ("serpis.buffer.set_local", "(key, value): a buffer-local setting for the current buffer."),
     // Chats (buf: a chat's buffer id; nil = the current buffer; in serpis_lua, CHAT is your own chat).
+    // In a node (a chat's own hooks and tools), a chat is its id there, and nil is the chat whose
+    // hook or tool is running. Reads see the chat as its node last said; actions are sent to it.
     ("serpis.chat.list", "(): every chat as serpis.chat.info returns it."),
     ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil, session_id (the chat's id on its machine), machine = name | nil (where it runs, when not here)}."),
     ("serpis.chat.usage", "(buf?): the whole session's {input, output, cache_read, cache_write, total_tokens, cost} (cost in dollars, every message so far)."),
     ("serpis.chat.cache", "(buf?): the prompt cache: {hit_rate (share of prompt tokens read from the cache), state (\"warm\", \"cold\" or nil before anything was cached), left (seconds until it expires), misses = {{cause, text, tokens, cost}}} (newest last)."),
     ("serpis.chat.running", "(buf?): whether its agent is working."),
-    ("serpis.chat.abort", "(buf?): stop its agent now (also from the chat's own hooks: no further model request or tool runs)."),
+    ("serpis.chat.abort", "(buf?): stop its agent (from the chat's own hooks, in its node, at once: no further model request or tool runs)."),
     ("serpis.chat.set_model", "(buf?, \"provider/model-id\"): switch its model; raises when unknown or the provider has no credentials."),
     ("serpis.chat.set_thinking", "(buf?, level): off, minimal, low, medium, high, xhigh, max (clamped to the model)."),
     ("serpis.chat.attach", "(buf?, path): attach an image file (png, jpeg, gif, webp, bmp) to the chat's next message; raises when it isn't an image."),
     ("serpis.chat.attachments", "(buf?): images waiting for the next message: {name, width, height, mime}."),
-    ("serpis.chat.transcript", "(buf?): the transcript's text as shown (as of the last frame that drew it)."),
+    ("serpis.chat.transcript", "(buf?): the transcript's text as shown (on screen or not)."),
     ("serpis.chat.prompt", "(buf?, text): send text as if typed (a running agent is steered)."),
     ("serpis.chat.append", "(buf?, type, data): add a custom entry to its session file (pi's `custom` entries); kept when the session is resumed."),
     ("serpis.chat.entries", "(buf?, type?): its custom entries' data (of one type), oldest first; restored on resume, so use them for per-chat state."),
     // Agent.
-    ("serpis.agent.tool", "({name, description, parameters = JSON schema, execute = fn(args) -> string | {text, is_error}}): give agents a tool (runs on the UI thread; keep it quick)."),
+    ("serpis.agent.tool", "({name, description, parameters = JSON schema, execute = fn(args) -> string | {text, is_error}}): give agents a tool (runs in the chat's node, on its thread; keep it quick). A tool only this window defines is lent to the chats it shows and runs here."),
     ("serpis.agent.prompt", "(text): send text to the current chat."),
     ("serpis.agent.model", "(\"provider/model-id\"): the default model for new chats (agent-model)."),
     ("serpis.agent.models", "(): every known model as {spec, provider, id, name, reasoning, configured}."),
@@ -172,18 +175,20 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.theme.set", "({font_size, mono_size, accent, bg, cursor}): tweak the current theme."),
 ];
 
-/// Hooks serpis runs: (name, payload and what a handler may return).
+/// Hooks serpis runs: (name, payload and what a handler may return). A chat's own hooks
+/// ("In the chat's node") run where the chat runs, in the node that loads the same config
+/// (serpis.where == "node"), and their `buffer` is the chat's id there; the rest run in the window.
 pub const HOOKS: &[(&str, &str)] = &[
-    ("before-prompt", "{buffer, text, model, running}: a chat is about to send text. Return {block = \"reason\"} to refuse it (the text stays in the composer)."),
-    ("before-compact", "{buffer, reason, tokens, messages}: a chat is about to replace its first `messages` messages with a summary (reason: manual, threshold or overflow). Return false to cancel, or {summary = \"...\"} to supply the summary yourself."),
-    ("chat-compacted", "{buffer, summary, tokens, messages, cache_read}: a chat replaced its first `messages` messages with `summary`; cache_read is what the summary request read from the prompt cache."),
-    ("cache-miss", "{buffer, cause, text, tokens, cost}: a response read much less from the prompt cache than the previous one left; cause is compacted, model, thinking, tools, prompt, expired, upstream, provider (a best-effort automatic cache didn't reuse it) or unexplained (an explicit cache missed with nothing changed), tokens what was rewritten and cost what reading it would have saved."),
+    ("before-prompt", "In the chat's node: {buffer, text, model, running}: a chat is about to send text. Return {block = \"reason\"} to refuse it (the text stays in the composer)."),
+    ("before-compact", "In the chat's node: {buffer, reason, tokens, messages}: a chat is about to replace its first `messages` messages with a summary (reason: manual, threshold or overflow). Return false to cancel, or {summary = \"...\"} to supply the summary yourself."),
+    ("chat-compacted", "In the chat's node: {buffer, summary, tokens, messages, cache_read}: a chat replaced its first `messages` messages with `summary`; cache_read is what the summary request read from the prompt cache."),
+    ("cache-miss", "In the chat's node: {buffer, cause, text, tokens, cost}: a response read much less from the prompt cache than the previous one left; cause is compacted, model, thinking, tools, prompt, expired, upstream, provider (a best-effort automatic cache didn't reuse it) or unexplained (an explicit cache missed with nothing changed), tokens what was rewritten and cost what reading it would have saved."),
     ("before-cache-invalidate", "{buffer, action, tokens, cost, message}: an action (model, thinking, refresh) is about to throw a warm prompt cache away. Return false to keep the cache (the action doesn't happen) or a string to replace the warning."),
-    ("assistant-message", "{buffer, text, stopReason, model, upstream, usage, total}: a model response finished; upstream is who served it behind a router (OpenRouter's provider, e.g. \"Anthropic\"), usage is this response's, total the session's ({input, output, cache_read, cache_write, total_tokens, cost})."),
-    ("before-tool-call", "{buffer, name, args}: the agent wants to run a tool. Return {block = \"reason\"} to refuse, or {args = {...}} to change its arguments."),
-    ("after-tool-call", "{buffer, name, text, isError}: a tool finished. Return {text = \"...\"} to replace what the model sees."),
-    ("tool-finished", "{buffer, name, isError}: a tool's result reached the chat."),
-    ("agent-finished", "{buffer, total}: a chat's agent stopped (done, failed or aborted)."),
+    ("assistant-message", "In the chat's node: {buffer, text, stopReason, model, upstream, usage, total}: a model response finished; upstream is who served it behind a router (OpenRouter's provider, e.g. \"Anthropic\"), usage is this response's, total the session's ({input, output, cache_read, cache_write, total_tokens, cost})."),
+    ("before-tool-call", "In the chat's node: {buffer, name, args}: the agent wants to run a tool. Return {block = \"reason\"} to refuse, or {args = {...}} to change its arguments."),
+    ("after-tool-call", "In the chat's node: {buffer, name, text, isError}: a tool finished. Return {text = \"...\"} to replace what the model sees."),
+    ("tool-finished", "In the chat's node: {buffer, name, isError}: a tool's result reached the chat."),
+    ("agent-finished", "In the chat's node: {buffer, total}: a chat's agent stopped (done, failed or aborted)."),
     ("remote-connected", "{machine, host, serpis}: serpis reached the node on another machine (host: what it calls itself; serpis: its version)."),
     ("remote-disconnected", "{machine, error}: the node on another machine couldn't be reached, or its connection closed; it is retried while one of its chats is shown."),
     ("session-resumed", "{buffer, path, id, messages}: a saved session was loaded into a chat."),
@@ -292,7 +297,9 @@ pub fn reference(ed: &Editor, topic: &str, filter: Option<&str>) -> String {
     let keep = |s: &str| filter.is_none_or(|f| s.to_lowercase().contains(&f.to_lowercase()));
     let lines: Vec<String> = match topic {
         "lua" => LUA_API.iter().map(|(n, d)| format!("{n}{}{d}", if d.starts_with('(') { "" } else { ": " })).collect(),
-        "hooks" => HOOKS.iter().map(|(n, d)| format!("{n}: {d}")).collect(),
+        "hooks" => std::iter::once("A chat's hooks (\"In the chat's node\") run where the chat runs: in its machine's node, which loads this same config (serpis.where is \"node\" there), so register them in init.lua or an extension; there, `buffer` is the chat's id and serpis.chat.* takes it.".to_string())
+            .chain(HOOKS.iter().map(|(n, d)| format!("{n}: {d}")))
+            .collect(),
         "commands" => {
             let mut v: Vec<String> = ed.commands.values().map(|c| format!("{}: {}", c.name, c.doc)).collect();
             v.sort();
@@ -528,11 +535,13 @@ mod tests {
             }
         }
         read(&root, &mut sources);
-        // Chats run their hooks from serpis-chat, through the editor's `Host`.
+        // Chats run their hooks in their node: from serpis-chat, through the node's `Host`, and
+        // the tool hooks from the node itself.
         read(&root.join("../../serpis-chat/src"), &mut sources);
+        read(&root.join("../../serpis-node/src"), &mut sources);
         let documented: Vec<&str> = HOOKS.iter().map(|(n, _)| *n).collect();
         let mut missing = Vec::new();
-        let calls = ["run_hook(\"", "host.hook(self, \""];
+        let calls = ["run_hook(\"", "host.hook(self, \"", "run_hook_for(Some(&chat), \""];
         for part in calls.iter().flat_map(|c| sources.split(c).skip(1)) {
             let name = &part[..part.find('"').unwrap()];
             if !documented.contains(&name) && !missing.contains(&name) {

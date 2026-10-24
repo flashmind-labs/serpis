@@ -270,7 +270,8 @@ chat-only iOS app on the same chats, the way t3code does. Agreed 2026-10-22.
 | Topic | Decision |
 |---|---|
 | Where a chat runs | All of it runs on its machine: agent loop, LLM calls, tools, session file. Laptop sleeps, phone attaches: the chat keeps going. |
-| Engine | `serpis-chat`: a chat without a window (no egui; its dependency tree has no GUI crate). The desktop runs it in-process; boxes run it in `serpis-node`. |
+| Engine | `serpis-chat`: a chat without a window (no egui; its dependency tree has no GUI crate), run only by `serpis-node`, this machine's included (2026-10-24: step 1 first ran local chats in the window, which kept other devices from showing or driving them). The window is a client of nodes and nothing else. |
+| Config | One config for both: the node loads the same init.lua and extensions headless; chat hooks, Lua agent tools and settings take effect there, window parts (keys, commands, UI) do nothing (`serpis.where`). A window lends `serpis_lua`/`serpis_api` and its own Lua tools to the chats it shows; settings it changes go to its machine's node. |
 | What clients see | `serpis-proto`: the transcript as `Entry`s, sent as splices ("from entry N on, it is now these") plus a `ChatState`. The desktop chat already renders only from splices, local chats included, so one path is tested by every UI test. |
 | Daemon on boxes | `serpis-node`, headless and egui-free, built the way manymux builds its node: per user, owner-only Unix socket and nothing else, reached by `ssh <host> serpis-node agent` (stdio bridge), installed as a per-user service. |
 | Security | serpis authenticates nothing itself. sshd decides who gets in: rayfish mesh SSH (keyless, `ssh_allow`) or your SSH keys. API keys stay on each box (its own auth.json); none cross the wire. Optional strict mode per host, after pi-env: pinned host key, no forwarding. |
@@ -339,6 +340,14 @@ Steps:
    d. *Done* (`tests/ui/remote_resume.lua`): sessions of every machine in one list, chat-resume's
       "every machine" scope: this machine's at once, the others' as they answer (listing never
       asks for a username), moved ones hidden, a picked one resumed where it is.
+   e. *Done*: the node does all the work and the window is a thin client. Lua in the node
+      (`serpis_node::lua`: hooks, tools, `serpis.chat` by chat id, timers, inert window API),
+      protocol for it (`SetVars`, `Reload`, `ReloadModels`, `Append`, `Lend`/`ToolCall`/`ToolDone`,
+      `RefreshContext`, `Rename`, `AgeCache`, client-chosen chat ids, `Detach { close }`,
+      session-list `open`/`running`, chat state with session, custom entries and a clock-free
+      cache), this machine's node started and upgraded by the window (`Target::Own`), the chat
+      buffer reduced to a view of a node chat, and running chats marked in `chat-resume` on
+      every machine (`crates/serpis-node/tests/lua.rs`, the UI suite).
 4. Remote terminals through manymux.
 5. Node reliability: running turns that survive a node restart, parking a turn that keeps
    crashing it, the node's own Lua (hooks, tools, extensions on machines).

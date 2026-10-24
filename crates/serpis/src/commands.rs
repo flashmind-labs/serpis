@@ -110,7 +110,7 @@ pub const CACHE_WARN_ACTIONS: [&str; 5] = ["model", "thinking", "tools", "refres
 /// "notice" says so after; a before-cache-invalidate handler can veto (false) or reword it.
 pub fn guard_cache(ed: &mut Editor, action: &'static str, what: &str, act: impl FnOnce(&mut Editor) + 'static) {
     let id = current_chat(ed);
-    let est = id.and_then(|id| ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat.cache.invalidation(std::time::Instant::now()))).flatten();
+    let est = id.and_then(|id| ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.cache_invalidation())).flatten();
     let Some((tokens, cost)) = est.filter(|(_, cost)| crate::buffers::chat::cache_warning_applies(ed, action, *cost)) else {
         return act(ed);
     };
@@ -772,7 +772,11 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
-    ed.define_command("chat-clear", "Start a fresh conversation in this chat.", o, |ed, _| with_chat(ed, |c, _| c.clear()));
+    ed.define_command("chat-clear", "Start a fresh conversation in this chat (where it runs, in its folder; the one it had stays in its session).", o, |ed, _| {
+        let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+        crate::remote::fresh_chat(ed, id);
+        Ok(())
+    });
     ed.define_command(
         "chat-refresh-context",
         "Re-read AGENTS.md / CLAUDE.md and the system prompt vars with the next message. A chat keeps the system prompt it started with, so the provider can reuse its cache; refreshing rewrites the cache once.",
@@ -792,24 +796,26 @@ pub fn install(ed: &mut Editor) {
         o,
         |ed, a| {
             let instructions = a.str(0).map(str::to_string);
-            with_chat(ed, |c, ed| c.compact(ed, crate::buffers::chat::CompactReason::Manual, instructions))
+            with_chat(ed, |c, _| c.compact(instructions))
         },
     );
     ed.define_command("chat-cache-report", "Show this chat's prompt cache: hit rate, whether it is warm, and its recent misses with their causes.", o, |ed, _| {
-        let (rate, state, misses) = with_chat(ed, |c, _| {
-            let rate = c.chat.cache.hit_rate();
-            let state = c.chat.cache.state(std::time::Instant::now());
-            let misses: Vec<String> = c.chat.cache.misses.iter().rev().map(|m| format!("- {}", m.notice())).collect();
-            (rate, state, misses)
-        })?;
+        let cache = with_chat(ed, |c, _| c.cache_json())?;
+        let misses: Vec<String> = cache["misses"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .map(|m| format!("- cache miss: {}; rewrote {} tokens ({})", m["text"].as_str().unwrap_or(""), crate::buffers::chat::fmt_tokens(m["tokens"].as_u64().unwrap_or(0)), crate::cache_watch::fmt_cost(m["cost"].as_f64().unwrap_or(0.0))))
+            .collect();
         let mut text = String::from("Prompt cache\n\n");
-        text.push_str(&match rate {
+        text.push_str(&match cache["hit_rate"].as_f64() {
             Some(r) => format!("{:.1}% of this chat's prompt tokens were read from the cache.\n", r * 100.0),
             None => "Nothing sent yet.\n".into(),
         });
-        text.push_str(&match state {
-            Some(crate::cache_watch::State::Warm(left)) => format!("Warm: it expires in {} unless the next message reads it first.\n", crate::cache_watch::fmt_duration(left)),
-            Some(crate::cache_watch::State::Cold) => "Cold: the next message rewrites it.\n".into(),
+        text.push_str(&match cache["state"].as_str() {
+            Some("warm") => format!("Warm: it expires in {} unless the next message reads it first.\n", crate::cache_watch::fmt_duration(std::time::Duration::from_secs(cache["left"].as_u64().unwrap_or(0)))),
+            Some(_) => "Cold: the next message rewrites it.\n".into(),
             None => String::new(),
         });
         text.push_str("\nRecent misses (newest first):\n");
@@ -825,7 +831,7 @@ pub fn install(ed: &mut Editor) {
             return None;
         }
         let id = current_chat(ed)?;
-        let (tokens, cost) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat.cache.invalidation(std::time::Instant::now())).flatten()?;
+        let (tokens, cost) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.cache_invalidation()).flatten()?;
         if crate::buffers::chat::cache_warning_applies(ed, "tools", cost) {
             ed.message(format!("Changing the tools re-caches {} tokens on the next message ({})", crate::buffers::chat::fmt_tokens(tokens), crate::cache_watch::fmt_cost(cost)));
         }
@@ -840,10 +846,7 @@ pub fn install(ed: &mut Editor) {
     ed.define_command("chat-cycle-thinking", "Cycle the thinking level.", o, |ed, _| {
         with_chat(ed, |_, _| ())?;
         guard_cache(ed, "thinking", "Changing the thinking level", |ed| {
-            if let Ok(lvl) = with_chat(ed, |c, _| {
-                c.cycle_thinking();
-                c.chat.thinking
-            }) {
+            if let Ok(lvl) = with_chat(ed, |c, ed| c.cycle_thinking(ed)) {
                 ed.message(format!("Thinking: {}", lvl.as_str()));
             }
         });
@@ -860,10 +863,7 @@ pub fn install(ed: &mut Editor) {
             });
             return Ok(());
         }
-        let (levels, current) = with_chat(ed, |c, _| {
-            let levels = c.chat.model.as_ref().map(serpis_ai::supported_thinking_levels).unwrap_or_else(|| serpis_ai::ThinkingLevel::ALL.to_vec());
-            (levels, c.chat.thinking)
-        })?;
+        let (levels, current) = with_chat(ed, |c, ed| (c.thinking_levels(ed), c.thinking_level()))?;
         let cands = levels
             .iter()
             .map(|l| {
@@ -880,7 +880,7 @@ pub fn install(ed: &mut Editor) {
             guard_cache(ed, "thinking", "Changing the thinking level", move |ed| {
                 let Ok(l) = with_chat(ed, |chat, _| {
                     chat.set_thinking(l);
-                    chat.chat.thinking
+                    chat.thinking_level()
                 }) else { return };
                 ed.message(format!("Thinking: {}", l.as_str()));
             });
@@ -930,7 +930,7 @@ pub fn install(ed: &mut Editor) {
                     let cands = models.into_iter().map(|i| Candidate::new(i.model).detail(format!("{}{}", i.name, if i.reasoning { "  ◆" } else { "" }))).collect();
                     ed.completing_read(&format!("Model on {m}: "), cands, true, move |ed, c, _| {
                         if let Some(c) = c {
-                            ed.with_buffer_as::<ChatBuffer, _>(id, |chat, _| chat.set_remote_model(&c.value));
+                            ed.with_buffer_as::<ChatBuffer, _>(id, |chat, _| chat.set_model_spec(&c.value));
                         }
                     });
                 }
@@ -959,7 +959,7 @@ pub fn install(ed: &mut Editor) {
         ed.completing_read("Model: ", cands, true, move |ed, c, _| {
             let Some(c) = c else { return };
             let Some(m) = models.into_iter().find(|m| format!("{}/{}", m.provider, m.id) == c.value) else { return };
-            let same = with_chat(ed, |chat, _| chat.chat.model.as_ref().is_some_and(|x| x.provider == m.provider && x.id == m.id)).unwrap_or(false);
+            let same = with_chat(ed, |chat, _| chat.state_now().model.as_deref() == Some(c.value.as_str())).unwrap_or(false);
             let change = move |ed: &mut Editor| {
                 ed.set_var("agent-model", Value::String(c.value.clone()));
                 let _ = with_chat(ed, |chat, _| chat.set_model(m));
@@ -993,6 +993,8 @@ pub fn install(ed: &mut Editor) {
                     ed.error(format!("{e:#}"));
                 } else {
                     ed.message(format!("Saved key for {provider}"));
+                    // This machine's chats use it too.
+                    crate::remote::send(ed, crate::remote::LOCAL, serpis_proto::wire::Request::ReloadModels);
                     ed.call("chat-refresh-models");
                 }
             });

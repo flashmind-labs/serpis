@@ -40,6 +40,9 @@ pub enum Target {
     },
     /// Any program that speaks the protocol on its stdin and stdout.
     Command(Vec<String>),
+    /// This machine's own node, at its socket: started from `exe` when none is running, and
+    /// restarted on it when the one running is another build (once its chats are idle).
+    Own { socket: PathBuf, exe: PathBuf },
 }
 
 impl Target {
@@ -98,6 +101,8 @@ pub struct Client {
     _child: Option<tokio::process::Child>,
     /// What the process said on stderr, once it is done saying it.
     stderr: Option<(Arc<Mutex<String>>, tokio::task::JoinHandle<()>)>,
+    /// The runtime it was made on, where `send` waits for answers (it may be called elsewhere).
+    rt: tokio::runtime::Handle,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,6 +117,8 @@ pub struct Hello {
     /// It runs a build this client didn't install, and couldn't restart on the new one yet (a
     /// chat was mid-turn): ask again later ([`Client::restart`]).
     pub outdated: bool,
+    /// What went wrong loading the node's Lua config.
+    pub notes: Vec<String>,
 }
 
 impl Client {
@@ -160,9 +167,13 @@ impl Client {
     /// restarted on the new one when none of its chats is mid-turn; otherwise the connection
     /// to it is kept, marked outdated.
     async fn upgrade(c: (Client, mpsc::UnboundedReceiver<Event>), target: &Target, name: &str, stage: &impl Fn(Stage)) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
-        let Target::Ssh { deploy, command: None, .. } = target else { return Ok(c) };
+        let wanted: Vec<String> = match target {
+            Target::Ssh { deploy, command: None, .. } => deploy.iter().map(|n| n.sha256.clone()).collect(),
+            Target::Own { exe, .. } => crate::deploy::sha256_file(exe).into_iter().collect(),
+            _ => Vec::new(),
+        };
         let (mut client, events) = c;
-        if deploy.is_empty() || deploy.iter().any(|n| n.sha256 == client.hello.build) {
+        if wanted.is_empty() || wanted.contains(&client.hello.build) {
             return Ok((client, events));
         }
         // A node that doesn't say its build predates Restart too: it is stopped as any node can
@@ -206,6 +217,17 @@ impl Client {
                 let (r, w) = s.into_split();
                 Self::over(r, w, None)
             }
+            Target::Own { socket, exe } => {
+                let s = match tokio::net::UnixStream::connect(socket).await {
+                    Ok(s) => s,
+                    Err(_) => {
+                        crate::bridge::start_node(exe, socket).map_err(failed)?;
+                        crate::bridge::wait_for(socket).await.map_err(failed)?
+                    }
+                };
+                let (r, w) = s.into_split();
+                Self::over(r, w, None)
+            }
             Target::Ssh { host, ssh, ssh_args, env, command, deploy, ask } => {
                 let mut argv = ssh.clone();
                 argv.extend(ssh_args.iter().cloned());
@@ -216,7 +238,7 @@ impl Client {
             Target::Command(argv) => Self::spawn(argv).map_err(failed)?,
         };
         match client.call(Request::Hello { version: wire::VERSION, client: name.to_string() }).await {
-            Ok(Response::Hello { host, serpis, home, setup, build, .. }) => client.hello = Hello { host, serpis, home, setup, build, outdated: false },
+            Ok(Response::Hello { host, serpis, home, setup, build, notes, .. }) => client.hello = Hello { host, serpis, home, setup, build, outdated: false, notes },
             Ok(other) => return Err(failed(anyhow!("the node answered hello with {other:?}"))),
             Err(e) => {
                 // What the far side said is the reason: wait for all of it.
@@ -316,29 +338,37 @@ impl Client {
                 let _ = tx.send(Response::Error { message: why.clone() });
             }
         });
-        (Client { out, pending, next: AtomicU64::new(1), hello: Hello::default(), _child: None, stderr: None }, ev_rx)
+        (Client { out, pending, next: AtomicU64::new(1), hello: Hello::default(), _child: None, stderr: None, rt: tokio::runtime::Handle::current() }, ev_rx)
     }
 
-    /// Send a request and wait for its answer; the node's errors are errors.
-    pub async fn call(&self, request: Request) -> Result<Response> {
+    /// Send a request and wait for its answer; the node's errors are errors. The request goes
+    /// out when this is called, not when the answer is awaited, so calls made one after another
+    /// reach the node in that order.
+    pub fn call(&self, request: Request) -> impl std::future::Future<Output = Result<Response>> + Send + 'static {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        if self.out.send(wire::encode(tag::CALL, &Call { id, request })).is_err() {
+        let sent = self.out.send(wire::encode(tag::CALL, &Call { id, request })).is_ok();
+        if !sent {
             self.pending.lock().unwrap().remove(&id);
-            bail!("the connection to the node is closed");
         }
-        match rx.await.map_err(|_| anyhow!("the connection to the node is closed"))? {
-            Response::Error { message } => Err(anyhow!(message)),
-            r => Ok(r),
+        async move {
+            if !sent {
+                bail!("the connection to the node is closed");
+            }
+            match rx.await.map_err(|_| anyhow!("the connection to the node is closed"))? {
+                Response::Error { message } => Err(anyhow!(message)),
+                r => Ok(r),
+            }
         }
     }
 
-    /// Send a request without waiting for its answer (errors are logged).
+    /// Send a request without waiting for its answer (errors are logged). Callable from any
+    /// thread.
     pub fn send(self: &Arc<Self>, request: Request) {
-        let c = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = c.call(request).await {
+        let answer = self.call(request);
+        self.rt.spawn(async move {
+            if let Err(e) = answer.await {
                 tracing::warn!("node: {e:#}");
             }
         });
@@ -358,7 +388,7 @@ struct Failed {
 
 fn describe(t: &Target) -> String {
     match t {
-        Target::Local(p) => format!("the node at {}", p.display()),
+        Target::Local(p) | Target::Own { socket: p, .. } => format!("the node at {}", p.display()),
         Target::Ssh { host, .. } => host.clone(),
         Target::Command(a) => a.join(" "),
     }

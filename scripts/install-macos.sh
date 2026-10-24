@@ -14,6 +14,8 @@ bin_dir="${SERPIS_BIN_DIR:-$HOME/.local/bin}"
 
 echo "Building (release)…"
 cargo build --release -q --manifest-path "$root/Cargo.toml" -p serpis-bin
+# This machine's node, which runs its chats (one file, std linked in): beside serpis in the app.
+node_src="$("$root/scripts/build-node.sh")"
 exe_src="$root/target/release/serpis"
 core_src="$root/target/release/deps/libserpis.dylib"
 core_id="$(otool -D "$core_src" | tail -1)"
@@ -27,6 +29,7 @@ app="$stage/Serpis.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
 exe="$app/Contents/MacOS/serpis"
 cp "$exe_src" "$exe"
+cp "$node_src" "$app/Contents/MacOS/serpis-node"
 cp "$core_src" "$std_src" "$app/Contents/Frameworks/"
 chmod u+w "$exe" "$app/Contents/Frameworks/"*
 
@@ -70,8 +73,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature (this Mac only): libraries first, then the app.
+# Ad-hoc signature (this Mac only): libraries and the node first, then the app.
 codesign --force --sign - "$app/Contents/Frameworks/"*.dylib
+codesign --force --sign - "$app/Contents/MacOS/serpis-node"
 codesign --force --sign - "$app"
 
 mkdir -p "$app_dir" "$bin_dir"
