@@ -28,7 +28,21 @@ cache=$!
 # are), which outlives the window like the chat node: all stopped at the end (a test
 # and its _restore share one, and the second checks what the first left running).
 stop_terminals() { for h in "$tmp"/home-*; do SERPIS_TERMINAL_SOCKET="$h/.t.sock" "$root/target/debug/serpis-node" stop-terminals >/dev/null 2>&1 || true; done; }
-trap 'kill $mock $cache 2>/dev/null; stop_terminals' EXIT
+# A test's stand-in machine (a node in a /tmp/stbox.* home, named in <test>.out.box) is stopped
+# and removed too, if the test that ends it didn't (it failed, or ran on its own).
+stop_boxes() {
+  for f in "$tmp"/*.box; do
+    [[ -f "$f" ]] || continue
+    local box; box=$(cat "$f")
+    [[ "$box" == /tmp/stbox.* && -d "$box" ]] || continue
+    for what in stop stop-terminals; do
+      HOME="$box/home" SERPIS_NODE_DIR="$box/node" SERPIS_NODE_SOCKET="$box/node/node.sock" SERPIS_TERMINAL_SOCKET="$box/t.sock" \
+        "$root/target/debug/serpis-node" "$what" >/dev/null 2>&1 || true
+    done
+    command rm -rf "$box"
+  done
+}
+trap 'kill $mock $cache 2>/dev/null; stop_terminals; stop_boxes' EXIT
 for _ in $(seq 50); do [[ -s "$tmp/mock.port" && -s "$tmp/cache-mock.port" ]] && break; sleep 0.1; done
 export SERPIS_TEST_MOCK_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/v1" SERPIS_TEST_MOCK_LOG="$tmp/mock.log"
 export SERPIS_TEST_CACHE_URL="http://127.0.0.1:$(cat "$tmp/cache-mock.port")" SERPIS_TEST_CACHE_LOG="$tmp/cache-mock.log"

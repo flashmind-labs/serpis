@@ -53,7 +53,7 @@ enum Io {
     /// A child of this window, on a PTY it holds.
     Pty { master: Arc<OwnedFd>, child: nix::unistd::Pid },
     /// A terminal a machine's terminal node holds.
-    Node(crate::terminals::Link),
+    Node(Box<crate::terminals::Link>),
 }
 
 /// Where bytes for the program go (the VT engine answers queries through one, too).
@@ -238,7 +238,7 @@ impl TerminalBuffer {
             };
             let link = crate::terminals::Link::open(ed, &machine, open, (cols, rows), tx);
             let sink = Sink::Node(link.input());
-            (Io::Node(link), sink)
+            (Io::Node(Box::new(link)), sink)
         } else {
             Self::spawn_child(ed, &cwd, cols, rows, integration, tx)?
         };
