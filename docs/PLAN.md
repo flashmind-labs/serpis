@@ -363,3 +363,29 @@ Steps:
 5. Node reliability: running turns that survive a node restart, parking a turn that keeps
    crashing it, the node's own Lua (hooks, tools, extensions on machines).
 6. The iOS app.
+
+### Later (left open on the way; pick up when they matter)
+
+Terminals (step 4):
+- Not tried on a real machine yet (slimbook): only through the local stand-in box.
+- Scrolling back further than the lines fetched on attach (`terminal-history-lines`, 5000):
+  manymux answers `VIEW` requests for older lines; the terminal buffer doesn't ask yet.
+- Images drawn in a terminal (kitty graphics) don't survive a reattach: manymux's repaint is text.
+- `terminal-attach` lists this machine and the connected ones; it could list every machine the way
+  `chat-resume`'s "every machine" scope does.
+- What runs in a terminal is polled every second per machine; manymux's event stream (`Events`:
+  bells, titles, exits) could replace part of that.
+- Editing a terminal's command line in normal state waits up to 400 ms for each echo
+  (`ECHO_TIMEOUT`); over a slow link to another machine that may be too short.
+
+Machines and nodes:
+- Release builds of the node, downloaded when a machine needs one (pinned under step 2).
+- Old node builds pile up in `~/.serpis/bin` on machines (one per serpis build): prune the ones
+  no node runs from.
+- This machine's node keeps the environment of the window that started it: API keys exported in
+  a later shell don't reach it until it restarts.
+- A config error can be reported twice, once by the window and once by its node.
+- Carrying a folder sends the branch's whole history; send only what the machine lacks (3c).
+- Environment variables from an allowlist when a chat moves (needs per-chat environments in the
+  agent's tools) (3c).
+- A machine's chats run that machine's own Lua config; copying this one's there isn't built.
