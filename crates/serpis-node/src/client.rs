@@ -386,6 +386,64 @@ struct Failed {
     error: anyhow::Error,
 }
 
+/// A byte stream to the terminal node of a machine ([`crate::terminals`]): manymux's protocol.
+pub struct Pipe {
+    pub read: Box<dyn AsyncRead + Unpin + Send>,
+    pub write: Box<dyn AsyncWrite + Unpin + Send>,
+    /// The ssh (or other) process carrying it, ended with the pipe.
+    pub child: Option<tokio::process::Child>,
+    /// What that process said on stderr (why it ended, when it did).
+    pub stderr: Arc<Mutex<String>>,
+}
+
+/// Open a stream to the terminal node of the machine `target` reaches, the way its chat node is
+/// reached, with `SERPIS_BRIDGE=terminals` (this machine's is started when none runs). A
+/// `Command` target gets the variable in its environment: one that runs the node somewhere
+/// else must pass it on.
+pub async fn terminal_pipe(target: &Target) -> Result<Pipe> {
+    let local = |s: tokio::net::UnixStream| {
+        let (r, w) = s.into_split();
+        Pipe { read: Box::new(r), write: Box::new(w), child: None, stderr: Default::default() }
+    };
+    let socket = crate::terminals::socket();
+    let argv = match target {
+        Target::Local(_) => return Ok(local(tokio::net::UnixStream::connect(&socket).await.with_context(|| format!("no terminal node at {}", socket.display()))?)),
+        Target::Own { exe, .. } => {
+            crate::terminals::ensure(exe, &socket).await?;
+            return Ok(local(tokio::net::UnixStream::connect(&socket).await?));
+        }
+        Target::Ssh { host, ssh, ssh_args, env, command, deploy, ask } => {
+            let mut env = env.clone();
+            env.push(("SERPIS_BRIDGE".into(), "terminals".into()));
+            let mut argv = ssh.clone();
+            argv.extend(ssh_args.iter().cloned());
+            let run = command.clone().unwrap_or_else(|| crate::deploy::agent_command(deploy, *ask));
+            argv.extend([host.clone(), "--".into(), format!("{}{run}", env_prefix(&env))]);
+            argv
+        }
+        Target::Command(argv) => argv.clone(),
+    };
+    let (program, args) = argv.split_first().context("empty command")?;
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .env("SERPIS_BRIDGE", "terminals")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("starting {program}"))?;
+    let (read, write, err) = (child.stdout.take().unwrap(), child.stdin.take().unwrap(), child.stderr.take().unwrap());
+    let stderr: Arc<Mutex<String>> = Default::default();
+    let said = stderr.clone();
+    tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = tokio::io::BufReader::new(err).read_to_string(&mut buf).await;
+        said.lock().unwrap().push_str(buf.trim());
+    });
+    Ok(Pipe { read: Box::new(read), write: Box::new(write), child: Some(child), stderr })
+}
+
 fn describe(t: &Target) -> String {
     match t {
         Target::Local(p) | Target::Own { socket: p, .. } => format!("the node at {}", p.display()),

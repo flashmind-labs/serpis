@@ -1,6 +1,9 @@
 //! Terminal buffer backed by libghostty-vt.
 //!
-//! The PTY is read on a background thread; bytes are fed to the VT engine on the UI thread.
+//! Its program runs in a machine's terminal node ([`crate::terminals`]: it outlives the window,
+//! and other devices reach it), or, with `terminal-persistent` off, as a child of the window on
+//! a PTY of its own. Either way bytes arrive on a background thread or task and are fed to the
+//! VT engine on the UI thread.
 //! Unbound keys are encoded by libghostty's key encoder (honouring application cursor mode,
 //! the Kitty keyboard protocol, ...). The scrollback is exposed as a [`TextSurface`]
 //! ("copy mode"), so vim normal state, search and yank work on terminal output.
@@ -38,9 +41,41 @@ const ECHO_TIMEOUT: Duration = Duration::from_millis(400);
 /// Fallback prompt detection when the shell doesn't mark prompts with OSC 133.
 pub const DEFAULT_PROMPT_REGEXP: &str = "^[^#$%>λ❯→➜]{0,60}[#$%>λ❯→➜]+[ \\x{a0}]*";
 
-enum PtyMsg {
+pub enum PtyMsg {
     Data(Vec<u8>),
     Exit,
+    /// What the terminal node calls the terminal (once it has started it).
+    Name(String),
+    /// Attached to it, or not (connecting, or a dropped connection being retried).
+    Online(bool),
+}
+
+/// Where the program runs.
+enum Io {
+    /// A child of this window, on a PTY it holds.
+    Pty { master: Arc<OwnedFd>, child: nix::unistd::Pid },
+    /// A terminal a machine's terminal node holds.
+    Node(crate::terminals::Link),
+}
+
+/// Where bytes for the program go (the VT engine answers queries through one, too).
+#[derive(Clone)]
+enum Sink {
+    Fd(Arc<OwnedFd>),
+    Node(tokio::sync::mpsc::UnboundedSender<crate::terminals::Out>),
+}
+
+impl Sink {
+    fn write(&self, data: &[u8]) {
+        match self {
+            Sink::Fd(fd) => {
+                let _ = nix::unistd::write(fd.as_ref(), data);
+            }
+            Sink::Node(tx) => {
+                let _ = tx.send(crate::terminals::Out::Input(data.to_vec()));
+            }
+        }
+    }
 }
 
 pub struct TerminalBuffer {
@@ -50,8 +85,8 @@ pub struct TerminalBuffer {
     cells_it: CellIterator<'static>,
     key_enc: key::Encoder<'static>,
     key_ev: key::Event<'static>,
-    master: Arc<OwnedFd>,
-    child: nix::unistd::Pid,
+    io: Io,
+    sink: Sink,
     rx: mpsc::Receiver<PtyMsg>,
     grid: Arc<AtomicU32>,
     /// A cell's size in pixels as programs are told (CSI 16 t; image sizes), width << 16 | height.
@@ -143,21 +178,6 @@ fn rgb(c: RgbColor) -> Color32 {
     Color32::from_rgb(c.r, c.g, c.b)
 }
 
-/// Write the shell integration scripts to a per-user temp dir; returns the dir.
-fn install_shell_integration() -> Option<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join(format!("serpis-shell-{}", unsafe { nix::libc::getuid() }));
-    std::fs::create_dir_all(dir.join("zsh")).ok()?;
-    for (path, body) in [
-        ("zsh/.zshenv", include_str!("../../shell/zsh/.zshenv")),
-        ("serpis.zsh", include_str!("../../shell/serpis.zsh")),
-    ] {
-        let p = dir.join(path);
-        if std::fs::read_to_string(&p).ok().as_deref() != Some(body) {
-            std::fs::write(&p, body).ok()?;
-        }
-    }
-    Some(dir)
-}
 
 fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -> anyhow::Result<(OwnedFd, nix::unistd::Pid)> {
     use nix::pty::{ForkptyResult, Winsize, forkpty};
@@ -181,7 +201,7 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
     env.push(std::ffi::CString::new("COLORTERM=truecolor")?);
     env.push(std::ffi::CString::new("TERM_PROGRAM=serpis")?);
     // zsh reads $ZDOTDIR/.zshenv first; ours restores ZDOTDIR and loads the prompt marks.
-    if let Some(dir) = (integration && base == "zsh").then(install_shell_integration).flatten() {
+    if let Some(dir) = (integration && base == "zsh").then(serpis_node::terminals::install_shell_integration).flatten() {
         env.retain(|e| !e.as_bytes().starts_with(b"ZDOTDIR="));
         if let Some(z) = std::env::var_os("ZDOTDIR") {
             env.push(std::ffi::CString::new(format!("SERPIS_ZDOTDIR={}", z.to_string_lossy()))?);
@@ -203,15 +223,38 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
 }
 
 impl TerminalBuffer {
-    /// A shell in `params.cwd`, else in the editor's directory.
+    /// A shell in `params.cwd` (else the editor's directory) on `params.machine` (else this
+    /// one), or the terminal `params.terminal` running there already.
     pub fn new(ed: &mut Editor, params: &serde_json::Value) -> anyhow::Result<Self> {
         let (cols, rows) = (100u16, 30u16);
         let integration = ed.var("terminal-shell-integration").and_then(serde_json::Value::as_bool).unwrap_or(true);
+        let machine = params.get("machine").and_then(serde_json::Value::as_str).map(str::to_string);
+        let attach = params.get("terminal").and_then(serde_json::Value::as_str).map(str::to_string);
+        let persistent = ed.var("terminal-persistent").and_then(serde_json::Value::as_bool).unwrap_or(true);
+        let (tx, rx) = mpsc::channel();
+        let remote_cwd = params.get("cwd").and_then(serde_json::Value::as_str).filter(|_| machine.as_deref().is_some_and(|m| m != crate::remote::LOCAL)).map(str::to_string);
         let cwd = params.get("cwd").and_then(serde_json::Value::as_str).map(crate::expand_home).filter(|d| d.is_dir()).unwrap_or_else(|| ed.cwd.clone());
-        let (master, child) = spawn_shell(&cwd, cols, rows, integration)?;
+        let (io, sink) = if machine.is_some() || attach.is_some() || persistent {
+            let machine = machine.unwrap_or_else(|| crate::remote::LOCAL.to_string());
+            let open = match attach {
+                Some(name) => crate::terminals::Open::Attach { name, history: ed.var("terminal-history-lines").and_then(serde_json::Value::as_u64).unwrap_or(5000) as u32 },
+                None => crate::terminals::Open::New { cwd: remote_cwd.clone().unwrap_or_else(|| cwd.to_string_lossy().into_owned()), integration },
+            };
+            let link = crate::terminals::Link::open(ed, &machine, open, (cols, rows), tx);
+            let sink = Sink::Node(link.out.clone());
+            (Io::Node(link), sink)
+        } else {
+            Self::spawn_child(ed, &cwd, cols, rows, integration, tx)?
+        };
+        let cwd = remote_cwd.map(std::path::PathBuf::from).unwrap_or(cwd);
+        Self::with_io(ed, io, sink, rx, cwd, cols, rows)
+    }
+
+    /// A shell as a child of this window, read on a thread of its own.
+    fn spawn_child(ed: &mut Editor, cwd: &std::path::Path, cols: u16, rows: u16, integration: bool, tx: mpsc::Sender<PtyMsg>) -> anyhow::Result<(Io, Sink)> {
+        let (master, child) = spawn_shell(cwd, cols, rows, integration)?;
         let master = Arc::new(master);
         let reader = nix::unistd::dup(master.as_raw_fd())?;
-        let (tx, rx) = mpsc::channel();
         let repaint = ed.main_sender();
         std::thread::Builder::new().name("serpis-pty".into()).spawn(move || {
             let mut buf = vec![0u8; 65536];
@@ -232,6 +275,10 @@ impl TerminalBuffer {
             let _ = tx.send(PtyMsg::Exit);
             repaint.repaint();
         })?;
+        Ok((Io::Pty { master: master.clone(), child }, Sink::Fd(master)))
+    }
+
+    fn with_io(ed: &mut Editor, io: Io, sink: Sink, rx: mpsc::Receiver<PtyMsg>, cwd: std::path::PathBuf, cols: u16, rows: u16) -> anyhow::Result<Self> {
 
         let grid = Arc::new(AtomicU32::new(((cols as u32) << 16) | rows as u32));
         let cell_px = Arc::new(AtomicU32::new((8 << 16) | 16));
@@ -249,12 +296,10 @@ impl TerminalBuffer {
             let _ = term.set_kitty_image_temp_file_dir(Some(&std::env::temp_dir()));
         }
         {
-            let w = master.clone();
+            let w = sink.clone();
             let g = grid.clone();
             let px = cell_px.clone();
-            term.on_pty_write(move |_t, data| {
-                let _ = nix::unistd::write(w.as_ref(), data);
-            })
+            term.on_pty_write(move |_t, data| w.write(data))
             .map_err(|e| anyhow::anyhow!("{e:?}"))?
             .on_size(move |_t| {
                 let v = g.load(Ordering::Relaxed);
@@ -277,8 +322,8 @@ impl TerminalBuffer {
             cells_it: CellIterator::new().map_err(|e| anyhow::anyhow!("{e:?}"))?,
             key_enc: key::Encoder::new().map_err(|e| anyhow::anyhow!("{e:?}"))?,
             key_ev: key::Event::new().map_err(|e| anyhow::anyhow!("{e:?}"))?,
-            master,
-            child,
+            io,
+            sink,
             rx,
             grid,
             cell_px,
@@ -313,6 +358,14 @@ impl TerminalBuffer {
         })
     }
 
+    /// The machine's terminal it shows, when a terminal node holds it.
+    pub fn link(&self) -> Option<&crate::terminals::Link> {
+        match &self.io {
+            Io::Node(l) => Some(l),
+            Io::Pty { .. } => None,
+        }
+    }
+
     /// A cell's size in points.
     pub fn cell_size(&self) -> Vec2 {
         self.cell
@@ -322,7 +375,7 @@ impl TerminalBuffer {
         if !self.exited {
             self.mouse_sel.set(None);
             self.last_input.set(Some(Instant::now()));
-            let _ = nix::unistd::write(self.master.as_ref(), data);
+            self.sink.write(data);
         }
     }
 
@@ -561,16 +614,40 @@ impl TerminalBuffer {
         Pos::new(sb + self.term.cursor_y().unwrap_or(0) as usize, self.term.cursor_x().unwrap_or(0) as usize)
     }
 
+    /// Take in what came from the program; true when it was output.
+    fn take(&mut self, msg: PtyMsg) -> bool {
+        match msg {
+            PtyMsg::Data(d) => {
+                self.feed(&d);
+                return true;
+            }
+            PtyMsg::Exit => self.exit_seen = true,
+            PtyMsg::Name(n) => {
+                if let Io::Node(l) = &mut self.io {
+                    l.name = Some(n);
+                }
+            }
+            PtyMsg::Online(on) => {
+                if let Io::Node(l) = &mut self.io {
+                    l.online = on;
+                }
+            }
+        }
+        false
+    }
+
     /// Feed PTY output until `done` holds or `timeout` passes; returns whether `done` held.
     fn wait_until(&mut self, timeout: Duration, done: impl Fn(&Self) -> bool) -> bool {
         let deadline = Instant::now() + timeout;
         while !done(self) {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
             match self.rx.recv_timeout(left) {
-                Ok(PtyMsg::Data(d)) => self.feed(&d),
                 Ok(PtyMsg::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.exit_seen = true;
                     return false;
+                }
+                Ok(msg) => {
+                    self.take(msg);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => return false,
             }
@@ -867,21 +944,22 @@ impl Buffer for TerminalBuffer {
     fn poll(&mut self, ed: &mut Editor) {
         let mut got = false;
         while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                PtyMsg::Data(d) => {
-                    self.feed(&d);
-                    got = true;
-                }
-                PtyMsg::Exit => self.exit_seen = true,
-            }
+            got |= self.take(msg);
         }
         if self.exit_seen && !self.exited {
             self.exited = true;
-            let pid = self.child;
-            std::thread::spawn(move || {
-                let _ = nix::sys::wait::waitpid(pid, None);
-            });
+            if let Io::Pty { child, .. } = &self.io {
+                let pid = *child;
+                std::thread::spawn(move || {
+                    let _ = nix::sys::wait::waitpid(pid, None);
+                });
+            }
             ed.run_hook("terminal-exited", &serde_json::Value::Null);
+        }
+        if let Io::Node(l) = &mut self.io
+            && let Some(name) = &l.name
+        {
+            l.info = crate::terminals::info(ed, &l.machine, name);
         }
         if got {
             if let Ok(t) = self.term.title() {
@@ -909,14 +987,19 @@ impl Buffer for TerminalBuffer {
             self.cell_px.store(px, Ordering::Relaxed);
             let _ = self.term.resize(cols, rows, px >> 16, px & 0xffff);
             self.grid.store(((cols as u32) << 16) | rows as u32, Ordering::Relaxed);
-            let ws = nix::pty::Winsize {
-                ws_row: rows,
-                ws_col: cols,
-                ws_xpixel: (cols as f32 * self.cell.x * ppp) as u16,
-                ws_ypixel: (rows as f32 * self.cell.y * ppp) as u16,
-            };
-            unsafe {
-                nix::libc::ioctl(self.master.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws);
+            match &self.io {
+                Io::Pty { master, .. } => {
+                    let ws = nix::pty::Winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: (cols as f32 * self.cell.x * ppp) as u16,
+                        ws_ypixel: (rows as f32 * self.cell.y * ppp) as u16,
+                    };
+                    unsafe {
+                        nix::libc::ioctl(master.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws);
+                    }
+                }
+                Io::Node(l) => l.send(crate::terminals::Out::Resize(cols, rows)),
             }
             self.invalidate_rows(true);
         }
@@ -1211,6 +1294,14 @@ impl Buffer for TerminalBuffer {
                 status.push(pwd.rsplit('/').next().unwrap_or(pwd).to_string());
             }
         }
+        if let Io::Node(l) = &self.io {
+            if l.machine != crate::remote::LOCAL {
+                status.push(format!("on {}", l.machine));
+            }
+            if !l.online && !self.exited {
+                status.push(if l.name.is_some() { "connecting…".into() } else { "starting…".into() });
+            }
+        }
         Modeline {
             title: self.title.clone(),
             status,
@@ -1254,21 +1345,45 @@ impl Buffer for TerminalBuffer {
         if self.exited {
             return ProcessStatus::None;
         }
-        // The terminal's foreground process group is the shell itself while it waits for input.
-        match nix::unistd::tcgetpgrp(self.master.as_ref()) {
-            Ok(pg) if pg != self.child => ProcessStatus::Running(process_name(pg.as_raw()).unwrap_or_else(|| format!("pid {pg}"))),
-            _ => ProcessStatus::Idle,
+        match &self.io {
+            // The terminal's foreground process group is the shell itself while it waits for input.
+            Io::Pty { master, child } => match nix::unistd::tcgetpgrp(master.as_ref()) {
+                Ok(pg) if pg != *child => ProcessStatus::Running(process_name(pg.as_raw()).unwrap_or_else(|| format!("pid {pg}"))),
+                _ => ProcessStatus::Idle,
+            },
+            // As its machine last said (empty at the prompt).
+            Io::Node(l) => match l.info.as_ref().and_then(|i| i.foreground.first()) {
+                Some(p) => ProcessStatus::Running(p.rsplit('/').next().unwrap_or(p).trim_start_matches('-').to_string()),
+                None => ProcessStatus::Idle,
+            },
         }
     }
 
-    fn on_kill(&mut self, _ed: &mut Editor) {
-        if !self.exited {
-            let _ = nix::sys::signal::kill(self.child, nix::sys::signal::Signal::SIGHUP);
-            let pid = self.child;
-            std::thread::spawn(move || {
-                let _ = nix::sys::wait::waitpid(pid, None);
-            });
+    fn on_kill(&mut self, ed: &mut Editor) {
+        match &self.io {
+            Io::Pty { child, .. } if !self.exited => {
+                let pid = *child;
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGHUP);
+                std::thread::spawn(move || {
+                    let _ = nix::sys::wait::waitpid(pid, None);
+                });
+            }
+            // Quitting leaves it running there, to show again next time.
+            Io::Node(l) if ed.quit_requested => l.send(crate::terminals::Out::Detach),
+            Io::Node(l) if !self.exited => l.kill(ed),
+            _ => {}
         }
+    }
+
+    fn machine(&self) -> Option<String> {
+        match &self.io {
+            Io::Node(l) if l.machine != crate::remote::LOCAL => Some(l.machine.clone()),
+            _ => None,
+        }
+    }
+
+    fn outlives_window(&self) -> bool {
+        matches!(self.io, Io::Node(_))
     }
 
     impl_any!();

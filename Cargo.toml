@@ -28,6 +28,8 @@ dirs = "6"
 regex = "1"
 uuid = { version = "1", features = ["v4", "v7"] }
 base64 = "0.22"
+# Terminals: manymux's node holds them (`serpis-node terminals`), its client feeds the terminal buffer.
+manymux = { version = "=0.2.1", default-features = false }
 
 [profile.dev]
 opt-level = 1

@@ -273,6 +273,24 @@ the offer off. A machine's chats run the Lua config that machine has (`~/.config
 it isn't copied yet. `scripts/ssh-check.sh <host>`
 runs a whole chat over real ssh in a throwaway directory there, with a mock model.
 
+## Terminals on any machine
+
+Terminals run in a machine's terminal node, which is [manymux](https://github.com/rayfish/manymux)'s
+node (`serpis-node terminals`, a process of its own beside the chat node, so a new serpis build
+never takes a shell with it). It listens at manymux's own socket, so an `mm` on the same machine
+shares its terminals with serpis: `mm ls` lists serpis's, and `terminal-attach` shows the ones `mm`
+started. A terminal keeps running when serpis quits, and the next serpis shows the ones that were
+shown (`session-restore-on-start`); killing its buffer ends it. `terminal-persistent` (on) is
+what does this here; off, a terminal on this machine is a child of the window, as before.
+
+`remote-new-terminal` opens one on another machine (pick the machine, then a folder), and
+`new-terminal` in a chat or terminal on another machine opens it there, in its folder
+(`terminal-follow-machine`). The bytes go over a connection of their own, the same way as the
+chats (`ssh <host> serpis-node agent`, with `SERPIS_BRIDGE=terminals`), and a dropped one is
+attached again. What runs in it (for the sidebar's activity) is asked of its machine every
+`terminal-poll-seconds`. A terminal runs with the home and shell its node has, and its zsh gets
+serpis's prompt marks (`terminal-shell-integration`).
+
 ## Images
 
 - **Chats**: paste an image (Cmd-V with a screenshot on the clipboard) or drop image files on a chat:

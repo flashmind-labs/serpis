@@ -89,6 +89,10 @@ pub struct Remotes {
     /// How many times this window loaded the config: after the first, this machine's node loads
     /// it again too.
     config_loads: u32,
+    /// How each machine was last reached (its terminals' streams go the same way).
+    pub targets: HashMap<String, Target>,
+    /// What the machines' terminals are doing.
+    pub terminals: crate::terminals::Polls,
 }
 
 /// The machines chats can run on: `remote-hosts`, then rayfish peers.
@@ -370,7 +374,13 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
             }
         };
         let result = match target {
-            Ok(target) => Client::connect_with(&target, "serpis", obtain, stage).await,
+            Ok(target) => {
+                let (t, n) = (target.clone(), name.clone());
+                main.send(move |ed| {
+                    ed.remote.targets.insert(n, t);
+                });
+                Client::connect_with(&target, "serpis", obtain, stage).await
+            }
             Err(e) => Err(e),
         };
         let (client, events) = match result {
@@ -725,6 +735,16 @@ pub fn status(ed: &Editor, machine: &str) -> (bool, Option<String>) {
         Some(Conn::Down { error, .. }) => (false, Some(error.clone())),
         _ => (false, None),
     }
+}
+
+/// Whether `machine`'s node is connected now.
+pub fn is_up(ed: &Editor, machine: &str) -> bool {
+    matches!(ed.remote.conns.get(machine), Some(Conn::Up(c)) if c.is_open())
+}
+
+/// The machines connected now.
+pub fn connected_machines(ed: &Editor) -> Vec<String> {
+    ed.remote.conns.keys().filter(|m| is_up(ed, m)).cloned().collect()
 }
 
 /// Send `request` to `machine`'s node; `done` gets the answer on the UI thread.
@@ -1234,7 +1254,7 @@ fn moved_failed(ed: &mut Editor, id: BufferId, error: String) {
 }
 
 /// Pick a machine (`local` first), then call `f` with its name ("local" for this one).
-fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(&mut Editor, String) + 'static) {
+pub fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(&mut Editor, String) + 'static) {
     let cands = machine_candidates(ed, with_local);
     let loading = ed.remote.rayfish_loading;
     if cands.is_empty() && !loading {
@@ -1288,7 +1308,7 @@ fn machine_candidates(ed: &mut Editor, with_local: bool) -> Vec<Candidate> {
 }
 
 /// Pick a folder on `machine` (its home's folders, or a typed path), then call `f` with it.
-fn pick_dir(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, String) + 'static) {
+pub fn pick_dir(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, String) + 'static) {
     let m = machine.to_string();
     request(ed, machine, Request::Dirs { path: "~".into() }, move |ed, r| match r {
         Ok(Response::Dirs { path, dirs }) => {

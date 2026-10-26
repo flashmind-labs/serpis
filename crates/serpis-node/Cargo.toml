@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nix = { version = "0.29", features = ["hostname", "process", "user"] }
 sha2 = "0.10"
 mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
+manymux = { workspace = true, features = ["desktop"] }
 
 [dev-dependencies]
 serpis-testkit.workspace = true

@@ -150,6 +150,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         crate::session_ui::save_open(&mut self.ed);
+        // However the window was closed: buffers tell quitting from being killed by it.
+        self.ed.quit_requested = true;
         let ids: Vec<_> = self.ed.buffers.keys().collect();
         for id in ids {
             self.ed.kill_buffer(id);

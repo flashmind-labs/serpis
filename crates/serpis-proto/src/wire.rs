@@ -166,6 +166,22 @@ pub enum Request {
     /// The folders in a directory on the node (`~` and relative paths start from its home),
     /// for picking where a chat runs.
     Dirs { path: String },
+    /// The terminals on the node's machine (its terminal node, manymux's: `serpis-node
+    /// terminals`, or an `mm` running there), with what each is doing.
+    Terminals,
+    /// Start a terminal there: the user's login shell in `cwd` (`~` and relative paths start
+    /// from its home). Answered with `Terminal`; its bytes come over the terminal node's own
+    /// stream (`serpis-node agent` with `SERPIS_BRIDGE=terminals`).
+    NewTerminal {
+        cwd: String,
+        cols: u16,
+        rows: u16,
+        /// Prompt marks and directory reports from a zsh (serpis's shell integration).
+        #[serde(default)]
+        integration: bool,
+    },
+    /// End a terminal (its programs are hung up).
+    KillTerminal { name: String },
 }
 
 /// The answer to the [`Call`] with the same id.
@@ -216,6 +232,32 @@ pub enum Response {
     Reloaded { errors: Vec<String> },
     /// What a `Setup` added (`auth:openrouter`, `models:local`, `settings:agent-model`).
     Setup { added: Vec<String> },
+    Terminals { terminals: Vec<TerminalInfo> },
+    /// The terminal a `NewTerminal` started, by its name there.
+    Terminal { name: String },
+}
+
+/// A terminal on a machine, as its terminal node tells it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    /// What it is called there (`host/name` to manymux).
+    pub name: String,
+    /// The title its program set, else the command.
+    pub title: String,
+    pub command: String,
+    /// Where its foreground program is, when the machine can say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// The program in the foreground and its arguments; empty at the shell's prompt.
+    #[serde(default)]
+    pub foreground: Vec<String>,
+    /// Clients attached to it now.
+    pub attached: usize,
+    /// Seconds since it last printed.
+    pub idle: u64,
+    /// Milliseconds since the epoch.
+    #[serde(default)]
+    pub started: u64,
 }
 
 /// What a machine has set up for chats.

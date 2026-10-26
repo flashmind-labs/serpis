@@ -413,6 +413,7 @@ pub fn save_open(ed: &mut Editor) {
     let open: Vec<String> = ids.into_iter().filter_map(|id| session_of(ed, id)).map(|p| p.to_string_lossy().into_owned()).collect();
     ed.persist_state("open-sessions", json!(open));
     ed.persist_state("open-remote-chats", crate::remote::open_chats(ed));
+    ed.persist_state("open-terminals", crate::terminals::open_terminals(ed));
 }
 
 /// Reopen the chats that were open last time (in the background of the sidebar, unshown).
@@ -433,6 +434,10 @@ pub fn restore_open(ed: &mut Editor) {
     if let Some(list) = Editor::persisted_state("open-remote-chats") {
         crate::remote::reopen(ed, &list);
     }
+    // So did terminals that terminal nodes hold.
+    if let Some(list) = Editor::persisted_state("open-terminals") {
+        crate::terminals::reopen(ed, &list);
+    }
 }
 
 pub fn install(ed: &mut Editor) {
@@ -440,7 +445,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("session-save", json!(true), "Record chats to session files (pi's format) so they can be resumed.");
     ed.defvar("session-directory", Value::Null, "Where chats are recorded (default: <agent dir>/sessions, e.g. ~/.serpis/agent/sessions).");
     ed.defvar("session-directories", json!(["~/.pi/agent/sessions"]), "More session directories chat-resume reads (pi's, by default), besides session-directory.");
-    ed.defvar("session-restore-on-start", json!(true), "Reopen the chats that were open when serpis quit.");
+    ed.defvar("session-restore-on-start", json!(true), "Reopen the chats that were open when serpis quit, and show the terminals still running that were shown.");
     ed.defvar("session-scan-interval", json!(30.0), "Seconds a read session list stays fresh.");
     ed.defvar("project-remember", json!(true), "Pin a project to the sidebar (the projects variable) when a chat in it saves its first session.");
     ed.defvar("chat-resume-scope", json!("project"), "Sessions chat-resume starts with: \"project\" (this project, all its worktrees), \"all\", \"folder\" (the current folder) or \"everywhere\" (every machine's: remote-hosts and rayfish peers). TAB / S-TAB in the picker cycle through them.");

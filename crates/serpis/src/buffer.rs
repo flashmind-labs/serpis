@@ -130,6 +130,12 @@ pub trait Buffer: Any {
     /// Called before the buffer is destroyed.
     fn on_kill(&mut self, _ed: &mut Editor) {}
 
+    /// Whether what it runs keeps running when serpis quits (a node holds it), so quitting
+    /// needn't ask about it.
+    fn outlives_window(&self) -> bool {
+        false
+    }
+
     /// Whether the buffer runs a process, and what it is doing (confirms kills and quits).
     fn process_status(&self) -> ProcessStatus {
         ProcessStatus::None

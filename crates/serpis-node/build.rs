@@ -20,6 +20,10 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dir.join("Cargo.toml").display());
         files.push(dir.join("Cargo.toml"));
         walk(&dir.join("src"), &mut files);
+        if dir.join("shell").is_dir() {
+            println!("cargo:rerun-if-changed={}", dir.join("shell").display());
+            walk(&dir.join("shell"), &mut files);
+        }
     }
     files.sort();
     // FNV-1a over paths (relative) and contents: stable across machines and Rust versions.

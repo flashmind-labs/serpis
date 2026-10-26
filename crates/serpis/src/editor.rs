@@ -1273,6 +1273,7 @@ impl Editor {
         self.status_cache = segs.iter().filter_map(|s| (s.f)(self, None)).filter(|t| !t.is_empty()).collect();
         crate::plugins::poll_reload(self);
         crate::remote::tick(self);
+        crate::terminals::tick(self);
         if let Some((_, _, t)) = &self.echo {
             if t.elapsed() > Duration::from_secs(8) && self.minibuffer.is_none() {
                 self.echo = None;

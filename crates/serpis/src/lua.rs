@@ -451,6 +451,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
         e.buffer_directory(id).map(|d| d.to_string_lossy().into_owned())
     }))?)?;
+    buf.set("machine", lua.create_function(|_, id: Option<u64>| ed(|e| {
+        let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
+        e.buffer_machine(id)
+    }))?)?;
     // Highlight a range for a moment: start/end are {line, col} (1-based, end exclusive).
     buf.set("highlight", lua.create_function(|_, (start, end, opts): (Vec<usize>, Vec<usize>, Option<Table>)| {
         let duration = opts.as_ref().and_then(|o| o.get::<u64>("duration").ok()).unwrap_or(150);

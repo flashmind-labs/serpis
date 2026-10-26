@@ -67,7 +67,8 @@ impl Editor {
         let mut running = Vec::new();
         for id in self.buffers.keys().collect::<Vec<_>>() {
             let status = self.process_status(id);
-            if self.should_confirm("confirm-quit-processes", &status) {
+            let stays = self.buffers.get(id).and_then(|s| s.buf.as_ref()).is_some_and(|b| b.outlives_window());
+            if !stays && self.should_confirm("confirm-quit-processes", &status) {
                 let name = self.buffer_display_name(id);
                 running.push(match status {
                     ProcessStatus::Running(p) => format!("{name} ({p})"),

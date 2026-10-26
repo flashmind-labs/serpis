@@ -733,6 +733,11 @@ impl Node {
             self.answer_later(client, call.id, call.request);
             return false;
         }
+        // So do the terminal node's answers.
+        if let Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } = &call.request {
+            self.answer_terminals(client, call.id, call.request);
+            return false;
+        }
         let response = match self.answer(client, call.request) {
             Ok(r) => r,
             Err(message) => Response::Error { message },
@@ -945,7 +950,7 @@ impl Node {
                 let _ = std::fs::remove_file(self.transfer_file(&name)?);
                 Response::Ok
             }
-            Request::Pack { .. } | Request::Unpack { .. } => unreachable!("answered later"),
+            Request::Pack { .. } | Request::Unpack { .. } | Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } => unreachable!("answered later"),
             Request::Stop => Response::Ok,
             Request::Restart => {
                 let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();
@@ -1006,6 +1011,31 @@ impl Node {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.transfer).map_err(|e| e.to_string())?;
         Ok(self.transfer.join(name))
+    }
+
+    /// Ask the machine's terminal node, and answer when it has.
+    fn answer_terminals(&mut self, client: u64, id: u64, request: Request) {
+        let msgs = self.msgs.clone();
+        self.rt.spawn(async move {
+            let socket = crate::terminals::socket();
+            let response = async {
+                Ok::<_, anyhow::Error>(match request {
+                    Request::Terminals => Response::Terminals { terminals: crate::terminals::list(&socket).await? },
+                    Request::NewTerminal { cwd, cols, rows, integration } => {
+                        let exe = std::env::current_exe()?;
+                        Response::Terminal { name: crate::terminals::spawn(&exe, &socket, &from_home(&cwd), (cols, rows), integration).await? }
+                    }
+                    Request::KillTerminal { name } => {
+                        crate::terminals::kill(&socket, &name).await?;
+                        Response::Ok
+                    }
+                    _ => anyhow::bail!("not a terminal request"),
+                })
+            }
+            .await
+            .unwrap_or_else(|e| Response::Error { message: format!("{e:#}") });
+            let _ = msgs.send(Msg::Reply { client, id, response });
+        });
     }
 
     /// Pack or unpack on another thread, and answer when done.

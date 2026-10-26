@@ -348,7 +348,18 @@ Steps:
       cache), this machine's node started and upgraded by the window (`Target::Own`), the chat
       buffer reduced to a view of a node chat, and running chats marked in `chat-resume` on
       every machine (`crates/serpis-node/tests/lua.rs`, the UI suite).
-4. Remote terminals through manymux.
+4. *Done*: terminals through manymux (`serpis_node::terminals`, `crates/serpis/src/terminals.rs`).
+   manymux's node (the crate, pinned) holds them, as `serpis-node terminals`: its own process, at
+   manymux's socket so `mm` and serpis share terminals. The chat node lists, starts and ends them
+   (`Terminals`, `NewTerminal`, `KillTerminal`) over the connection clients already have; each
+   terminal's bytes go over a stream of its own straight to the terminal node
+   (`serpis-node agent` with `SERPIS_BRIDGE=terminals`), attached again after drops. Terminal
+   buffers show them (local ones too, `terminal-persistent`), and are shown again on start. Found
+   on the way: manymux gives a shell the account's home, not the node's, so a test's shell read the
+   user's ~/.zshrc and wrote its history; serpis passes the node's `HOME` and `SHELL`, and the node
+   test checks it (`crates/serpis-node/tests/terminals.rs`, `tests/ui/terminal_node.lua`, its
+   `_restore`). Not yet: scrolling back further than what was attached with (manymux's `VIEW`), and
+   images through a reattach (its repaint is text).
 5. Node reliability: running turns that survive a node restart, parking a turn that keeps
    crashing it, the node's own Lua (hooks, tools, extensions on machines).
 6. The iOS app.

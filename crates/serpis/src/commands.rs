@@ -428,7 +428,17 @@ pub fn install(ed: &mut Editor) {
         });
         Ok(())
     });
-    ed.define_command("new-terminal", "Open a new terminal in the current project. With C-u, choose the folder (scripts pass it as a parameter).", o, |ed, a| {
+    ed.define_command("new-terminal", "Open a new terminal in the current project. With C-u, choose the folder (scripts pass it as a parameter). In a chat or terminal on another machine, it opens there, in its folder (terminal-follow-machine).", o, |ed, a| {
+        let here = ed.current_buffer();
+        if a.str(0).is_none()
+            && a.prefix.is_none()
+            && ed.var("terminal-follow-machine").and_then(Value::as_bool).unwrap_or(true)
+            && let Some(machine) = ed.buffer_machine(here)
+        {
+            let dir = ed.buffer_directory(here).map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| "~".into());
+            crate::terminals::new_terminal(ed, &machine, &dir)?;
+            return Ok(());
+        }
         crate::pickers::with_directory(ed, a, "New terminal in: ", |ed, dir| {
             if let Err(e) = ed.new_buffer_in("terminal", &dir) {
                 ed.error(format!("{e:#}"));

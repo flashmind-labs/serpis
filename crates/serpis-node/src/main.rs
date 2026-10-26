@@ -5,6 +5,8 @@
 //!   runs), starting it if none is running.
 //! - `serpis-node stop`: stop the node running here, if any (its open chats come back when it
 //!   starts again).
+//! - `serpis-node terminals`: run this machine's terminal node (manymux's) in the foreground.
+//! - `serpis-node stop-terminals`: stop it, ending every terminal in it.
 //! - `serpis-node version`.
 
 fn main() -> anyhow::Result<()> {
@@ -20,6 +22,15 @@ fn main() -> anyhow::Result<()> {
             node.wait();
             Ok(())
         }
+        Some("terminals") => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+                .init();
+            let socket = serpis_node::terminals::socket();
+            tracing::info!("serpis-node {} holding terminals at {}", serpis_node::VERSION, socket.display());
+            rt.block_on(serpis_node::terminals::serve(&socket))
+        }
+        Some("stop-terminals") => rt.block_on(serpis_node::terminals::stop(&serpis_node::terminals::socket())),
         // stdout is the protocol: logs go to stderr, which ssh shows the client.
         Some("agent") => rt.block_on(serpis_node::bridge::agent(&serpis_node::socket_path())),
         Some("stop") => rt.block_on(async {
@@ -40,7 +51,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: serpis-node serve | agent | stop | version | stamp");
+            eprintln!("usage: serpis-node serve | agent | stop | terminals | stop-terminals | version | stamp");
             std::process::exit(2);
         }
     }
