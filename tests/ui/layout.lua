@@ -120,7 +120,6 @@ local function running(id) return function() local p = serpis.buffer.process(id)
 
 -- Killing: an idle shell goes at once; a running program asks first. Quitting asks only about
 -- terminals that end with the window: one a terminal node holds keeps running.
-serpis.var.set("terminal-persistent", false)
 serpis.command.run("new-terminal")
 local term = serpis.buffer.current()
 when(prompt_ready, function() serpis.defer(700, function()

@@ -1,8 +1,8 @@
 //! Terminal buffer backed by libghostty-vt.
 //!
-//! Its program runs in a machine's terminal node ([`crate::terminals`]: it outlives the window,
-//! and other devices reach it), or, with `terminal-persistent` off, as a child of the window on
-//! a PTY of its own. Either way bytes arrive on a background thread or task and are fed to the
+//! Its program runs as a child of the window on a PTY of its own (this machine's terminals,
+//! unless `terminal-persistent`), or in a machine's terminal host ([`crate::terminals`]: it
+//! outlives the window, and other devices reach it). Either way bytes arrive on a background thread or task and are fed to the
 //! VT engine on the UI thread.
 //! Unbound keys are encoded by libghostty's key encoder (honouring application cursor mode,
 //! the Kitty keyboard protocol, ...). The scrollback is exposed as a [`TextSurface`]
@@ -226,7 +226,7 @@ impl TerminalBuffer {
         let integration = ed.var("terminal-shell-integration").and_then(serde_json::Value::as_bool).unwrap_or(true);
         let machine = params.get("machine").and_then(serde_json::Value::as_str).map(str::to_string);
         let attach = params.get("terminal").and_then(serde_json::Value::as_str).map(str::to_string);
-        let persistent = ed.var("terminal-persistent").and_then(serde_json::Value::as_bool).unwrap_or(true);
+        let persistent = ed.var("terminal-persistent").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let (tx, rx) = mpsc::channel();
         let remote_cwd = params.get("cwd").and_then(serde_json::Value::as_str).filter(|_| machine.as_deref().is_some_and(|m| m != crate::remote::LOCAL)).map(str::to_string);
         let cwd = params.get("cwd").and_then(serde_json::Value::as_str).map(crate::expand_home).filter(|d| d.is_dir()).unwrap_or_else(|| ed.cwd.clone());

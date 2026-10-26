@@ -12,7 +12,8 @@ sh("mkdir -p " .. box .. "/home/proj " .. box .. "/node && printf \"PROMPT='%%# 
 local boxhome = sh("cd '" .. box .. "/home' && pwd -P"):gsub("%s+$", "")
 local env = "HOME=" .. boxhome .. " SERPIS_NODE_DIR=" .. box .. "/node SERPIS_NODE_SOCKET=" .. box .. "/node/node.sock SERPIS_TERMINAL_SOCKET=" .. box .. "/t.sock"
 -- In the config, so the box is known when the next serpis starts (terminal_node_restore.lua).
-local config = string.format('serpis.var.set("remote-rayfish", false)\nserpis.var.set("remote-hosts", { { name = "box", command = { "sh", "-c", %q } } })\n',
+-- (This machine's terminals in its terminal host too: they outlive the window like the box's.)
+local config = string.format('serpis.var.set("remote-rayfish", false)\nserpis.var.set("terminal-persistent", true)\nserpis.var.set("remote-hosts", { { name = "box", command = { "sh", "-c", %q } } })\n',
   "exec env " .. env .. " " .. root .. "/target/debug/serpis-node agent")
 sh("mkdir -p '" .. os.getenv("SERPIS_CONFIG_DIR") .. "'")
 local f = io.open(os.getenv("SERPIS_CONFIG_DIR") .. "/init.lua", "w"); f:write(config); f:close()

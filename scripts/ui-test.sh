@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the scripted UI tests in tests/ui against a real serpis window.
-# Uses throwaway config/agent dirs so your own config is untouched.
+# Uses throwaway config/agent dirs so your own config is untouched. SERPIS_TEST_BIN runs another
+# build of serpis (a release one, to measure speed).
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build -q --manifest-path "$root/Cargo.toml" -p serpis-bin -p serpis-testkit -p serpis-node
@@ -40,7 +41,7 @@ for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sid
     [[ -d "$tmp/home-$state" ]] || new_home "$tmp/home-$state"
     SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \
       SERPIS_CONFIG_DIR="$tmp/cfg-$state" SERPIS_AGENT_DIR="$tmp/agent-$state" HOME="$tmp/home-$state" SERPIS_TERMINAL_SOCKET="$tmp/home-$state/.t.sock" \
-      timeout "${SERPIS_TEST_TIMEOUT:-60}" "$root/target/debug/serpis" >"$tmp/$name.log" 2>&1 || true
+      timeout "${SERPIS_TEST_TIMEOUT:-60}" "${SERPIS_TEST_BIN:-$root/target/debug/serpis}" >"$tmp/$name.log" 2>&1 || true
     # Chats run in this machine's node, which outlives the window: stopped with the test.
     HOME="$tmp/home-$state" "$root/target/debug/serpis-node" stop >/dev/null 2>&1 || true
     if [[ ! -s "$out" ]]; then echo "FAIL $name (no results; see $tmp/$name.log)"; fail=1; continue; fi

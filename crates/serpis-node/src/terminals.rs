@@ -7,8 +7,9 @@
 //! It speaks the node's own framing ([`serpis_proto::wire`]): calls (`Terminals`,
 //! `NewTerminal`, `AttachTerminal`, `DetachTerminal`, `ResizeTerminal`, `KillTerminal`, `Stop`)
 //! answered by replies, and [`tag::TERMINAL`] frames for the bytes. Each terminal keeps what it
-//! printed last (raw, for a fresh view's scrollback) and its screen (an emulator's, to paint a
-//! view exactly as it is when it attaches).
+//! printed last, raw: a view that attaches gets it (for its scrollback) and its screen, which an
+//! emulator works out from it only then. Nothing reads what a terminal prints on its way, so it
+//! prints as fast as a terminal can take it.
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -41,10 +42,8 @@ struct Term {
     last_output: Instant,
     /// What it printed last, from a line's start.
     kept: Vec<u8>,
-    /// Its screen.
-    vt: avt::Vt,
-    /// An incomplete UTF-8 sequence at the end of the last chunk, for the emulator.
-    partial: Vec<u8>,
+    /// The size it is shown at.
+    size: (u16, u16),
     /// The views showing it: by connection.
     views: HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>,
 }
@@ -62,21 +61,14 @@ impl Term {
             let cut = self.kept[over..].iter().position(|&b| b == b'\n').map_or(over, |i| over + i + 1);
             self.kept.drain(..cut);
         }
-        self.partial.extend_from_slice(bytes);
-        let valid = match std::str::from_utf8(&self.partial) {
-            Ok(s) => s.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            // Not UTF-8 at all: the emulator gets what it can read.
-            Err(_) => {
-                let text = String::from_utf8_lossy(&self.partial).into_owned();
-                self.vt.feed_str(&text);
-                self.partial.clear();
-                return;
-            }
-        };
-        let text = std::str::from_utf8(&self.partial[..valid]).unwrap_or_default().to_string();
-        self.vt.feed_str(&text);
-        self.partial.drain(..valid);
+    }
+
+    /// Its screen as it is, as escape sequences that paint it: worked out from what it printed
+    /// last.
+    fn screen(&self) -> String {
+        let mut vt = avt::Vt::builder().size(self.size.0 as usize, self.size.1 as usize).build();
+        vt.feed_str(&String::from_utf8_lossy(&self.kept));
+        vt.dump()
     }
 
     /// What a view needs to show it as it is: what it printed before (for scrollback, when
@@ -86,9 +78,9 @@ impl Term {
         if history {
             out.extend_from_slice(&self.kept);
         }
-        // Back to the main screen, cleared, then the screen as the emulator has it.
+        // Back to the main screen, cleared, then the screen as it is.
         out.extend_from_slice(b"\x1b[?1049l\x1b[0m\x1b[H\x1b[2J");
-        out.extend_from_slice(self.vt.dump().as_bytes());
+        out.extend_from_slice(self.screen().as_bytes());
         out
     }
 
@@ -112,7 +104,7 @@ impl Term {
         unsafe {
             nix::libc::ioctl(self.master.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws);
         }
-        self.vt.resize(cols as usize, rows as usize);
+        self.size = (cols, rows);
     }
 
     /// Hang up its programs.
@@ -349,8 +341,7 @@ fn answer(terms: &Terms, conn: u64, tx: &mpsc::UnboundedSender<Vec<u8>>, request
             let mut all = terms.lock().unwrap();
             let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|n| !all.contains_key(n)).unwrap_or_default();
             let master = Arc::new(master);
-            let vt = avt::Vt::builder().size(cols as usize, rows as usize).scrollback_limit(1000).build();
-            all.insert(name.clone(), Term { name: name.clone(), command: base, master: master.clone(), child, started: SystemTime::now(), last_output: Instant::now(), kept: Vec::new(), vt, partial: Vec::new(), views: HashMap::new() });
+            all.insert(name.clone(), Term { name: name.clone(), command: base, master: master.clone(), child, started: SystemTime::now(), last_output: Instant::now(), kept: Vec::new(), size: (cols, rows), views: HashMap::new() });
             drop(all);
             read_from(terms.clone(), name.clone(), master, child);
             Response::Terminal { name }
@@ -470,8 +461,7 @@ pub async fn stop(socket: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn what_is_kept_starts_at_a_line_and_characters_arrive_whole() {
-        let vt = avt::Vt::builder().size(20, 5).build();
+    fn what_is_kept_starts_at_a_line_and_the_screen_comes_from_it() {
         let pty = nix::pty::openpty(None, None).unwrap();
         let mut t = super::Term {
             name: "t".into(),
@@ -481,8 +471,7 @@ mod tests {
             started: std::time::SystemTime::now(),
             last_output: std::time::Instant::now(),
             kept: Vec::new(),
-            vt,
-            partial: Vec::new(),
+            size: (20, 5),
             views: Default::default(),
         };
         let line = b"\x1b[31mred\x1b[0m line\n";
@@ -491,10 +480,10 @@ mod tests {
         }
         assert!(t.kept.len() <= 2 * super::KEEP);
         assert!(t.kept.starts_with(line), "kept from a line's start");
-        // A character split across two reads reaches the screen whole.
+        // A character split across two reads is whole on the screen.
         let e = "é".as_bytes();
         t.printed(&e[..1]);
         t.printed(&e[1..]);
-        assert!(t.vt.text().iter().any(|l| l.contains('é')), "{:?}", t.vt.text());
+        assert!(t.screen().contains('é'), "{}", t.screen());
     }
 }

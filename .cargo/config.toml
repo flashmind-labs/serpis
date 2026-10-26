@@ -2,3 +2,9 @@
 # serpis re-exports), so everything links std dynamically.
 [build]
 rustflags = ["-C", "prefer-dynamic"]
+
+# libghostty (the terminal emulator) is built fully optimized in every profile: its Debug mode
+# checks a whole page of the screen's integrity on every line that scrolls, which makes a debug
+# build's terminals hundreds of times slower (termbench: minutes instead of seconds).
+[env]
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"

@@ -290,11 +290,12 @@ after a crash. `remote-uninstall-service` removes it.
 
 ## Terminals on any machine
 
-Terminals run in a machine's terminal host (`serpis-node terminals`), a process of its own beside
-the node, so a new serpis build never takes a shell with it. A terminal keeps running when serpis
-quits, and the next serpis shows the ones that were shown (`session-restore-on-start`), with
-what they printed and their screen as it is; killing its buffer ends it. `terminal-persistent`
-(on) is what does this here; off, a terminal on this machine is a child of the window, as before.
+A terminal on this machine is a child of the window, on a PTY of its own: the quickest it can
+be. Terminals on other machines run in that machine's terminal host (`serpis-node terminals`), a
+process of its own beside the node, so a new serpis build never takes a shell with it: they keep
+running when serpis quits, and the next serpis shows the ones that were shown
+(`session-restore-on-start`), with what they printed and their screen as it is; killing a buffer
+ends its terminal. `terminal-persistent` runs this machine's terminals that way too.
 
 `remote-new-terminal` opens one on another machine (pick the machine, then a folder there),
 `new-terminal` in a chat or terminal on another machine opens it there, in its folder

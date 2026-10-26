@@ -388,7 +388,7 @@ fn pick(ed: &mut Editor, machines: Vec<String>) {
 
 pub fn install(ed: &mut Editor) {
     let o = crate::editor::BUILTIN;
-    ed.defvar("terminal-persistent", json!(true), "Terminals on this machine run in its terminal host (serpis-node terminals), so they outlive the window and other devices reach them; off, a terminal is a child of the window and ends with it. Terminals on other machines always run in theirs.");
+    ed.defvar("terminal-persistent", json!(false), "Terminals on this machine run in its terminal host (serpis-node terminals), so they outlive the window and other devices reach them; off (the default), a terminal is a child of the window, which is quickest, and ends with it. Terminals on other machines always run in theirs.");
     ed.defvar("terminal-poll-seconds", json!(1.0), "How often machines are asked what their shown terminals are doing (the program in front, for activity).");
     ed.defvar("terminal-follow-machine", json!(true), "new-terminal opens on the machine of the buffer you are in (a chat or terminal on another machine), in its folder there.");
     ed.define_command("remote-new-terminal", "Open a terminal on another machine: pick the machine, then a folder there (params: machine, folder).", o, |ed, a| {
