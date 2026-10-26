@@ -378,7 +378,7 @@ Steps:
 ### Later (left open on the way; pick up when they matter)
 
 Terminals (step 4):
-- Not tried on a real machine yet (slimbook): only through the local stand-in box.
+- Not tried over real ssh yet: only through the local stand-in box.
 - Scrolling back further than the lines fetched on attach (`terminal-history-lines`, 5000):
   manymux answers `VIEW` requests for older lines; the terminal buffer doesn't ask yet.
 - Images drawn in a terminal (kitty graphics) don't survive a reattach: manymux's repaint is text.

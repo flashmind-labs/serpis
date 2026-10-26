@@ -7,6 +7,8 @@
 //!   starts again).
 //! - `serpis-node terminals`: run this machine's terminal node (manymux's) in the foreground.
 //! - `serpis-node stop-terminals`: stop it, ending every terminal in it.
+//! - `serpis-node install-service` / `uninstall-service`: start the node at boot and after
+//!   crashes (systemd user unit, launchd agent), or stop doing that.
 //! - `serpis-node version`.
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +41,22 @@ fn main() -> anyhow::Result<()> {
             tracing::info!("serpis-node {} holding terminals at {}", serpis_node::VERSION, socket.display());
             rt.block_on(serpis_node::terminals::serve(&socket))
         }
+        // What remote-install-service does, for a machine without serpis's window.
+        Some("install-service") => {
+            let r = serpis_node::service::install(&std::env::current_exe()?, &serpis_node::socket_path())?;
+            println!("serpis-node now starts at boot and after crashes ({:?}: {})", r.installed.manager, r.installed.file);
+            if let Some(n) = r.note {
+                println!("{n}");
+            }
+            Ok(())
+        }
+        Some("uninstall-service") => {
+            match serpis_node::service::uninstall()? {
+                Some(i) => println!("removed {}", i.file),
+                None => println!("serpis-node isn't installed as a service"),
+            }
+            Ok(())
+        }
         Some("stop-terminals") => rt.block_on(serpis_node::terminals::stop(&serpis_node::terminals::socket())),
         // stdout is the protocol: logs go to stderr, which ssh shows the client.
         Some("agent") => rt.block_on(serpis_node::bridge::agent(&serpis_node::socket_path())),
@@ -60,7 +78,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: serpis-node serve | agent | stop | terminals | stop-terminals | version | stamp");
+            eprintln!("usage: serpis-node serve | agent | stop | install-service | uninstall-service | terminals | stop-terminals | version | stamp");
             std::process::exit(2);
         }
     }

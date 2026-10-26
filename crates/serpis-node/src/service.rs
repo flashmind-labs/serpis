@@ -55,14 +55,15 @@ fn manager() -> Result<Manager> {
     if std::env::var_os("SERPIS_SERVICE_CTL").is_some() || std::process::Command::new("systemctl").args(["--user", "--version"]).output().is_ok_and(|o| o.status.success()) {
         return Ok(Manager::Systemd);
     }
-    bail!("this machine has neither launchd nor systemd for its user, so serpis-node can't be started at boot")
+    bail!("this machine has neither launchd nor a systemd user manager (`systemctl --user`), so serpis-node can't be started at boot here; it still starts whenever serpis connects")
 }
 
 fn service_file(m: Manager) -> PathBuf {
     let dir = std::env::var_os("SERPIS_SERVICE_DIR").map(PathBuf::from).unwrap_or_else(|| {
         let home = dirs::home_dir().unwrap_or_default();
         match m {
-            Manager::Systemd => home.join(".config/systemd/user"),
+            // Where systemd looks: $XDG_CONFIG_HOME, else ~/.config.
+            Manager::Systemd => std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("systemd/user"),
             Manager::Launchd => home.join("Library/LaunchAgents"),
         }
     });
@@ -80,7 +81,19 @@ fn ctl(m: Manager, args: &[&str]) -> Result<String> {
     };
     words.extend(args.iter().map(|a| a.to_string()));
     let program = std::env::var("SERPIS_SERVICE_CTL").unwrap_or(program);
-    let out = std::process::Command::new(&program).args(&words).output().with_context(|| format!("running {program}"))?;
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&words);
+    // A login that didn't go through PAM (some ssh servers, rayfish's, `su`) has no
+    // XDG_RUNTIME_DIR, and `systemctl --user` can't find the user's manager without it.
+    if m == Manager::Systemd && std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        let run = PathBuf::from(format!("/run/user/{}", nix::unistd::getuid()));
+        if !run.join("bus").exists() && std::env::var_os("SERPIS_SERVICE_CTL").is_none() {
+            let user = nix::unistd::User::from_uid(nix::unistd::getuid()).ok().flatten().map(|u| u.name).unwrap_or_default();
+            bail!("no systemd user manager runs for {user} now (nobody is logged in, and lingering is off): run `sudo loginctl enable-linger {user}` there, then try again");
+        }
+        cmd.env("XDG_RUNTIME_DIR", run);
+    }
+    let out = cmd.output().with_context(|| format!("running {program}"))?;
     if !out.status.success() {
         bail!("{program} {}: {}", words.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -184,7 +197,8 @@ pub fn install(exe: &Path, socket: &Path) -> Result<Report> {
             // Loaded now (it exits at once: a node already runs), and at every login.
             let uid = nix::unistd::getuid();
             let _ = ctl(m, &["bootout", &format!("gui/{uid}/{LABEL}")]);
-            ctl(m, &["bootstrap", &format!("gui/{uid}"), &file.to_string_lossy()])?;
+            ctl(m, &["bootstrap", &format!("gui/{uid}"), &file.to_string_lossy()])
+                .context("launchd has no session for this user to start it in (a Mac reached over ssh with nobody logged in at it): log in there once, or run `serpis-node install-service` from a terminal on it")?;
             note = Some("macOS starts it when you log in (a reboot needs a login first, unless the Mac logs in by itself)".into());
         }
     }
