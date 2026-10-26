@@ -394,6 +394,26 @@ pub struct Pipe {
     pub child: Option<tokio::process::Child>,
     /// What that process said on stderr (why it ended, when it did).
     pub stderr: Arc<Mutex<String>>,
+    /// Done once the process has said all it will on stderr.
+    pub stderr_done: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Pipe {
+    /// Why the far side ended the stream: what it said on stderr, waited for a moment (it is
+    /// read as it comes), and a build serpis lacks named as such. None when it said nothing.
+    pub async fn why(stderr: Arc<Mutex<String>>, done: Option<tokio::task::JoinHandle<()>>) -> Option<String> {
+        if let Some(done) = done {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), done).await;
+        }
+        let said = stderr.lock().unwrap().clone();
+        if let Some(system) = crate::deploy::wanted_system(&said) {
+            return Some(format!("serpis has no serpis-node build for {system} to run there"));
+        }
+        if crate::deploy::wanted(&said).is_some() {
+            return Some("the serpis-node build serpis expects isn't installed there yet".into());
+        }
+        (!said.trim().is_empty()).then(|| said.trim().to_string())
+    }
 }
 
 /// Open a stream to the terminal node of the machine `target` reaches, the way its chat node is
@@ -403,7 +423,7 @@ pub struct Pipe {
 pub async fn terminal_pipe(target: &Target) -> Result<Pipe> {
     let local = |s: tokio::net::UnixStream| {
         let (r, w) = s.into_split();
-        Pipe { read: Box::new(r), write: Box::new(w), child: None, stderr: Default::default() }
+        Pipe { read: Box::new(r), write: Box::new(w), child: None, stderr: Default::default(), stderr_done: None }
     };
     let socket = crate::terminals::socket();
     let argv = match target {
@@ -436,12 +456,12 @@ pub async fn terminal_pipe(target: &Target) -> Result<Pipe> {
     let (read, write, err) = (child.stdout.take().unwrap(), child.stdin.take().unwrap(), child.stderr.take().unwrap());
     let stderr: Arc<Mutex<String>> = Default::default();
     let said = stderr.clone();
-    tokio::spawn(async move {
+    let done = tokio::spawn(async move {
         let mut buf = String::new();
         let _ = tokio::io::BufReader::new(err).read_to_string(&mut buf).await;
         said.lock().unwrap().push_str(buf.trim());
     });
-    Ok(Pipe { read: Box::new(read), write: Box::new(write), child: Some(child), stderr })
+    Ok(Pipe { read: Box::new(read), write: Box::new(write), child: Some(child), stderr, stderr_done: Some(done) })
 }
 
 fn describe(t: &Target) -> String {

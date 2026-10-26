@@ -737,6 +737,16 @@ pub fn status(ed: &Editor, machine: &str) -> (bool, Option<String>) {
     }
 }
 
+/// How `machine` is reached now: the way its connection went, with the node builds there are
+/// now (a connect can build one for a system serpis had none for).
+pub fn current_target(ed: &mut Editor, machine: &str) -> Option<Target> {
+    let mut t = ed.remote.targets.get(machine).cloned()?;
+    if let Target::Ssh { deploy, .. } = &mut t {
+        *deploy = node_builds(ed);
+    }
+    Some(t)
+}
+
 /// Whether `machine`'s node is connected now.
 pub fn is_up(ed: &Editor, machine: &str) -> bool {
     matches!(ed.remote.conns.get(machine), Some(Conn::Up(c)) if c.is_open())

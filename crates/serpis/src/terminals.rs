@@ -103,7 +103,7 @@ fn attach(ed: &mut Editor, machine: &str, name: String, history: u32, size: (u16
     let m = machine.to_string();
     crate::remote::with_client(ed, machine, move |ed, c| {
         let target = match c {
-            Ok(_) => ed.remote.targets.get(&m).cloned(),
+            Ok(_) => crate::remote::current_target(ed, &m),
             Err(e) => return fail(&to, &e),
         };
         let Some(target) = target else { return fail(&to, &format!("no way to reach {m}'s terminals")) };
@@ -122,14 +122,12 @@ async fn pump(target: serpis_node::client::Target, name: String, mut history: u3
     loop {
         let attempt = async {
             let pipe = serpis_node::client::terminal_pipe(&target).await?;
-            let stderr = pipe.stderr.clone();
+            let (stderr, done) = (pipe.stderr.clone(), pipe.stderr_done);
             let attached = Stream::from_halves(pipe.read, pipe.write).attach(&name, Size::new(size.0, size.1), history, false).await;
             match attached {
                 Ok(a) => Ok((a, pipe.child)),
-                Err(e) => {
-                    let said = stderr.lock().unwrap().clone();
-                    Err(if said.is_empty() { e } else { anyhow::anyhow!("{said}") })
-                }
+                // What the far side said is the reason, when it said anything.
+                Err(e) => Err(serpis_node::client::Pipe::why(stderr, done).await.map(|w| anyhow::anyhow!("{w}")).unwrap_or(e)),
             }
         };
         let (attached, _child) = match attempt.await {
