@@ -17,6 +17,7 @@ pub mod deploy;
 pub mod lua;
 pub mod workspace;
 pub mod server;
+pub mod service;
 pub mod terminals;
 
 use std::path::PathBuf;

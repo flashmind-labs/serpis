@@ -182,6 +182,12 @@ pub enum Request {
     },
     /// End a terminal (its programs are hung up).
     KillTerminal { name: String },
+    /// Start the node when the machine boots and again when it crashes (a systemd user unit, a
+    /// launchd agent), so chats cut off by either continue without anyone connecting. Answered
+    /// with `Service`.
+    InstallService,
+    /// Stop doing that. Answered with `Service` (`installed` false).
+    UninstallService,
 }
 
 /// The answer to the [`Call`] with the same id.
@@ -235,6 +241,14 @@ pub enum Response {
     Terminals { terminals: Vec<TerminalInfo> },
     /// The terminal a `NewTerminal` started, by its name there.
     Terminal { name: String },
+    /// The node's service: `systemd` or `launchd`, its file, and what is left to do.
+    Service {
+        installed: bool,
+        manager: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
 }
 
 /// A terminal on a machine, as its terminal node tells it.

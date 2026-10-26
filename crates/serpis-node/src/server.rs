@@ -137,9 +137,13 @@ pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
             tool_calls: HashMap::new(),
             next_call: 0,
         };
+        // Who holds the socket (for whoever has to stop a node that no longer answers).
+        let pid_file = node.open_file.with_file_name("node.pid");
+        let _ = std::fs::write(&pid_file, std::process::id().to_string());
         node.reopen();
         node.run(rx);
         let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(&pid_file);
     })?;
     rt.spawn(accept(listener, tx.clone()));
     Ok(Running { tx, thread: Some(thread), socket: config.socket })
@@ -277,6 +281,28 @@ struct Slot {
     notices: Vec<(Level, String)>,
     /// Its last view closed while it worked: it closes once it is done, unless shown again.
     close_when_idle: bool,
+    /// Times in a row its turn was cut off by the node stopping and continued (0 once a turn
+    /// ends on its own).
+    cut: u32,
+}
+
+/// A chat open when the node last noted them ([`Node::reopen`]): its session file, whether it
+/// was mid-turn, and how many times in a row its turn had already been continued.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct OpenChat {
+    path: String,
+    #[serde(default)]
+    running: bool,
+    #[serde(default)]
+    cut: u32,
+}
+
+/// What `open.json` held: chats, or (from older nodes) their paths.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Opened {
+    Chat(OpenChat),
+    Path(String),
 }
 
 struct Client {
@@ -301,7 +327,7 @@ struct Node {
     wake: serpis_chat::Wake,
     /// The session files of open chats, reopened when the node starts again.
     open_file: PathBuf,
-    open_written: Vec<String>,
+    open_written: Vec<OpenChat>,
     session_cache: HashMap<PathBuf, serpis_chat::session::Info>,
     /// The config's chat side: hooks, tools, settings.
     lua: NodeLua,
@@ -494,17 +520,23 @@ impl Node {
             if self.settings.refresh() {
                 self.lua.state.borrow_mut().file = self.settings.vars.clone();
             }
+            let keep_going = self.lua.var("chat-keep-going").and_then(|v| v.as_bool()).unwrap_or(true);
+            for slot in self.chats.values_mut() {
+                slot.chat.keep_going_default = keep_going;
+            }
             self.refresh_infos();
             next_timer = self.lua.run_timers();
             self.poll();
             self.after_lua();
             self.close_idle();
             self.flush();
-            self.remember_open();
+            self.remember_open(false);
             if stop {
                 for slot in self.chats.values_mut() {
                     slot.chat.abort();
                 }
+                // Stopped on purpose: nothing was cut off.
+                self.remember_open(true);
                 break;
             }
             // News arriving meanwhile goes out together.
@@ -734,7 +766,7 @@ impl Node {
             return false;
         }
         // So do the terminal node's answers.
-        if let Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } = &call.request {
+        if let Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::InstallService | Request::UninstallService = &call.request {
             self.answer_terminals(client, call.id, call.request);
             return false;
         }
@@ -787,7 +819,7 @@ impl Node {
                     chat.session_id = id;
                 }
                 let id = chat.session_id.clone();
-                self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new(), close_when_idle: false });
+                self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new(), close_when_idle: false, cut: 0 });
                 Response::Chat { chat: id }
             }
             Request::Resume { session } => Response::Chat { chat: self.resume(&from_home(&session))? },
@@ -950,7 +982,7 @@ impl Node {
                 let _ = std::fs::remove_file(self.transfer_file(&name)?);
                 Response::Ok
             }
-            Request::Pack { .. } | Request::Unpack { .. } | Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } => unreachable!("answered later"),
+            Request::Pack { .. } | Request::Unpack { .. } | Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::InstallService | Request::UninstallService => unreachable!("answered later"),
             Request::Stop => Response::Ok,
             Request::Restart => {
                 let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();
@@ -1028,6 +1060,15 @@ impl Node {
                     Request::KillTerminal { name } => {
                         crate::terminals::kill(&socket, &name).await?;
                         Response::Ok
+                    }
+                    Request::InstallService => {
+                        let (exe, node) = (std::env::current_exe()?, crate::socket_path());
+                        let r = tokio::task::spawn_blocking(move || crate::service::install(&exe, &node)).await??;
+                        Response::Service { installed: true, manager: format!("{:?}", r.installed.manager).to_lowercase(), file: r.installed.file, note: r.note }
+                    }
+                    Request::UninstallService => {
+                        let r = tokio::task::spawn_blocking(crate::service::uninstall).await??;
+                        Response::Service { installed: false, manager: r.as_ref().map(|i| format!("{:?}", i.manager).to_lowercase()).unwrap_or_default(), file: r.map(|i| i.file).unwrap_or_default(), note: None }
                     }
                     _ => anyhow::bail!("not a terminal request"),
                 })
@@ -1169,28 +1210,86 @@ impl Node {
         if self.chats.contains_key(&id) {
             return Err(format!("chat {id} is already open from another file"));
         }
-        self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new(), close_when_idle: false });
+        self.chats.insert(id.clone(), Slot { chat, sent_state: None, notices: Vec::new(), close_when_idle: false, cut: 0 });
         self.with_chat(&id, |c, h| c.restore(h, &loaded))?;
         Ok(id)
     }
 
-    /// Reopen the chats that were open when the node last stopped.
+    /// Reopen the chats that were open when the node last stopped. One whose turn the stop cut
+    /// off (a crash, a reboot, a kill) continues it, unless it doesn't keep going
+    /// (`chat-keep-going`, or its own choice) or was cut off `chat-keep-going-limit` times in a
+    /// row already (a turn that keeps stopping the node is parked). Either way it says so.
     fn reopen(&mut self) {
-        let paths: Vec<String> = std::fs::read_to_string(&self.open_file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        for p in &paths {
-            let p = PathBuf::from(p);
-            if p.exists() {
-                if let Err(e) = self.resume(&p) {
+        let text = std::fs::read_to_string(&self.open_file).unwrap_or_default();
+        let stopped = std::fs::metadata(&self.open_file).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+        let opened: Vec<Opened> = serde_json::from_str(&text).unwrap_or_default();
+        let open: Vec<OpenChat> = opened.into_iter().map(|o| match o {
+            Opened::Chat(c) => c,
+            Opened::Path(path) => OpenChat { path, running: false, cut: 0 },
+        }).collect();
+        let keep_going = self.lua.var("chat-keep-going").and_then(|v| v.as_bool()).unwrap_or(true);
+        let limit = self.lua.var("chat-keep-going-limit").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+        let ago = stopped.map(|d| format!("{} ago", serpis_chat::fmt_age(d))).unwrap_or_else(|| "a moment ago".into());
+        for o in &open {
+            let p = PathBuf::from(&o.path);
+            if !p.exists() {
+                continue;
+            }
+            let id = match self.resume(&p) {
+                Ok(id) => id,
+                Err(e) => {
                     tracing::warn!("reopening {}: {e}", p.display());
+                    continue;
                 }
+            };
+            if o.running {
+                self.cut_off(&id, o.cut, keep_going, limit, &ago);
             }
         }
-        self.open_written = paths;
+        self.open_written = open;
     }
 
-    /// Note the open chats' session files, for [`Node::reopen`].
-    fn remember_open(&mut self) {
-        let open: Vec<String> = self.chats.values().filter_map(|s| s.chat.session.as_ref().filter(|w| w.exists())).map(|w| w.path.to_string_lossy().into_owned()).collect();
+    /// Chat `id`'s turn was cut off by the node stopping (`ago`), `cut` times in a row before.
+    fn cut_off(&mut self, id: &str, cut: u32, keep_going: bool, limit: u32, ago: &str) {
+        let Some(slot) = self.chats.get_mut(id) else { return };
+        slot.chat.keep_going_default = keep_going;
+        if !slot.chat.cut_off() {
+            return;
+        }
+        let (keep, parked) = (slot.chat.keep_going(), cut >= limit);
+        let continued = keep && !parked && self.with_chat(id, |c, h| c.continue_turn(h)).unwrap_or(false);
+        let Some(slot) = self.chats.get_mut(id) else { return };
+        let (text, tone) = if continued {
+            slot.cut = cut + 1;
+            (format!("↻ Continued: the node running this chat stopped mid-turn {ago}, and started again"), serpis_proto::Tone::Meta)
+        } else if !keep {
+            (format!("⏸ The node running this chat stopped mid-turn {ago}: the chat doesn't keep going on its own, so send a message to continue"), serpis_proto::Tone::Warning)
+        } else if parked {
+            (format!("⏸ Parked: the node stopped while this chat's turn ran {} times in a row (most recently {ago}), so it isn't continued again: send a message to continue", cut + 1), serpis_proto::Tone::Warning)
+        } else {
+            (format!("⏸ The node running this chat stopped mid-turn {ago}, and the turn couldn't continue: send a message to continue"), serpis_proto::Tone::Warning)
+        };
+        tracing::info!("chat {id}: {text}");
+        slot.chat.notice(text.clone(), tone);
+        let payload = json!({"buffer": id, "continued": continued, "parked": parked && keep, "times": cut + 1, "text": text});
+        let chat_info = Info::of(id, &slot.chat);
+        self.lua.state.borrow_mut().chats.insert(id.to_string(), chat_info);
+        self.lua.run_hook_for(Some(id), "turn-cut-off", &payload);
+    }
+
+    /// Note the open chats (their session files, and which are mid-turn), for [`Node::reopen`].
+    /// `stopping`: on purpose, so none is noted mid-turn.
+    fn remember_open(&mut self, stopping: bool) {
+        let mut open = Vec::new();
+        for slot in self.chats.values_mut() {
+            let running = !stopping && (slot.chat.running() || slot.chat.compacting());
+            if !running {
+                slot.cut = 0;
+            }
+            if let Some(w) = slot.chat.session.as_ref().filter(|w| w.exists()) {
+                open.push(OpenChat { path: w.path.to_string_lossy().into_owned(), running, cut: slot.cut });
+            }
+        }
         if open != self.open_written {
             if let Err(e) = std::fs::write(&self.open_file, serde_json::to_string(&open).unwrap_or_default()) {
                 tracing::warn!("{}: {e}", self.open_file.display());

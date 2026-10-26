@@ -37,6 +37,8 @@ pub struct ChatInfo {
     pub machine: Option<String>,
     /// Where it runs and its id there: what requests about it are sent with.
     pub node: (String, String),
+    /// A turn cut off by its node stopping continues by itself (`chat-keep-going`).
+    pub keep_going: bool,
 }
 
 pub fn usage_json(u: &Usage) -> Value {
@@ -64,6 +66,7 @@ impl ChatInfo {
             "session": self.session,
             "session_id": self.session_id,
             "machine": self.machine,
+            "keep_going": self.keep_going,
             "context": {
                 "used": self.context.0.unwrap_or(0),
                 "window": self.context.1,

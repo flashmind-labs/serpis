@@ -1566,6 +1566,53 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
+    ed.define_command("remote-install-service", "Start a machine's serpis-node when it boots, and again when it crashes (a systemd user service, or a launchd agent on a Mac), so chats cut off by either keep going without anyone connecting. Asks first (params: machine, or \"local\"; true to skip asking).", o, |ed, a| {
+        let yes = a.params.get(1).and_then(Value::as_bool).unwrap_or(false);
+        let go = move |ed: &mut Editor, m: String| {
+            let install = move |ed: &mut Editor, m: String| {
+                let mm = m.clone();
+                request(ed, &m, Request::InstallService, move |ed, r| match r {
+                    Ok(Response::Service { manager, file, note, .. }) => {
+                        let place = if mm == LOCAL { "this machine".to_string() } else { mm.clone() };
+                        let more = note.map(|n| format!("; {n}")).unwrap_or_default();
+                        ed.message(format!("serpis-node on {place} now starts at boot and after crashes ({manager}: {file}){more}"));
+                    }
+                    Ok(other) => ed.error(format!("{mm}: unexpected answer {other:?}")),
+                    Err(e) => ed.error(format!("{mm}: {e}")),
+                });
+            };
+            if yes {
+                return install(ed, m);
+            }
+            let place = if m == LOCAL { "this machine".to_string() } else { m.clone() };
+            ed.y_or_n(&format!("Install serpis-node as a service on {place}, started at boot and after crashes?"), move |ed, ok| {
+                if ok {
+                    install(ed, m);
+                }
+            });
+        };
+        match a.str(0) {
+            Some(m) => go(ed, m.to_string()),
+            None => pick_machine(ed, "Start at boot on: ", true, go),
+        }
+        Ok(())
+    });
+    ed.define_command("remote-uninstall-service", "Stop starting a machine's serpis-node at boot (remote-install-service); the node running keeps running (param: machine).", o, |ed, a| {
+        let go = |ed: &mut Editor, m: String| {
+            let mm = m.clone();
+            request(ed, &m, Request::UninstallService, move |ed, r| match r {
+                Ok(Response::Service { file, .. }) if file.is_empty() => ed.message(format!("serpis-node on {mm} wasn't installed as a service")),
+                Ok(Response::Service { file, .. }) => ed.message(format!("serpis-node on {mm} no longer starts at boot (removed {file})")),
+                Ok(other) => ed.error(format!("{mm}: unexpected answer {other:?}")),
+                Err(e) => ed.error(format!("{mm}: {e}")),
+            });
+        };
+        match a.str(0) {
+            Some(m) => go(ed, m.to_string()),
+            None => pick_machine(ed, "Stop starting at boot on: ", true, go),
+        }
+        Ok(())
+    });
     ed.define_command("remote-stop-node", "Stop the node on a machine: its chats stop, and come back when it starts again (param: machine).", o, |ed, a| {
         let stop = |ed: &mut Editor, m: String| {
             let mm = m.clone();

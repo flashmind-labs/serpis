@@ -500,6 +500,7 @@ impl ChatBuffer {
             cache: self.cache_json(),
             machine: (!self.node.local()).then(|| self.node.machine.clone()),
             node: (self.node.machine.clone(), self.node.chat.clone()),
+            keep_going: s.keep_going,
         }
     }
 
@@ -512,6 +513,17 @@ impl ChatBuffer {
         self.node.post(Request::Append { chat: self.node.chat.clone(), kind: kind.to_string(), data: data.clone() });
         // Read back at once, before the node's next state says it.
         self.node.state.custom.push((kind.to_string(), data));
+    }
+
+    /// Whether a turn cut off by its node stopping (a crash, a reboot) continues on its own.
+    pub fn keep_going(&self) -> bool {
+        self.node.state.keep_going
+    }
+
+    /// This chat's own choice of [`ChatBuffer::keep_going`], kept in its session.
+    pub fn set_keep_going(&mut self, on: bool) {
+        self.append_entry(serpis_chat::KEEP_GOING, serde_json::json!({"on": on}));
+        self.node.state.keep_going = on;
     }
 
     /// Name the session (`session_info`), e.g. after `buffer-set-title`.
@@ -1596,8 +1608,18 @@ impl Buffer for ChatBuffer {
         if clicked {
             run = Some("chat-select-machine");
         }
+        // Whether a turn cut off by its machine's node stopping goes on by itself.
+        let (label, tip) = if self.keep_going() {
+            ("↻ Keeps going", "If its machine's serpis-node stops mid-turn (a crash, a reboot), the turn continues when it starts again. Click to make it wait for you instead (chat-toggle-keep-going; default: chat-keep-going)")
+        } else {
+            ("⏸ Waits", "If its machine's serpis-node stops mid-turn (a crash, a reboot), the turn waits for you to send a message. Click to make it keep going (chat-toggle-keep-going; default: chat-keep-going)")
+        };
+        let (kr, clicked) = pill(ui, wr.right() + 2.0 * k, "keep-going", label, tip, None);
+        if clicked {
+            run = Some("chat-toggle-keep-going");
+        }
         // The activity and usage labels fit between these pills and the send button.
-        let (think_r, tr) = (tr, wr);
+        let (think_r, tr) = (tr, kr);
 
         // Send (or stop) on the right.
         let d = 28.0 * k;
@@ -1641,7 +1663,7 @@ impl Buffer for ChatBuffer {
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
-        hits.extend([("model", mr), ("thinking", think_r), ("machine", wr), ("send", send), ("card", card)]);
+        hits.extend([("model", mr), ("thinking", think_r), ("machine", wr), ("keep-going", tr), ("send", send), ("card", card)]);
         self.composer_hits = hits;
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;

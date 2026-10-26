@@ -862,6 +862,16 @@ pub fn install(ed: &mut Editor) {
         });
         Ok(())
     });
+    ed.define_command("chat-toggle-keep-going", "Whether this chat's turn continues by itself when its machine's serpis-node stops mid-turn (a crash, a reboot) and starts again, or waits for you (param: true or false; default: chat-keep-going).", o, |ed, a| {
+        let on = a.params.first().and_then(Value::as_bool);
+        let now = with_chat(ed, |c, _| {
+            let on = on.unwrap_or(!c.keep_going());
+            c.set_keep_going(on);
+            on
+        })?;
+        ed.message(if now { "This chat keeps going after its node restarts" } else { "This chat waits for you after its node restarts" });
+        Ok(())
+    });
     ed.define_command("chat-select-thinking", "Choose the thinking level from a picker (param: level, e.g. \"high\").", o, |ed, a| {
         if let Some(level) = a.str(0).map(str::to_string) {
             let id = ed.chat_id(None)?;

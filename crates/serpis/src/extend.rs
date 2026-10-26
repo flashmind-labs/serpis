@@ -74,7 +74,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     // In a node (a chat's own hooks and tools), a chat is its id there, and nil is the chat whose
     // hook or tool is running. Reads see the chat as its node last said; actions are sent to it.
     ("serpis.chat.list", "(): every chat as serpis.chat.info returns it."),
-    ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil, session_id (the chat's id on its machine), machine = name | nil (where it runs, when not here)}."),
+    ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil, session_id (the chat's id on its machine), machine = name | nil (where it runs, when not here), keep_going (a turn its node's stopping cut off continues)}."),
     ("serpis.chat.usage", "(buf?): the whole session's {input, output, cache_read, cache_write, total_tokens, cost} (cost in dollars, every message so far)."),
     ("serpis.chat.cache", "(buf?): the prompt cache: {hit_rate (share of prompt tokens read from the cache), state (\"warm\", \"cold\" or nil before anything was cached), left (seconds until it expires), misses = {{cause, text, tokens, cost}}} (newest last)."),
     ("serpis.chat.running", "(buf?): whether its agent is working."),
@@ -190,6 +190,7 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("after-tool-call", "In the chat's node: {buffer, name, text, isError}: a tool finished. Return {text = \"...\"} to replace what the model sees."),
     ("tool-finished", "In the chat's node: {buffer, name, isError}: a tool's result reached the chat."),
     ("agent-finished", "In the chat's node: {buffer, total}: a chat's agent stopped (done, failed or aborted)."),
+    ("turn-cut-off", "In the chat's node: {buffer, continued, parked, times, text}: the node stopped mid-turn (a crash, a reboot) and started again; the turn was continued, or parked, or waits (chat-keep-going)."),
     ("remote-connected", "{machine, host, serpis}: serpis reached the node on another machine (host: what it calls itself; serpis: its version)."),
     ("remote-disconnected", "{machine, error}: the node on another machine couldn't be reached, or its connection closed; it is retried while one of its chats is shown."),
     ("session-resumed", "{buffer, path, id, messages}: a saved session was loaded into a chat."),
@@ -542,7 +543,7 @@ mod tests {
         read(&root.join("../../serpis-node/src"), &mut sources);
         let documented: Vec<&str> = HOOKS.iter().map(|(n, _)| *n).collect();
         let mut missing = Vec::new();
-        let calls = ["run_hook(\"", "host.hook(self, \"", "run_hook_for(Some(&chat), \""];
+        let calls = ["run_hook(\"", "host.hook(self, \"", "run_hook_for(Some(&chat), \"", "run_hook_for(Some(id), \""];
         for part in calls.iter().flat_map(|c| sources.split(c).skip(1)) {
             let name = &part[..part.find('"').unwrap()];
             if !documented.contains(&name) && !missing.contains(&name) {

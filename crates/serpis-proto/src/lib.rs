@@ -110,7 +110,7 @@ impl Splice {
 }
 
 /// The chat around its transcript: what a header, a sidebar row or a chat list shows.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatState {
     pub title: String,
     /// `provider/id`.
@@ -141,6 +141,37 @@ pub struct ChatState {
     /// The prompt cache in detail: {hit_rate, state, left, misses}.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub cache_info: serde_json::Value,
+    /// A turn cut off by the node stopping continues when it starts again (the chat's own
+    /// choice, else its node's `chat-keep-going`).
+    #[serde(default = "yes")]
+    pub keep_going: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for ChatState {
+    fn default() -> Self {
+        ChatState {
+            title: String::new(),
+            model: None,
+            thinking: String::new(),
+            running: false,
+            compacting: false,
+            step: None,
+            cwd: String::new(),
+            session_id: String::new(),
+            usage: Default::default(),
+            context: (None, 0),
+            cache: None,
+            last_error: None,
+            session: None,
+            custom: Vec::new(),
+            cache_info: serde_json::Value::Null,
+            keep_going: true,
+        }
+    }
 }
 
 #[cfg(test)]

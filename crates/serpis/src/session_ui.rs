@@ -443,6 +443,8 @@ pub fn restore_open(ed: &mut Editor) {
 pub fn install(ed: &mut Editor) {
     let o = BUILTIN;
     ed.defvar("session-save", json!(true), "Record chats to session files (pi's format) so they can be resumed.");
+    ed.defvar("chat-keep-going", json!(true), "A chat whose machine's serpis-node stopped mid-turn (a crash, a reboot, a kill) continues the turn when the node starts again: from what was saved, a tool cut off mid-run not run again. Off, it waits for you. Each chat can choose for itself (the composer's ↻ pill, chat-toggle-keep-going). On another machine, its node's own settings say.");
+    ed.defvar("chat-keep-going-limit", json!(2), "Times in a row a chat's turn is continued after its node stopped mid-turn; cut off once more, it is parked (waits for you), in case the turn is what stops the node.");
     ed.defvar("session-directory", Value::Null, "Where chats are recorded (default: <agent dir>/sessions, e.g. ~/.serpis/agent/sessions).");
     ed.defvar("session-directories", json!(["~/.pi/agent/sessions"]), "More session directories chat-resume reads (pi's, by default), besides session-directory.");
     ed.defvar("session-restore-on-start", json!(true), "Reopen the chats that were open when serpis quit, and show the terminals still running that were shown.");

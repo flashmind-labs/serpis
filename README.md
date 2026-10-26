@@ -273,6 +273,21 @@ the offer off. A machine's chats run the Lua config that machine has (`~/.config
 it isn't copied yet. `scripts/ssh-check.sh <host>`
 runs a whole chat over real ssh in a throwaway directory there, with a mock model.
 
+A chat keeps going when its machine's node stops mid-turn (a crash, a reboot, a kill): when the
+node starts again, the turn continues from what was saved, and the chat says so. A tool that was
+cut off isn't run again (it may have done its work): its result says it was cut off, and the
+model carries on from there. A turn cut off more than `chat-keep-going-limit` times in a row (2)
+is parked instead, in case it is what stops the node. `chat-keep-going` turns this off (the
+chat then waits for you), and each chat can choose for itself: the composer's `↻ Keeps going`
+pill (`chat-toggle-keep-going`). Scripts hear of it through the `turn-cut-off` hook.
+
+A node that isn't running is started by whatever connects to it next. For a chat to continue
+after a reboot or a crash with nobody connecting (an agent working through the night),
+`remote-install-service` installs the machine's node as a service (asking first): a systemd
+user unit on Linux, a launchd agent on a Mac, which start it at boot (Linux: once `sudo loginctl
+enable-linger <user>` lets the user's services run without a login, which serpis says) and again
+after a crash. `remote-uninstall-service` removes it.
+
 ## Terminals on any machine
 
 Terminals run in a machine's terminal node, which is [manymux](https://github.com/rayfish/manymux)'s

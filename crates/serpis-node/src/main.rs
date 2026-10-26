@@ -17,7 +17,16 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
                 .init();
-            let node = serpis_node::server::start(serpis_node::server::Config::default_paths(), rt.handle().clone())?;
+            let node = match serpis_node::server::start(serpis_node::server::Config::default_paths(), rt.handle().clone()) {
+                Ok(n) => n,
+                // Nothing to do (a service starting one at login finds it running): not a failure,
+                // or the service would start it again and again.
+                Err(e) if format!("{e:#}").contains("already running") => {
+                    tracing::info!("{e:#}");
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
             tracing::info!("serpis-node {} listening on {}", serpis_node::VERSION, node.socket.display());
             node.wait();
             Ok(())

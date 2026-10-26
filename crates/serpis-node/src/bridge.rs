@@ -40,8 +40,15 @@ pub async fn agent(socket: &Path) -> Result<()> {
 
 /// Start `exe serve` in the background, in a session of its own, so it outlives whatever
 /// started it (an ssh connection, a window); its output goes to `node.log` next to the socket.
+/// Through the node's service, when one is installed ([`crate::service`]).
 pub fn start_node(exe: &Path, socket: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
+    // Installed as a service: started by it, so it is started again should it crash.
+    match crate::service::start(exe, socket) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("starting the node through its service: {e:#}; starting it here"),
+    }
     let dir = socket.parent().context("the socket path has no directory")?;
     std::fs::create_dir_all(dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("node.log"))?;

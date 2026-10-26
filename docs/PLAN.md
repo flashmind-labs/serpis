@@ -360,8 +360,19 @@ Steps:
    test checks it (`crates/serpis-node/tests/terminals.rs`, `tests/ui/terminal_node.lua`, its
    `_restore`). Not yet: scrolling back further than what was attached with (manymux's `VIEW`), and
    images through a reattach (its repaint is text).
-5. Node reliability: running turns that survive a node restart, parking a turn that keeps
-   crashing it, the node's own Lua (hooks, tools, extensions on machines).
+5. *Done*: turns that survive their node stopping. The node notes which chats are mid-turn
+   (`open.json`: path, running, times continued in a row); on start, one cut off continues from
+   its session (`Chat::continue_turn`: a tool call without a result gets one saying it was cut
+   off and isn't run again), says so in the chat and runs `turn-cut-off`; cut off more than
+   `chat-keep-going-limit` times in a row it is parked. `chat-keep-going` and each chat's own
+   choice (a `keep-going` session entry, the composer's pill) say whether it continues. A stop
+   asked for (`serpis-node stop`) cuts nothing off. `remote-install-service` makes the node a
+   systemd user unit or launchd agent (`serpis_node::service`) running
+   `~/.serpis/bin/serpis-node-current`, which every start points at its build, so reboots and
+   crashes restart it; a client finding no node starts it through the service. Tests:
+   `crates/serpis-node/tests/keep_going.rs` (killed with `kill -9`: continued, parked, waiting),
+   `tests/service.rs` (with a stand-in service manager), `tests/ui/keep_going.lua`. Never tried
+   with a real systemd or launchd yet. (The node's own Lua was done in 3e.)
 6. The iOS app.
 
 ### Later (left open on the way; pick up when they matter)
@@ -389,3 +400,8 @@ Machines and nodes:
 - Environment variables from an allowlist when a chat moves (needs per-chat environments in the
   agent's tools) (3c).
 - A machine's chats run that machine's own Lua config; copying this one's there isn't built.
+- A node killed mid-tool leaves that tool's processes running (a `sleep`, a build): they are
+  orphans nobody stops, while the continued turn carries on. Put tools in a process group the
+  node's successor can find and end (or report) on start.
+- Upgrades still wait for a machine's chats to be idle; with turns that continue, they could stop
+  the node at a step boundary instead.

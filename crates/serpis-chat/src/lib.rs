@@ -262,6 +262,9 @@ pub struct Chat {
     pending_resume: Option<PendingResume>,
     /// Prompts already submitted, by request id: a client retrying one gets the same answer.
     seen_requests: Vec<String>,
+    /// Whether a turn cut off by its node stopping continues when the node starts again, unless
+    /// the chat says otherwise ([`Chat::keep_going`]): the host's setting.
+    pub keep_going_default: bool,
 }
 
 struct PendingResume {
@@ -298,6 +301,7 @@ impl Chat {
             sent: None,
             request_started: None,
             entry_ids: Vec::new(),
+            keep_going_default: true,
             compacting: None,
             compactions: 0,
             overflow_retried: false,
@@ -433,6 +437,8 @@ impl Chat {
             return Ok(());
         }
         let Some(cfg) = self.agent_config(host) else { return Err("No model selected".into()) };
+        // A turn that was cut off and not continued (parked, or not kept going).
+        self.answer_cut_off_calls(host);
         if let Some((ago, tokens, cost)) = self.cache.expired(Instant::now()) {
             if cache_warning_applies(&|n: &str| host.var(n), "expired", cost) {
                 host.notify(Level::Info, format!("The prompt cache expired {} ago: this message re-caches {} tokens ({})", fmt_duration(ago), fmt_tokens(tokens), fmt_cost(cost)));
@@ -787,6 +793,70 @@ impl Chat {
         self.custom_entries.push((kind.to_string(), data));
     }
 
+    /// Whether a turn cut off by its node stopping continues when it starts again: the chat's
+    /// own choice (its last `keep-going` entry, `{on = bool}`), else the host's setting.
+    pub fn keep_going(&self) -> bool {
+        self.custom_entries.iter().rev().find(|(k, _)| k == KEEP_GOING).and_then(|(_, d)| d["on"].as_bool()).unwrap_or(self.keep_going_default)
+    }
+
+    /// Whether the transcript stops mid-turn: the model was to answer next (a prompt, or tool
+    /// results, were the last thing saved), or tools it called have no results.
+    pub fn cut_off(&self) -> bool {
+        match self.history.last() {
+            Some(Message::User { .. } | Message::ToolResult(_)) => true,
+            Some(Message::Assistant(a)) => !matches!(a.stop_reason, StopReason::Error | StopReason::Aborted) && a.tool_calls().next().is_some(),
+            None => false,
+        }
+    }
+
+    /// Continue a turn its node's stopping cut off (a crash, a restart, a reboot), from what was
+    /// saved, as though it hadn't stopped. A tool call left without a result isn't run again
+    /// (it may have done its work, or part of it): its result says it was cut off, and the model
+    /// carries on from there. False when there is no turn to continue.
+    pub fn continue_turn(&mut self, host: &mut dyn Host) -> bool {
+        if self.running() || !self.cut_off() {
+            return false;
+        }
+        self.answer_cut_off_calls(host);
+        let Some(cfg) = self.agent_config(host) else { return false };
+        self.start_agent(host, cfg, Vec::new());
+        true
+    }
+
+    /// Give the last response's tool calls that have no result (their node stopped while they
+    /// ran) the result that says so, which a request needs before it can go on.
+    fn answer_cut_off_calls(&mut self, host: &mut dyn Host) {
+        let asked = self.history.iter().rposition(|m| matches!(m, Message::Assistant(_)));
+        let calls: Vec<ToolCall> = match asked.map(|i| &self.history[i]) {
+            Some(Message::Assistant(a)) => a.tool_calls().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let answered: Vec<String> = asked
+            .map(|i| self.history[i..].iter().filter_map(|m| if let Message::ToolResult(r) = m { Some(r.tool_call_id.clone()) } else { None }).collect())
+            .unwrap_or_default();
+        for c in calls.iter().filter(|c| !answered.contains(&c.id)) {
+            let r = ToolResultMessage {
+                tool_call_id: c.id.clone(),
+                tool_name: c.name.clone(),
+                content: vec![UserContent::Text { text: CUT_OFF_TOOL.into() }],
+                is_error: true,
+                details: Value::Null,
+                timestamp: now_ms(),
+            };
+            if let Some(Entry::Tool { result, .. }) = self.tool_entry(&c.id) {
+                *result = Some(r.clone());
+            }
+            let m = Message::ToolResult(r);
+            let mut entry = None;
+            self.record(host, |w| {
+                entry = Some(w.message(&m)?);
+                Ok(())
+            });
+            self.history.push(m);
+            self.entry_ids.push(entry);
+        }
+    }
+
     /// Pick up what finished elsewhere (agent events, a compaction, a resume check). Call it
     /// whenever the chat's [`Wake`] fires, and once after creating or restoring it.
     pub fn poll(&mut self, host: &mut dyn Host) {
@@ -1107,9 +1177,16 @@ impl Chat {
             session: self.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),
             custom: self.custom_entries.clone(),
             cache_info: self.cache_info(),
+            keep_going: self.keep_going(),
         }
     }
 }
+
+/// The custom entry a chat's own [`Chat::keep_going`] choice is kept in: `{on = bool}`.
+pub const KEEP_GOING: &str = "keep-going";
+
+/// What a tool call cut off by its node stopping gets as its result.
+pub const CUT_OFF_TOOL: &str = "Not run to the end: the machine's serpis-node stopped while this tool ran (a crash, a restart or a reboot), and it was not run again. It may have done some or all of its work: check before running it again.";
 
 /// [`Chat::cache_json`] from a client's copy of [`Chat::cache_info`].
 pub fn cache_json_at(info: &Value, now: std::time::SystemTime) -> Value {
