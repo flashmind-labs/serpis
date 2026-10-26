@@ -93,6 +93,9 @@ pub struct Remotes {
     pub targets: HashMap<String, Target>,
     /// What the machines' terminals are doing.
     pub terminals: crate::terminals::Polls,
+    /// Each machine's connection and the buffers showing its terminals, for their bytes, which
+    /// go between them without the window's thread.
+    pub wires: crate::terminals::Wires,
 }
 
 /// The machines chats can run on: `remote-hosts`, then rayfish peers.
@@ -350,6 +353,7 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
     let target = if local { None } else { Some(target_of(ed, machine)) };
     let local_parts = (source_root(), crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into())).join(serpis_node::STAMP), ed.var_str("local-node-binary").filter(|s| !s.is_empty()));
     let obtain = obtain(ed);
+    let wires = ed.remote.wires.clone();
     let (main, name) = (ed.main_sender(), machine.to_string());
     ed.rt.spawn(async move {
         // The first connect to a machine installs its node there, which takes a few seconds, and
@@ -389,13 +393,22 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
         };
         let pump_main = main.clone();
         let pump_name = name.clone();
+        if let Ok(c) = &client {
+            wires.connected(&name, c.clone());
+        }
         main.send(move |ed| connected(ed, &name, client));
-        // Events go to the chats that show them, in order; the end of the stream is a drop.
+        // Events go to the chats that show them, in order; the end of the stream is a drop. A
+        // terminal's bytes go straight to its buffer, whatever the window's thread is doing.
         if let Some(mut events) = events {
             while let Some(ev) = events.recv().await {
+                if wires.deliver(&pump_name, &ev) {
+                    pump_main.repaint();
+                    continue;
+                }
                 let n = pump_name.clone();
                 pump_main.send(move |ed| route(ed, &n, ev));
             }
+            wires.dropped(&pump_name);
             pump_main.send(move |ed| dropped(ed, &pump_name));
         }
     });
@@ -671,7 +684,7 @@ fn dropped(ed: &mut Editor, machine: &str) {
 }
 
 fn schedule_reconnect(ed: &mut Editor, machine: &str, failures: u32) {
-    if chats_on(ed, machine).is_empty() {
+    if chats_on(ed, machine).is_empty() && !crate::terminals::shown_on(ed, machine) {
         return;
     }
     let wait = Duration::from_secs((2u64 << failures.min(4)).min(30));
@@ -718,6 +731,7 @@ pub fn reconnect(ed: &mut Editor, machine: &str) {
                     c.send(Request::Attach { chat });
                 }
             }
+            crate::terminals::reattach(ed, &name);
         }
         Err(_) => {
             if let Some(Conn::Down { failures: f, .. }) = ed.remote.conns.get_mut(&name) {
@@ -823,6 +837,8 @@ fn route(ed: &mut Editor, machine: &str, ev: Event) {
         Event::Splice { chat, .. } | Event::State { chat, .. } | Event::Closed { chat } | Event::Notice { chat, .. } => chat.clone(),
         Event::Message { level, text } => return say(ed, machine, *level, text),
         Event::ToolCall { chat, call, name, args } => return run_lent(ed, machine, chat.clone(), *call, name.clone(), args.clone()),
+        // (Delivered on the way in: see `with_client`.)
+        Event::TerminalOutput { .. } | Event::TerminalExited { .. } => return,
     };
     let Some(id) = chat_buffer(ed, machine, &chat) else { return };
     let ev = Some(ev);

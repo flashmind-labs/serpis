@@ -1,123 +1,160 @@
-//! Terminals on this machine: manymux's node holds them, so they outlive every window and any
-//! client that reaches the machine can attach to one. It runs as a process of its own
-//! (`serpis-node terminals`), not inside the chat node, so a chat node restarting on a new build
-//! never takes a shell with it.
+//! Terminals on this machine, held by a process of their own (`serpis-node terminals`) so they
+//! outlive every window and a chat node restarting on a new build never takes a shell with it.
+//! The chat node forwards its clients' terminal requests and bytes here (over the connection
+//! they already have to it), so a client reaches a machine's terminals the way it reaches its
+//! chats.
 //!
-//! It listens at manymux's own socket unless `$SERPIS_TERMINAL_SOCKET` says otherwise, so an
-//! `mm` on the machine and serpis share their terminals: whichever starts first holds them,
-//! and the other is a client of it. Terminal bytes go straight to it (a client elsewhere runs
-//! `serpis-node agent` with `SERPIS_BRIDGE=terminals`); the chat node only lists, starts and
-//! ends terminals for clients, over the connection they already have.
+//! It speaks the node's own framing ([`serpis_proto::wire`]): calls (`Terminals`,
+//! `NewTerminal`, `AttachTerminal`, `DetachTerminal`, `ResizeTerminal`, `KillTerminal`, `Stop`)
+//! answered by replies, and [`tag::TERMINAL`] frames for the bytes. Each terminal keeps what it
+//! printed last (raw, for a fresh view's scrollback) and its screen (an emulator's, to paint a
+//! view exactly as it is when it attaches).
 
+use std::collections::HashMap;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use manymux::client::Stream;
-use manymux::proto::{Request, Response, Size, SpawnSpec};
-use serpis_proto::wire::TerminalInfo;
+use serpis_proto::wire::{self, Call, Event, Reply, Request, Response, TerminalInfo, tag};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
-/// Where the terminal node listens: `$SERPIS_TERMINAL_SOCKET`, else manymux's socket.
+/// How much of what a terminal printed is kept for a fresh view's scrollback.
+const KEEP: usize = 1 << 20;
+
+/// Where the terminal host listens: `$SERPIS_TERMINAL_SOCKET`, else `terminals.sock` beside
+/// the node's.
 pub fn socket() -> PathBuf {
-    std::env::var_os("SERPIS_TERMINAL_SOCKET").map(PathBuf::from).unwrap_or_else(manymux::config::socket)
+    std::env::var_os("SERPIS_TERMINAL_SOCKET").map(PathBuf::from).unwrap_or_else(|| crate::node_dir().join("terminals.sock"))
 }
 
-/// Run the terminal node at `socket` until it is stopped. At manymux's socket it is the
-/// machine's manymux node, and does what `mm daemon` does (watches `mm`'s machines, raises
-/// notifications); anywhere else it holds terminals and nothing more.
-pub async fn serve(socket: &Path) -> Result<()> {
-    let shared = socket == manymux::config::socket();
-    let config = if shared {
-        let hosts = manymux::hosts::Hosts::load().map(|h| h.names()).unwrap_or_default();
-        manymux::node::Config { peers: hosts, hosts_file: Some(manymux::hosts::Hosts::path()), notifications: true }
-    } else {
-        manymux::node::Config { peers: Vec::new(), hosts_file: None, notifications: false }
-    };
-    let node = manymux::node::Node::start(config).await;
-    let stopping = node.clone();
-    tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else { return };
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv() => {}
+/// One terminal.
+struct Term {
+    name: String,
+    /// The program, as listings show it (the shell's name).
+    command: String,
+    master: Arc<OwnedFd>,
+    child: nix::unistd::Pid,
+    started: SystemTime,
+    last_output: Instant,
+    /// What it printed last, from a line's start.
+    kept: Vec<u8>,
+    /// Its screen.
+    vt: avt::Vt,
+    /// An incomplete UTF-8 sequence at the end of the last chunk, for the emulator.
+    partial: Vec<u8>,
+    /// The views showing it: by connection.
+    views: HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>,
+}
+
+impl Term {
+    /// Take in what it printed.
+    fn printed(&mut self, bytes: &[u8]) {
+        self.last_output = Instant::now();
+        self.kept.extend_from_slice(bytes);
+        if self.kept.len() > KEEP {
+            // Cut at a line's start, so what is kept doesn't begin inside an escape sequence.
+            let over = self.kept.len() - KEEP;
+            let cut = self.kept[over..].iter().position(|&b| b == b'\n').map_or(over, |i| over + i + 1);
+            self.kept.drain(..cut);
         }
-        // Hung up gently: shells write their history.
-        stopping.shutdown(manymux::node::GRACE).await;
-        std::process::exit(0);
-    });
-    node.serve(socket).await
-}
-
-/// Make sure a terminal node listens at `socket`, starting `exe terminals` (in a session of its
-/// own, so it outlives whatever started it) when none does.
-pub async fn ensure(exe: &Path, socket: &Path) -> Result<()> {
-    if tokio::net::UnixStream::connect(socket).await.is_ok() {
-        return Ok(());
-    }
-    use std::os::unix::process::CommandExt;
-    // Its log goes beside the chat node's (manymux's socket directory is manymux's).
-    let dir = crate::node_dir();
-    std::fs::create_dir_all(&dir)?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("terminals.log"))?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("terminals").env("SERPIS_TERMINAL_SOCKET", socket).stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
-    // SAFETY: setsid is async-signal-safe, and nothing else runs between fork and exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            nix::unistd::setsid().map_err(std::io::Error::from)?;
-            Ok(())
-        });
-    }
-    cmd.spawn().context("starting the terminal node")?;
-    crate::bridge::wait_for(socket).await.map(|_| ())
-}
-
-/// One request to the terminal node at `socket`, starting it first when `start` is given.
-async fn call(socket: &Path, start: Option<&Path>, request: Request) -> Result<Response> {
-    if let Some(exe) = start {
-        ensure(exe, socket).await?;
-    }
-    let mut stream = Stream::local(socket).await?;
-    match stream.call(&request).await? {
-        Response::Error(e) => bail!(e),
-        r => Ok(r),
-    }
-}
-
-/// The terminals at `socket`, with what each is doing (none when no terminal node runs).
-pub async fn list(socket: &Path) -> Result<Vec<TerminalInfo>> {
-    if tokio::net::UnixStream::connect(socket).await.is_err() {
-        return Ok(Vec::new());
-    }
-    let Response::Sessions(sessions) = call(socket, None, Request::List).await? else { bail!("the terminal node answered List with something else") };
-    // Older manymux nodes can't say: the list is still worth having.
-    let doing = match call(socket, None, Request::Snapshot).await {
-        Ok(Response::Snapshot(d)) => d,
-        _ => Vec::new(),
-    };
-    Ok(sessions
-        .into_iter()
-        .map(|s| {
-            let d = doing.iter().find(|d| d.name == s.name && d.pid == s.pid);
-            TerminalInfo {
-                foreground: d.map(|d| d.foreground.clone()).filter(|f| !at_prompt(f)).unwrap_or_default(),
-                cwd: d.and_then(|d| d.cwd.clone()),
-                started: s.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
-                name: s.name,
-                title: s.title,
-                command: s.command,
-                attached: s.attached,
-                idle: s.idle,
+        self.partial.extend_from_slice(bytes);
+        let valid = match std::str::from_utf8(&self.partial) {
+            Ok(s) => s.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            // Not UTF-8 at all: the emulator gets what it can read.
+            Err(_) => {
+                let text = String::from_utf8_lossy(&self.partial).into_owned();
+                self.vt.feed_str(&text);
+                self.partial.clear();
+                return;
             }
-        })
-        .collect())
+        };
+        let text = std::str::from_utf8(&self.partial[..valid]).unwrap_or_default().to_string();
+        self.vt.feed_str(&text);
+        self.partial.drain(..valid);
+    }
+
+    /// What a view needs to show it as it is: what it printed before (for scrollback, when
+    /// asked), then its screen.
+    fn paint(&self, history: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if history {
+            out.extend_from_slice(&self.kept);
+        }
+        // Back to the main screen, cleared, then the screen as the emulator has it.
+        out.extend_from_slice(b"\x1b[?1049l\x1b[0m\x1b[H\x1b[2J");
+        out.extend_from_slice(self.vt.dump().as_bytes());
+        out
+    }
+
+    fn info(&self) -> TerminalInfo {
+        let front = nix::unistd::tcgetpgrp(self.master.as_ref()).ok().filter(|pg| *pg != self.child);
+        TerminalInfo {
+            name: self.name.clone(),
+            title: self.command.clone(),
+            command: self.command.clone(),
+            cwd: process_cwd(front.unwrap_or(self.child).as_raw()),
+            foreground: front.and_then(|pg| process_name(pg.as_raw())).into_iter().collect(),
+            attached: self.views.len(),
+            idle: self.last_output.elapsed().as_secs(),
+            started: self.started.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        let ws = nix::pty::Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: TIOCSWINSZ reads a Winsize, the size the call expects.
+        unsafe {
+            nix::libc::ioctl(self.master.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws);
+        }
+        self.vt.resize(cols as usize, rows as usize);
+    }
+
+    /// Hang up its programs.
+    fn hang_up(&self) {
+        let _ = nix::sys::signal::killpg(self.child, nix::sys::signal::Signal::SIGHUP);
+        let _ = nix::sys::signal::kill(self.child, nix::sys::signal::Signal::SIGHUP);
+    }
 }
 
-/// Whether a terminal's foreground is a shell (at its prompt) rather than a program it runs.
-fn at_prompt(argv: &[String]) -> bool {
-    let Some(first) = argv.first() else { return true };
-    let name = first.rsplit('/').next().unwrap_or(first).trim_start_matches('-');
-    matches!(name, "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "mksh" | "tcsh" | "csh" | "nu" | "elvish" | "xonsh")
+type Terms = Arc<Mutex<HashMap<String, Term>>>;
+
+/// The name of process `pid`'s program.
+fn process_name(pid: i32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: proc_name writes at most `buf.len()` bytes into `buf`.
+        let n = unsafe { nix::libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
+    }
+}
+
+/// Where process `pid` is, when the machine can say.
+fn process_cwd(pid: i32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: nix::libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<nix::libc::proc_vnodepathinfo>() as i32;
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+        let n = unsafe { nix::libc::proc_pidinfo(pid, nix::libc::PROC_PIDVNODEPATHINFO, 0, (&mut info as *mut nix::libc::proc_vnodepathinfo).cast(), size) };
+        if n != size {
+            return None;
+        }
+        let bytes: Vec<u8> = info.pvi_cdir.vip_path.iter().flatten().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
+    }
 }
 
 /// The scripts serpis's shell integration is made of (zsh: prompt marks, the directory).
@@ -137,7 +174,7 @@ pub fn install_shell_integration() -> Option<PathBuf> {
 }
 
 /// The user's shell: `$SHELL` (sshd sets it to the login shell), else the account's.
-fn login_shell() -> String {
+pub fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -146,68 +183,310 @@ fn login_shell() -> String {
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
-/// Start a login shell in `cwd` at `socket` (starting the terminal node from `exe` first), and
-/// return the terminal's name.
-pub async fn spawn(exe: &Path, socket: &Path, cwd: &Path, size: (u16, u16), integration: bool) -> Result<String> {
-    if !cwd.is_dir() {
-        bail!("{} isn't a folder here", cwd.display());
-    }
+/// A login shell in `cwd` on a new PTY, with this process's environment and serpis's terminal
+/// variables (and, for zsh, its integration): the PTY's master side and the shell's pid.
+pub fn spawn_shell(cwd: &Path, cols: u16, rows: u16, integration: bool) -> Result<(OwnedFd, nix::unistd::Pid)> {
+    use nix::pty::{ForkptyResult, Winsize, forkpty};
+    use std::ffi::CString;
+    let ws = Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
     let shell = login_shell();
-    let base = shell.rsplit('/').next().unwrap_or(&shell).to_string();
-    // What a terminal of serpis's says about itself, and zsh's prompt marks. The home is the
-    // one this node runs with: manymux takes the account's, which is the same thing unless
-    // someone (a test, a container) gave the node another.
-    let mut command = vec!["env".to_string(), "COLORTERM=truecolor".into(), "TERM_PROGRAM=serpis".into()];
-    if let Some(home) = std::env::var_os("HOME") {
-        command.push(format!("HOME={}", home.to_string_lossy()));
-    }
-    command.push(format!("SHELL={shell}"));
+    // Everything the child needs is made before forking: nothing allocates after.
+    let prog = CString::new(shell.clone())?;
+    let base = Path::new(&shell).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "sh".into());
+    let arg0 = CString::new(format!("-{base}"))?;
+    let cwd_c = CString::new(cwd.as_os_str().as_encoded_bytes())?;
+    let mut env: Vec<CString> = std::env::vars()
+        .filter(|(k, _)| !matches!(k.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM"))
+        .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
+        .collect();
+    env.push(CString::new("TERM=xterm-256color")?);
+    env.push(CString::new("COLORTERM=truecolor")?);
+    env.push(CString::new("TERM_PROGRAM=serpis")?);
+    // zsh reads $ZDOTDIR/.zshenv first; serpis's puts ZDOTDIR back and adds the prompt marks.
     if let Some(dir) = (integration && base == "zsh").then(install_shell_integration).flatten() {
+        env.retain(|e| !e.as_bytes().starts_with(b"ZDOTDIR="));
         if let Some(z) = std::env::var_os("ZDOTDIR") {
-            command.push(format!("SERPIS_ZDOTDIR={}", z.to_string_lossy()));
+            env.push(CString::new(format!("SERPIS_ZDOTDIR={}", z.to_string_lossy()))?);
         }
-        command.push(format!("ZDOTDIR={}", dir.join("zsh").display()));
-        command.push(format!("SERPIS_SHELL_DIR={}", dir.display()));
+        env.push(CString::new(format!("ZDOTDIR={}", dir.join("zsh").display()))?);
+        env.push(CString::new(format!("SERPIS_SHELL_DIR={}", dir.display()))?);
     }
-    command.extend([shell.clone(), "-l".into()]);
-    // Named after the shell, the first name free; one taken meanwhile (another terminal
-    // started at the same moment) is passed over.
-    let mut taken: Vec<String> = match call(socket, Some(exe), Request::List).await? {
-        Response::Sessions(s) => s.into_iter().map(|s| s.name).collect(),
-        _ => Vec::new(),
-    };
+    // SAFETY: the child calls only async-signal-safe functions (chdir, execve, _exit).
+    match unsafe { forkpty(&ws, None)? } {
+        ForkptyResult::Child => {
+            unsafe {
+                nix::libc::chdir(cwd_c.as_ptr());
+            }
+            let _ = nix::unistd::execve(&prog, &[arg0.as_c_str()], &env);
+            unsafe { nix::libc::_exit(127) }
+        }
+        ForkptyResult::Parent { child, master } => Ok((master, child)),
+    }
+}
+
+/// Run the terminal host at `socket` until it is stopped (`Stop`, or a signal): every terminal
+/// in it is hung up on the way out.
+pub async fn serve(socket: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let dir = socket.parent().context("the socket path has no directory")?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    if socket.exists() {
+        if tokio::net::UnixStream::connect(socket).await.is_ok() {
+            bail!("a terminal host is already running on {}", socket.display());
+        }
+        std::fs::remove_file(socket)?;
+    }
+    let listener = tokio::net::UnixListener::bind(socket).with_context(|| format!("listening on {}", socket.display()))?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    let terms: Terms = Default::default();
+    let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
+    {
+        let stop = stop_tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else { return };
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+            let _ = stop.send(());
+        });
+    }
+    let me = nix::unistd::getuid().as_raw();
+    let mut next = 0u64;
     loop {
-        let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|n| !taken.contains(n)).unwrap_or_default();
-        let spec = SpawnSpec { name: Some(name.clone()), command: command.clone(), cwd: Some(cwd.to_string_lossy().into_owned()), size: Size::new(size.0, size.1), label: Some(base.clone()) };
-        match call(socket, None, Request::Spawn(spec)).await {
-            Ok(Response::Spawned { name }) => return Ok(name),
-            Ok(other) => bail!("the terminal node answered a spawn with {other:?}"),
-            Err(e) if format!("{e:#}").contains("already exists") && taken.len() < 1000 => taken.push(name),
-            Err(e) => return Err(e),
+        tokio::select! {
+            _ = stop_rx.recv() => break,
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                // The directory keeps others out already; this holds even if its mode changes.
+                if stream.peer_cred().map(|c| c.uid()).ok() != Some(me) {
+                    continue;
+                }
+                next += 1;
+                tokio::spawn(connection(stream, next, terms.clone(), stop_tx.clone()));
+            }
         }
     }
+    // Hung up gently, so shells write their history; then the socket goes.
+    for t in terms.lock().unwrap().values() {
+        t.hang_up();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _ = std::fs::remove_file(socket);
+    Ok(())
 }
 
-/// End the terminal `name` at `socket`.
-pub async fn kill(socket: &Path, name: &str) -> Result<()> {
-    call(socket, None, Request::Kill { name: name.to_string() }).await.map(|_| ())
+/// Serve one connection (a chat node, for its clients) until it closes.
+async fn connection(stream: tokio::net::UnixStream, id: u64, terms: Terms, stop: mpsc::UnboundedSender<()>) {
+    let (mut rd, mut wr) = stream.into_split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let writer = tokio::spawn(async move {
+        while let Some(bytes) = rx.recv().await {
+            if wr.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut decoder = wire::Decoder::default();
+    let mut buf = vec![0u8; 64 * 1024];
+    'read: loop {
+        let n = match rd.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        decoder.push(&buf[..n]);
+        loop {
+            match decoder.next() {
+                Ok(Some((tag::CALL, body))) => {
+                    let Ok(call) = serde_json::from_slice::<Call>(&body) else { continue };
+                    let stopping = matches!(call.request, Request::Stop);
+                    let response = answer(&terms, id, &tx, call.request).unwrap_or_else(|e| Response::Error { message: format!("{e:#}") });
+                    let _ = tx.send(wire::encode(tag::REPLY, &Reply { id: call.id, response }));
+                    if stopping {
+                        let _ = stop.send(());
+                    }
+                }
+                Ok(Some((tag::TERMINAL, body))) => {
+                    if let Some((name, bytes)) = wire::parse_terminal(&body) {
+                        let master = terms.lock().unwrap().get(&name).map(|t| t.master.clone());
+                        if let Some(m) = master {
+                            let _ = nix::unistd::write(m.as_ref(), bytes);
+                        }
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => break 'read,
+            }
+        }
+    }
+    // Gone: it shows nothing any more.
+    for t in terms.lock().unwrap().values_mut() {
+        t.views.remove(&id);
+    }
+    drop(tx);
+    let _ = writer.await;
 }
 
-/// Stop the terminal node at `socket`, if one runs: every terminal in it ends.
-pub async fn stop(socket: &Path) -> Result<()> {
-    if tokio::net::UnixStream::connect(socket).await.is_err() {
+fn answer(terms: &Terms, conn: u64, tx: &mpsc::UnboundedSender<Vec<u8>>, request: Request) -> Result<Response> {
+    Ok(match request {
+        Request::Terminals => {
+            let mut list: Vec<TerminalInfo> = terms.lock().unwrap().values().map(Term::info).collect();
+            list.sort_by_key(|t| t.started);
+            Response::Terminals { terminals: list }
+        }
+        Request::NewTerminal { cwd, cols, rows, integration } => {
+            let cwd = PathBuf::from(cwd);
+            if !cwd.is_dir() {
+                bail!("{} isn't a folder here", cwd.display());
+            }
+            let (master, child) = spawn_shell(&cwd, cols, rows, integration)?;
+            let shell = login_shell();
+            let base = shell.rsplit('/').next().unwrap_or(&shell).to_string();
+            let mut all = terms.lock().unwrap();
+            let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|n| !all.contains_key(n)).unwrap_or_default();
+            let master = Arc::new(master);
+            let vt = avt::Vt::builder().size(cols as usize, rows as usize).scrollback_limit(1000).build();
+            all.insert(name.clone(), Term { name: name.clone(), command: base, master: master.clone(), child, started: SystemTime::now(), last_output: Instant::now(), kept: Vec::new(), vt, partial: Vec::new(), views: HashMap::new() });
+            drop(all);
+            read_from(terms.clone(), name.clone(), master, child);
+            Response::Terminal { name }
+        }
+        Request::AttachTerminal { name, cols, rows, history } => {
+            let mut all = terms.lock().unwrap();
+            let t = all.get_mut(&name).with_context(|| format!("no terminal {name} here"))?;
+            t.resize(cols, rows);
+            t.views.insert(conn, tx.clone());
+            // Its screen as it is, then whatever it prints from now on.
+            let _ = tx.send(wire::terminal_frame(&name, &t.paint(history)));
+            Response::Ok
+        }
+        Request::DetachTerminal { name } => {
+            if let Some(t) = terms.lock().unwrap().get_mut(&name) {
+                t.views.remove(&conn);
+            }
+            Response::Ok
+        }
+        Request::ResizeTerminal { name, cols, rows } => {
+            if let Some(t) = terms.lock().unwrap().get_mut(&name) {
+                t.resize(cols, rows);
+            }
+            Response::Ok
+        }
+        Request::KillTerminal { name } => {
+            terms.lock().unwrap().get(&name).with_context(|| format!("no terminal {name} here"))?.hang_up();
+            Response::Ok
+        }
+        Request::Stop => Response::Ok,
+        other => bail!("the terminal host doesn't answer {other:?}"),
+    })
+}
+
+/// Read what `name` prints, on a thread of its own, until it ends: kept, and sent to its views.
+fn read_from(terms: Terms, name: String, master: Arc<OwnedFd>, child: nix::unistd::Pid) {
+    std::thread::spawn(move || {
+        let Ok(reader) = nix::unistd::dup(master.as_raw_fd()) else { return };
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match nix::unistd::read(reader, &mut buf) {
+                Ok(0) | Err(nix::errno::Errno::EIO) => break,
+                Ok(n) => {
+                    let mut all = terms.lock().unwrap();
+                    let Some(t) = all.get_mut(&name) else { break };
+                    t.printed(&buf[..n]);
+                    let frame = wire::terminal_frame(&name, &buf[..n]);
+                    t.views.retain(|_, v| v.send(frame.clone()).is_ok());
+                }
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(_) => break,
+            }
+        }
+        let _ = nix::unistd::close(reader);
+        let code = match nix::sys::wait::waitpid(child, None) {
+            Ok(nix::sys::wait::WaitStatus::Exited(_, c)) => Some(c),
+            _ => None,
+        };
+        if let Some(t) = terms.lock().unwrap().remove(&name) {
+            let ended = wire::encode(tag::EVENT, &Event::TerminalExited { name: name.clone(), code });
+            for v in t.views.values() {
+                let _ = v.send(ended.clone());
+            }
+        }
+    });
+}
+
+/// Make sure a terminal host listens at `socket`, starting `exe terminals` (in a session of its
+/// own, so it outlives whatever started it) when none does.
+pub async fn ensure(exe: &Path, socket: &Path) -> Result<()> {
+    if tokio::net::UnixStream::connect(socket).await.is_ok() {
         return Ok(());
     }
-    manymux::node::stop(socket).await
+    use std::os::unix::process::CommandExt;
+    let dir = socket.parent().context("the socket path has no directory")?;
+    std::fs::create_dir_all(dir)?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("terminals.log"))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("terminals").env("SERPIS_TERMINAL_SOCKET", socket).stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    // SAFETY: setsid is async-signal-safe, and nothing else runs between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            nix::unistd::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    cmd.spawn().context("starting the terminal host")?;
+    crate::bridge::wait_for(socket).await.map(|_| ())
+}
+
+/// Stop the terminal host at `socket`, if one runs: every terminal in it ends.
+pub async fn stop(socket: &Path) -> Result<()> {
+    let Ok(stream) = tokio::net::UnixStream::connect(socket).await else { return Ok(()) };
+    let (mut rd, mut wr) = stream.into_split();
+    wr.write_all(&wire::encode(tag::CALL, &Call { id: 1, request: Request::Stop })).await?;
+    // Gone once the socket closes.
+    let mut buf = [0u8; 1024];
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while rd.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+    })
+    .await;
+    for _ in 0..50 {
+        if tokio::net::UnixStream::connect(socket).await.is_err() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    bail!("the terminal host at {} didn't stop", socket.display())
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_shell_in_front_is_the_prompt() {
-        for (argv, prompt) in [(vec!["-zsh"], true), (vec!["/bin/bash", "-l"], true), (vec!["vim", "x"], false), (vec![], true)] {
-            let argv: Vec<String> = argv.into_iter().map(String::from).collect();
-            assert_eq!(super::at_prompt(&argv), prompt, "{argv:?}");
+    fn what_is_kept_starts_at_a_line_and_characters_arrive_whole() {
+        let vt = avt::Vt::builder().size(20, 5).build();
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let mut t = super::Term {
+            name: "t".into(),
+            command: "sh".into(),
+            master: std::sync::Arc::new(pty.master),
+            child: nix::unistd::Pid::from_raw(1),
+            started: std::time::SystemTime::now(),
+            last_output: std::time::Instant::now(),
+            kept: Vec::new(),
+            vt,
+            partial: Vec::new(),
+            views: Default::default(),
+        };
+        let line = b"\x1b[31mred\x1b[0m line\n";
+        for _ in 0..(super::KEEP / line.len() + 10) {
+            t.printed(line);
         }
+        assert!(t.kept.len() <= super::KEEP);
+        assert!(t.kept.starts_with(line), "kept from a line's start");
+        // A character split across two reads reaches the screen whole.
+        let e = "é".as_bytes();
+        t.printed(&e[..1]);
+        t.printed(&e[1..]);
+        assert!(t.vt.text().iter().any(|l| l.contains('é')), "{:?}", t.vt.text());
     }
 }

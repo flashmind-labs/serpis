@@ -1,7 +1,7 @@
 //! The serpis node: one per machine and user, running that machine's chats for clients
 //! elsewhere (the desktop, the iOS app).
 //!
-//! It is built the way manymux builds its node. It never touches the network: it listens on a
+//! It never touches the network: it listens on a
 //! Unix socket in an owner-only directory and checks that whoever connects is its own user.
 //! Other machines reach it by running `serpis-node agent` over ssh, which bridges its stdin and
 //! stdout to that socket, so sshd decides who gets in (your keys, or rayfish's mesh SSH and its

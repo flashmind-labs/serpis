@@ -284,7 +284,7 @@ impl ChatBuffer {
                 let m = if r.local() { "this machine".to_string() } else { r.machine.clone() };
                 ed.warn(format!("The chat was closed on {m}"));
             }
-            Event::Message { .. } | Event::ToolCall { .. } => {}
+            Event::Message { .. } | Event::ToolCall { .. } | Event::TerminalOutput { .. } | Event::TerminalExited { .. } => {}
         }
         if let Some(id) = ed.this_buffer() {
             self.publish(ed, id);

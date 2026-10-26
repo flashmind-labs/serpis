@@ -273,10 +273,10 @@ chat-only iOS app on the same chats, the way t3code does. Agreed 2026-10-22.
 | Engine | `serpis-chat`: a chat without a window (no egui; its dependency tree has no GUI crate), run only by `serpis-node`, this machine's included (2026-10-24: step 1 first ran local chats in the window, which kept other devices from showing or driving them). The window is a client of nodes and nothing else. |
 | Config | One config for both: the node loads the same init.lua and extensions headless; chat hooks, Lua agent tools and settings take effect there, window parts (keys, commands, UI) do nothing (`serpis.where`). A window lends `serpis_lua`/`serpis_api` and its own Lua tools to the chats it shows; settings it changes go to its machine's node. |
 | What clients see | `serpis-proto`: the transcript as `Entry`s, sent as splices ("from entry N on, it is now these") plus a `ChatState`. The desktop chat already renders only from splices, local chats included, so one path is tested by every UI test. |
-| Daemon on boxes | `serpis-node`, headless and egui-free, built the way manymux builds its node: per user, owner-only Unix socket and nothing else, reached by `ssh <host> serpis-node agent` (stdio bridge), installed as a per-user service. |
+| Daemon on boxes | `serpis-node`, headless and egui-free, per user, owner-only Unix socket and nothing else, reached by `ssh <host> serpis-node agent` (stdio bridge), installed as a per-user service. |
 | Security | serpis authenticates nothing itself. sshd decides who gets in: rayfish mesh SSH (keyless, `ssh_allow`) or your SSH keys. API keys stay on each box (its own auth.json); none cross the wire. Optional strict mode per host, after pi-env: pinned host key, no forwarding. |
 | rayfish | The network and identity layer: mesh names, NAT traversal, keyless SSH, `ray status` for the machine list. No code dependency, so plain SSH works too (rayfish is pre-1.0 and unaudited). |
-| manymux | Remote terminals: its client library feeds the libghostty terminal; sessions survive disconnects. Chats are not manymux sessions: its sessions are PTYs repainted through an emulator, which doesn't fit structured chat sync. |
+| Terminals | A terminal host of serpis's own (`serpis-node terminals`, 2026-10-26; manymux was dropped: its separate protocol and connection, its shell environment and its upgrades restarting every terminal cost more than it gave). Its terminals go over the node connection clients already have. |
 | From pi-durable | Request ids on prompts (a retried send never runs twice; *done*), a snapshot instead of a backlog for a client that falls behind, running turns that survive a node restart, and parking a turn that keeps crashing. |
 | Moving a chat | The session file (pi JSONL) moves as is; the folder by git first (the branch plus a snapshot commit of uncommitted changes, into a worktree on the target), rsync over SSH otherwise; environment variables only from an allowlist setting. |
 | iOS | SwiftUI, with a Rust core over UniFFI (protocol client and SSH, its key in the Keychain / Secure Enclave). Reaches boxes over the Rayfish VPN or any SSH-reachable host. After the node works. |
@@ -348,18 +348,16 @@ Steps:
       cache), this machine's node started and upgraded by the window (`Target::Own`), the chat
       buffer reduced to a view of a node chat, and running chats marked in `chat-resume` on
       every machine (`crates/serpis-node/tests/lua.rs`, the UI suite).
-4. *Done*: terminals through manymux (`serpis_node::terminals`, `crates/serpis/src/terminals.rs`).
-   manymux's node (the crate, pinned) holds them, as `serpis-node terminals`: its own process, at
-   manymux's socket so `mm` and serpis share terminals. The chat node lists, starts and ends them
-   (`Terminals`, `NewTerminal`, `KillTerminal`) over the connection clients already have; each
-   terminal's bytes go over a stream of its own straight to the terminal node
-   (`serpis-node agent` with `SERPIS_BRIDGE=terminals`), attached again after drops. Terminal
-   buffers show them (local ones too, `terminal-persistent`), and are shown again on start. Found
-   on the way: manymux gives a shell the account's home, not the node's, so a test's shell read the
-   user's ~/.zshrc and wrote its history; serpis passes the node's `HOME` and `SHELL`, and the node
-   test checks it (`crates/serpis-node/tests/terminals.rs`, `tests/ui/terminal_node.lua`, its
-   `_restore`). Not yet: scrolling back further than what was attached with (manymux's `VIEW`), and
-   images through a reattach (its repaint is text).
+4. *Done*: terminals that outlive the window, on any machine (`serpis_node::terminals`,
+   `crates/serpis/src/terminals.rs`). First built on manymux; replaced (2026-10-26) by a terminal
+   host of serpis's own: `serpis-node terminals`, a process beside the node (so upgrades don't
+   touch shells) that owns the PTYs, starts shells with the node's environment, keeps what each
+   printed last (1 MB, from a line's start) and its screen (avt), and paints a view that attaches
+   with both. The node passes its clients' terminal calls and `TERMINAL` frames (raw bytes) to
+   it, so terminals use the connection clients already have. Tests: `crates/serpis-node/tests/
+   terminals.rs` (through `serpis-node agent`: started, typed into, the node's home, what runs in
+   it, outliving the chat node, reattached with history and screen, ended),
+   `tests/ui/terminal_node.lua` and its `_restore`.
 5. *Done*: turns that survive their node stopping. The node notes which chats are mid-turn
    (`open.json`: path, running, times continued in a row); on start, one cut off continues from
    its session (`Chat::continue_turn`: a tool call without a result gets one saying it was cut
@@ -395,13 +393,12 @@ Steps:
 
 Terminals (step 4):
 - Not tried over real ssh yet: only through the local stand-in box.
-- Scrolling back further than the lines fetched on attach (`terminal-history-lines`, 5000):
-  manymux answers `VIEW` requests for older lines; the terminal buffer doesn't ask yet.
-- Images drawn in a terminal (kitty graphics) don't survive a reattach: manymux's repaint is text.
+- A terminal reattached shows the last 1 MB it printed; older output is gone.
+- Images drawn in a terminal (kitty graphics) don't survive a reattach: the repaint is text.
 - `terminal-attach` lists this machine and the connected ones; it could list every machine the way
   `chat-resume`'s "every machine" scope does.
-- What runs in a terminal is polled every second per machine; manymux's event stream (`Events`:
-  bells, titles, exits) could replace part of that.
+- What runs in a terminal is polled every second per machine; the terminal host could say when
+  it changes instead.
 - Editing a terminal's command line in normal state waits up to 400 ms for each echo
   (`ECHO_TIMEOUT`); over a slow link to another machine that may be too short.
 

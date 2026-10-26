@@ -1,5 +1,5 @@
 //! Putting serpis-node on a machine: serpis carries the node for each system it can reach, and
-//! installs the right one the first time it connects, as pi-env and manymux do. Nothing then
+//! installs the right one the first time it connects, as pi-env does. Nothing then
 //! depends on the machine's PATH or packages, and a machine gets a new node with a new serpis.
 //!
 //! The node lives in `~/.serpis/bin/serpis-node-<sha256>`, named by its checksum, so versions

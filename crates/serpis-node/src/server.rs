@@ -50,6 +50,8 @@ impl Config {
 enum Msg {
     Connected { client: u64, tx: tmpsc::Sender<Vec<u8>> },
     Call { client: u64, body: Vec<u8> },
+    /// A client typed into a terminal: the frame, for the terminal host.
+    Terminal { client: u64, frame: Vec<u8> },
     Gone { client: u64 },
     /// A chat has news.
     Wake,
@@ -215,6 +217,11 @@ async fn connection(stream: tokio::net::UnixStream, client: u64, tx: mpsc::Sende
                         break 'read;
                     }
                 }
+                Ok(Some((tag::TERMINAL, body))) => {
+                    if tx.send(Msg::Terminal { client, frame: wire::frame(tag::TERMINAL, &body) }).is_err() {
+                        break 'read;
+                    }
+                }
                 // Frames of kinds this node doesn't know are skipped.
                 Ok(Some(_)) => {}
                 Ok(None) => break,
@@ -312,6 +319,9 @@ struct Client {
     lagging: bool,
     /// Tools it runs for the chats it shows (`Lend`).
     lends: Vec<ToolSpec>,
+    /// Its connection to the terminal host (its terminal calls and what it types go there, and
+    /// what comes back goes to it), once it has used a terminal.
+    terminals: Option<tmpsc::UnboundedSender<Vec<u8>>>,
 }
 
 struct Node {
@@ -507,9 +517,10 @@ impl Node {
             for m in msg.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
                 match m {
                     Msg::Connected { client, tx } => {
-                        self.clients.insert(client, Client { tx, attached: BTreeSet::new(), lagging: false, lends: Vec::new() });
+                        self.clients.insert(client, Client { tx, attached: BTreeSet::new(), lagging: false, lends: Vec::new(), terminals: None });
                     }
                     Msg::Call { client, body } => stop |= self.call(client, &body),
+                    Msg::Terminal { client, frame } => self.to_terminals(client, frame),
                     Msg::Gone { client } => self.gone(client),
                     Msg::Wake => {}
                     Msg::Reply { client, id, response } => self.reply(client, id, response),
@@ -765,9 +776,18 @@ impl Node {
             self.answer_later(client, call.id, call.request);
             return false;
         }
-        // So do the terminal node's answers.
-        if let Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::InstallService | Request::UninstallService = &call.request {
-            self.answer_terminals(client, call.id, call.request);
+        // Terminals are the terminal host's: the call goes there, and its answer back.
+        if let Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::AttachTerminal { .. } | Request::DetachTerminal { .. } | Request::ResizeTerminal { .. } = &call.request {
+            let mut call = call;
+            if let Request::NewTerminal { cwd, .. } = &mut call.request {
+                *cwd = from_home(cwd).to_string_lossy().into_owned();
+            }
+            self.to_terminals(client, wire::encode(tag::CALL, &call));
+            return false;
+        }
+        // Installing the service runs commands: done elsewhere too.
+        if let Request::InstallService | Request::UninstallService = &call.request {
+            self.answer_service(client, call.id, call.request);
             return false;
         }
         let response = match self.answer(client, call.request) {
@@ -991,7 +1011,16 @@ impl Node {
                 let _ = std::fs::remove_file(self.transfer_file(&name)?);
                 Response::Ok
             }
-            Request::Pack { .. } | Request::Unpack { .. } | Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::InstallService | Request::UninstallService => unreachable!("answered later"),
+            Request::Pack { .. }
+            | Request::Unpack { .. }
+            | Request::Terminals
+            | Request::NewTerminal { .. }
+            | Request::KillTerminal { .. }
+            | Request::AttachTerminal { .. }
+            | Request::DetachTerminal { .. }
+            | Request::ResizeTerminal { .. }
+            | Request::InstallService
+            | Request::UninstallService => unreachable!("answered elsewhere"),
             Request::Stop => Response::Ok,
             Request::Restart => {
                 let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();
@@ -1054,22 +1083,72 @@ impl Node {
         Ok(self.transfer.join(name))
     }
 
-    /// Ask the machine's terminal node, and answer when it has.
-    fn answer_terminals(&mut self, client: u64, id: u64, request: Request) {
-        let msgs = self.msgs.clone();
+    /// Send `frame` to the terminal host for `client`, connecting it first (and starting the
+    /// host, when none runs). What the host says goes straight to the client.
+    fn to_terminals(&mut self, client: u64, frame: Vec<u8>) {
+        let Some(c) = self.clients.get_mut(&client) else { return };
+        if let Some(t) = &c.terminals {
+            let _ = t.send(frame);
+            return;
+        }
+        let (htx, mut hrx) = tmpsc::unbounded_channel::<Vec<u8>>();
+        let _ = htx.send(frame);
+        c.terminals = Some(htx);
+        let back = c.tx.clone();
         self.rt.spawn(async move {
             let socket = crate::terminals::socket();
+            let reached = async {
+                crate::terminals::ensure(&std::env::current_exe()?, &socket).await?;
+                Ok::<_, anyhow::Error>(tokio::net::UnixStream::connect(&socket).await?)
+            };
+            let stream = match reached.await {
+                Ok(s) => s,
+                Err(e) => {
+                    // Its calls are answered with why.
+                    let message = format!("this machine's terminals can't be reached: {e:#}");
+                    while let Some(f) = hrx.recv().await {
+                        if f.first() == Some(&tag::CALL)
+                            && let Ok(call) = serde_json::from_slice::<Call>(&f[5..])
+                        {
+                            let _ = back.send(wire::encode(tag::REPLY, &Reply { id: call.id, response: Response::Error { message: message.clone() } })).await;
+                        }
+                    }
+                    return;
+                }
+            };
+            let (mut rd, mut wr) = stream.into_split();
+            tokio::spawn(async move {
+                while let Some(f) = hrx.recv().await {
+                    if wr.write_all(&f).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            // Whole frames only: the client's stream carries the node's own frames between them.
+            let mut decoder = wire::Decoder::default();
+            let mut buf = vec![0u8; 64 * 1024];
+            'read: loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        decoder.push(&buf[..n]);
+                        while let Ok(Some((t, body))) = decoder.next() {
+                            if back.send(wire::frame(t, &body)).await.is_err() {
+                                break 'read;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Install or remove the node's service off this thread, and answer when done.
+    fn answer_service(&mut self, client: u64, id: u64, request: Request) {
+        let msgs = self.msgs.clone();
+        self.rt.spawn(async move {
             let response = async {
                 Ok::<_, anyhow::Error>(match request {
-                    Request::Terminals => Response::Terminals { terminals: crate::terminals::list(&socket).await? },
-                    Request::NewTerminal { cwd, cols, rows, integration } => {
-                        let exe = std::env::current_exe()?;
-                        Response::Terminal { name: crate::terminals::spawn(&exe, &socket, &from_home(&cwd), (cols, rows), integration).await? }
-                    }
-                    Request::KillTerminal { name } => {
-                        crate::terminals::kill(&socket, &name).await?;
-                        Response::Ok
-                    }
                     Request::InstallService => {
                         let (exe, node) = (std::env::current_exe()?, crate::socket_path());
                         let r = tokio::task::spawn_blocking(move || crate::service::install(&exe, &node)).await??;
@@ -1079,7 +1158,7 @@ impl Node {
                         let r = tokio::task::spawn_blocking(crate::service::uninstall).await??;
                         Response::Service { installed: false, manager: r.as_ref().map(|i| format!("{:?}", i.manager).to_lowercase()).unwrap_or_default(), file: r.map(|i| i.file).unwrap_or_default(), note: None }
                     }
-                    _ => anyhow::bail!("not a terminal request"),
+                    _ => anyhow::bail!("not a service request"),
                 })
             }
             .await

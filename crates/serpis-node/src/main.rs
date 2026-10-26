@@ -5,7 +5,7 @@
 //!   runs), starting it if none is running.
 //! - `serpis-node stop`: stop the node running here, if any (its open chats come back when it
 //!   starts again).
-//! - `serpis-node terminals`: run this machine's terminal node (manymux's) in the foreground.
+//! - `serpis-node terminals`: run this machine's terminal host in the foreground.
 //! - `serpis-node stop-terminals`: stop it, ending every terminal in it.
 //! - `serpis-node install-service` / `uninstall-service`: start the node at boot and after
 //!   crashes (systemd user unit, launchd agent), or stop doing that.

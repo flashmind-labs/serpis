@@ -60,7 +60,7 @@ enum Io {
 #[derive(Clone)]
 enum Sink {
     Fd(Arc<OwnedFd>),
-    Node(tokio::sync::mpsc::UnboundedSender<crate::terminals::Out>),
+    Node(crate::terminals::Input),
 }
 
 impl Sink {
@@ -69,9 +69,7 @@ impl Sink {
             Sink::Fd(fd) => {
                 let _ = nix::unistd::write(fd.as_ref(), data);
             }
-            Sink::Node(tx) => {
-                let _ = tx.send(crate::terminals::Out::Input(data.to_vec()));
-            }
+            Sink::Node(input) => input.write(data),
         }
     }
 }
@@ -235,11 +233,11 @@ impl TerminalBuffer {
         let (io, sink) = if machine.is_some() || attach.is_some() || persistent {
             let machine = machine.unwrap_or_else(|| crate::remote::LOCAL.to_string());
             let open = match attach {
-                Some(name) => crate::terminals::Open::Attach { name, history: ed.var("terminal-history-lines").and_then(serde_json::Value::as_u64).unwrap_or(5000) as u32 },
+                Some(name) => crate::terminals::Open::Attach { name },
                 None => crate::terminals::Open::New { cwd: remote_cwd.clone().unwrap_or_else(|| cwd.to_string_lossy().into_owned()), integration },
             };
             let link = crate::terminals::Link::open(ed, &machine, open, (cols, rows), tx);
-            let sink = Sink::Node(link.out.clone());
+            let sink = Sink::Node(link.input());
             (Io::Node(link), sink)
         } else {
             Self::spawn_child(ed, &cwd, cols, rows, integration, tx)?
@@ -980,19 +978,20 @@ impl Buffer for TerminalBuffer {
             self.cell_px.store(px, Ordering::Relaxed);
             let _ = self.term.resize(cols, rows, px >> 16, px & 0xffff);
             self.grid.store(((cols as u32) << 16) | rows as u32, Ordering::Relaxed);
-            match &self.io {
+            let cell = self.cell;
+            match &mut self.io {
                 Io::Pty { master, .. } => {
                     let ws = nix::pty::Winsize {
                         ws_row: rows,
                         ws_col: cols,
-                        ws_xpixel: (cols as f32 * self.cell.x * ppp) as u16,
-                        ws_ypixel: (rows as f32 * self.cell.y * ppp) as u16,
+                        ws_xpixel: (cols as f32 * cell.x * ppp) as u16,
+                        ws_ypixel: (rows as f32 * cell.y * ppp) as u16,
                     };
                     unsafe {
                         nix::libc::ioctl(master.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws);
                     }
                 }
-                Io::Node(l) => l.send(crate::terminals::Out::Resize(cols, rows)),
+                Io::Node(l) => l.resize(cols, rows),
             }
             self.invalidate_rows(true);
         }
@@ -1362,8 +1361,7 @@ impl Buffer for TerminalBuffer {
                 });
             }
             // Quitting leaves it running there, to show again next time.
-            Io::Node(l) if ed.quit_requested => l.send(crate::terminals::Out::Detach),
-            Io::Node(l) if !self.exited => l.kill(ed),
+            Io::Node(l) if !self.exited => l.close(ed, !ed.quit_requested),
             _ => {}
         }
     }

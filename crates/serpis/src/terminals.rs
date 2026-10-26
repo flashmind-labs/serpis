@@ -1,31 +1,106 @@
-//! Terminals a machine's terminal node holds (manymux's: `serpis-node terminals`, or an `mm`
-//! running there), shown in terminal buffers. The machine's chat node starts, lists and ends
-//! them over the connection the window already has; the bytes of each go over a stream of its
-//! own, straight to the terminal node (`serpis-node agent` with `SERPIS_BRIDGE=terminals`, over
-//! the same ssh as the chats). A terminal outlives the window and the connection: one that
-//! drops is attached again, and the next serpis to start shows it again.
+//! Terminals a machine holds (its terminal host: `serpis-node terminals`), shown in terminal
+//! buffers. Everything about them goes over the connection the window already has to the
+//! machine's node: starting, listing and ending them, and their bytes both ways. A terminal
+//! outlives the window and the connection: one that drops is attached again with the machine,
+//! and the next serpis to start shows it again.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use manymux::client::{Stream, Update};
-use manymux::proto::Size;
 use serde_json::{Value, json};
 use serpis_proto::wire::{Request, Response, TerminalInfo};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::buffer::BufferId;
 use crate::buffers::terminal::{PtyMsg, TerminalBuffer};
 use crate::editor::Editor;
 
-/// What a terminal buffer sends its terminal.
-pub enum Out {
-    Input(Vec<u8>),
-    Resize(u16, u16),
-    /// Stop showing it (it keeps running there).
-    Detach,
+/// Each machine's connection, and the buffers showing its terminals: what a terminal prints
+/// goes to its buffer as it arrives, and what is typed goes out as it is typed, neither waiting
+/// for the window's thread (editing a command line waits on it for the echo).
+#[derive(Clone, Default)]
+pub struct Wires(Arc<Mutex<WiresInner>>);
+
+#[derive(Default)]
+struct WiresInner {
+    clients: HashMap<String, Arc<serpis_node::client::Client>>,
+    views: HashMap<(String, String), mpsc::Sender<PtyMsg>>,
+}
+
+impl Wires {
+    pub fn connected(&self, machine: &str, client: Arc<serpis_node::client::Client>) {
+        self.0.lock().unwrap().clients.insert(machine.to_string(), client);
+    }
+
+    /// `machine`'s connection ended: its terminals say so until it is back.
+    pub fn dropped(&self, machine: &str) {
+        let mut w = self.0.lock().unwrap();
+        w.clients.remove(machine);
+        for ((m, _), to) in &w.views {
+            if m == machine {
+                let _ = to.send(PtyMsg::Online(false));
+            }
+        }
+    }
+
+    /// Take a terminal's event to its buffer; false for any other event.
+    pub fn deliver(&self, machine: &str, ev: &serpis_proto::wire::Event) -> bool {
+        use serpis_proto::wire::Event;
+        let mut w = self.0.lock().unwrap();
+        match ev {
+            Event::TerminalOutput { name, data } => {
+                if let Some(to) = w.views.get(&(machine.to_string(), name.clone())) {
+                    let _ = to.send(PtyMsg::Data(data.clone()));
+                }
+                true
+            }
+            Event::TerminalExited { name, .. } => {
+                if let Some(to) = w.views.remove(&(machine.to_string(), name.clone())) {
+                    let _ = to.send(PtyMsg::Exit);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn show(&self, machine: &str, name: &str, to: mpsc::Sender<PtyMsg>) {
+        self.0.lock().unwrap().views.insert((machine.to_string(), name.to_string()), to);
+    }
+
+    fn hide(&self, machine: &str, name: &str) {
+        self.0.lock().unwrap().views.remove(&(machine.to_string(), name.to_string()));
+    }
+
+    fn input(&self, machine: &str, name: &str, bytes: &[u8]) {
+        if let Some(c) = self.0.lock().unwrap().clients.get(machine) {
+            c.send_terminal(name, bytes);
+        }
+    }
+
+    fn request(&self, machine: &str, request: Request) {
+        if let Some(c) = self.0.lock().unwrap().clients.get(machine) {
+            c.send(request);
+        }
+    }
+}
+
+/// Where a terminal buffer's bytes go (its keys, and its VT engine's answers): straight to its
+/// terminal, from whatever thread writes them.
+#[derive(Clone)]
+pub struct Input {
+    wires: Wires,
+    machine: String,
+    name: Arc<Mutex<Option<String>>>,
+}
+
+impl Input {
+    pub fn write(&self, bytes: &[u8]) {
+        if let Some(n) = self.name.lock().unwrap().as_deref() {
+            self.wires.input(&self.machine, n, bytes);
+        }
+    }
 }
 
 /// A terminal buffer's terminal on a machine.
@@ -33,9 +108,13 @@ pub struct Link {
     pub machine: String,
     /// Its name there, once it has been started (set as the machine answers, so a buffer killed
     /// at any moment after that ends it).
-    name: Arc<std::sync::Mutex<Option<String>>>,
-    pub out: UnboundedSender<Out>,
-    /// Attached now (false while connecting, and while a dropped connection is retried).
+    name: Arc<Mutex<Option<String>>>,
+    wires: Wires,
+    /// Where what it prints goes.
+    to: mpsc::Sender<PtyMsg>,
+    /// The size it is shown at.
+    size: (u16, u16),
+    /// Attached now: what it prints arrives (false while starting, connecting, after a drop).
     pub online: bool,
     /// What the machine last said about it.
     pub info: Option<TerminalInfo>,
@@ -47,22 +126,23 @@ pub struct Link {
 pub enum Open {
     /// A new login shell in `cwd` there.
     New { cwd: String, integration: bool },
-    /// A terminal running there already, with this many lines of what it printed before.
-    Attach { name: String, history: u32 },
+    /// A terminal running there already.
+    Attach { name: String },
 }
 
 impl Link {
     /// Start showing a terminal on `machine` at `size` (cols, rows); what it prints goes to `to`.
     pub fn open(ed: &mut Editor, machine: &str, open: Open, size: (u16, u16), to: mpsc::Sender<PtyMsg>) -> Link {
-        let (out, rx) = unbounded_channel();
         let killed = Arc::new(AtomicBool::new(false));
-        let named: Arc<std::sync::Mutex<Option<String>>> = Default::default();
-        let link = Link { machine: machine.to_string(), name: named.clone(), out, online: false, info: None, killed: killed.clone() };
+        let named: Arc<Mutex<Option<String>>> = Default::default();
+        let wires = ed.remote.wires.clone();
+        let link = Link { machine: machine.to_string(), name: named.clone(), wires: wires.clone(), to: to.clone(), size, online: false, info: None, killed: killed.clone() };
         let m = machine.to_string();
         match open {
-            Open::Attach { name, history } => {
+            Open::Attach { name } => {
                 *named.lock().unwrap() = Some(name.clone());
-                attach(ed, &m, name, history, size, rx, to);
+                wires.show(&m, &name, to.clone());
+                attach(ed, &m, &name, size, true, to);
             }
             Open::New { cwd, integration } => {
                 let request = Request::NewTerminal { cwd, cols: size.0, rows: size.1, integration };
@@ -70,7 +150,8 @@ impl Link {
                     Ok(Response::Terminal { name }) if killed.load(Ordering::Relaxed) => crate::remote::send(ed, &m, Request::KillTerminal { name }),
                     Ok(Response::Terminal { name }) => {
                         *named.lock().unwrap() = Some(name.clone());
-                        attach(ed, &m, name, 0, size, rx, to);
+                        wires.show(&m, &name, to.clone());
+                        attach(ed, &m, &name, size, false, to);
                     }
                     Ok(other) => fail(&to, &format!("{m} answered {other:?}")),
                     Err(e) => fail(&to, &e),
@@ -85,17 +166,26 @@ impl Link {
         self.name.lock().unwrap().clone()
     }
 
-    pub fn send(&self, out: Out) {
-        let _ = self.out.send(out);
+    /// Where its bytes go.
+    pub fn input(&self) -> Input {
+        Input { wires: self.wires.clone(), machine: self.machine.clone(), name: self.name.clone() }
     }
 
-    /// The buffer is going: end the terminal there.
-    pub fn kill(&self, ed: &mut Editor) {
-        self.killed.store(true, Ordering::Relaxed);
+    /// Shown at another size.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.size = (cols, rows);
         if let Some(name) = self.name() {
-            crate::remote::send(ed, &self.machine, Request::KillTerminal { name });
+            self.wires.request(&self.machine, Request::ResizeTerminal { name, cols, rows });
         }
-        self.send(Out::Detach);
+    }
+
+    /// The buffer is going: end the terminal there, or (quitting) just stop showing it.
+    pub fn close(&self, ed: &mut Editor, end: bool) {
+        self.killed.store(end, Ordering::Relaxed);
+        if let Some(name) = self.name() {
+            self.wires.hide(&self.machine, &name);
+            crate::remote::send(ed, &self.machine, if end { Request::KillTerminal { name } } else { Request::DetachTerminal { name } });
+        }
     }
 }
 
@@ -105,99 +195,42 @@ fn fail(to: &mpsc::Sender<PtyMsg>, why: &str) {
     let _ = to.send(PtyMsg::Exit);
 }
 
-/// Attach to `name` on `machine` once its node is reached, and keep it attached.
-fn attach(ed: &mut Editor, machine: &str, name: String, history: u32, size: (u16, u16), rx: UnboundedReceiver<Out>, to: mpsc::Sender<PtyMsg>) {
-    let m = machine.to_string();
-    crate::remote::with_client(ed, machine, move |ed, c| {
-        let target = match c {
-            Ok(_) => crate::remote::current_target(ed, &m),
-            Err(e) => return fail(&to, &e),
-        };
-        let Some(target) = target else { return fail(&to, &format!("no way to reach {m}'s terminals")) };
-        let main = ed.main_sender();
-        ed.rt.spawn(pump(target, name, history, size, rx, to, main));
+/// Show `name` of `machine`: what it prints arrives from now on, starting with its screen (and,
+/// for a fresh view, what it printed before).
+fn attach(ed: &mut Editor, machine: &str, name: &str, size: (u16, u16), history: bool, to: mpsc::Sender<PtyMsg>) {
+    let request = Request::AttachTerminal { name: name.to_string(), cols: size.0, rows: size.1, history };
+    crate::remote::request(ed, machine, request, move |ed, r| match r {
+        Ok(_) => {
+            let _ = to.send(PtyMsg::Online(true));
+            ed.main_sender().repaint();
+        }
+        // Ended there meanwhile.
+        Err(e) if e.contains("no terminal") => {
+            let _ = to.send(PtyMsg::Exit);
+        }
+        Err(e) => fail(&to, &e),
     });
 }
 
-/// Keep `name` attached until it ends or the buffer lets go of it, attaching again after drops.
-async fn pump(target: serpis_node::client::Target, name: String, mut history: u32, mut size: (u16, u16), mut rx: UnboundedReceiver<Out>, to: mpsc::Sender<PtyMsg>, main: crate::editor::MainSender) {
-    let tell = |m: PtyMsg| {
-        let _ = to.send(m);
-        main.repaint();
-    };
-    let mut failures = 0u32;
-    loop {
-        let attempt = async {
-            let pipe = serpis_node::client::terminal_pipe(&target).await?;
-            let (stderr, done) = (pipe.stderr.clone(), pipe.stderr_done);
-            let attached = Stream::from_halves(pipe.read, pipe.write).attach(&name, Size::new(size.0, size.1), history, false).await;
-            match attached {
-                Ok(a) => Ok((a, pipe.child)),
-                // What the far side said is the reason, when it said anything.
-                Err(e) => Err(serpis_node::client::Pipe::why(stderr, done).await.map(|w| anyhow::anyhow!("{w}")).unwrap_or(e)),
-            }
-        };
-        let (attached, _child) = match attempt.await {
-            Ok(a) => a,
-            Err(e) => {
-                let why = format!("{e:#}");
-                // Ended there meanwhile.
-                if why.contains("no session named") {
-                    return tell(PtyMsg::Exit);
-                }
-                tracing::warn!("terminal {name}: {why}");
-                failures += 1;
-                let pause = Duration::from_millis(500 * 2u64.pow(failures.min(5))).min(Duration::from_secs(10));
-                // Waiting, the buffer may still resize or let go.
-                let until = tokio::time::Instant::now() + pause;
-                loop {
-                    tokio::select! {
-                        _ = tokio::time::sleep_until(until) => break,
-                        o = rx.recv() => match o {
-                            Some(Out::Resize(c, r)) => size = (c, r),
-                            Some(Out::Input(_)) => {}
-                            None | Some(Out::Detach) => return,
-                        },
-                    }
-                }
-                continue;
-            }
-        };
-        failures = 0;
-        history = 0;
-        tell(PtyMsg::Online(true));
-        let mut h = attached.split();
-        loop {
-            tokio::select! {
-                u = h.reader.next() => match u {
-                    Ok(Update::Output(b) | Update::Screen(b) | Update::History(b)) => tell(PtyMsg::Data(b)),
-                    Ok(Update::Ping) => {
-                        if h.writer.pong().await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Update::Exited(_)) => return tell(PtyMsg::Exit),
-                    Ok(Update::Disconnected) | Err(_) => break,
-                    Ok(_) => {}
-                },
-                o = rx.recv() => match o {
-                    Some(Out::Input(b)) => {
-                        if h.writer.send_input(&b).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Out::Resize(c, r)) => {
-                        size = (c, r);
-                        let _ = h.writer.resize(Size::new(c, r)).await;
-                    }
-                    None | Some(Out::Detach) => {
-                        let _ = h.writer.detach().await;
-                        return;
-                    }
-                },
-            }
+/// Whether buffers show terminals of `machine` (it is reconnected for them, as for chats).
+pub fn shown_on(ed: &Editor, machine: &str) -> bool {
+    linked(ed).iter().any(|(_, m, _)| m == machine)
+}
+
+/// `machine` is back: its terminals are attached again (their screens come again; what they
+/// printed meanwhile is on them).
+pub fn reattach(ed: &mut Editor, machine: &str) {
+    let mut again = Vec::new();
+    for s in ed.buffers.values() {
+        if let Some(link) = s.buf.as_ref().and_then(|b| b.as_any().downcast_ref::<TerminalBuffer>()).and_then(TerminalBuffer::link)
+            && link.machine == machine
+            && let Some(name) = link.name()
+        {
+            again.push((name, link.size, link.to.clone()));
         }
-        tell(PtyMsg::Online(false));
+    }
+    for (name, size, to) in again {
+        attach(ed, machine, &name, size, false, to);
     }
 }
 
@@ -355,9 +388,8 @@ fn pick(ed: &mut Editor, machines: Vec<String>) {
 
 pub fn install(ed: &mut Editor) {
     let o = crate::editor::BUILTIN;
-    ed.defvar("terminal-persistent", json!(true), "Terminals on this machine run in its terminal node (manymux's, shared with mm), so they outlive the window and other devices reach them; off, a terminal is a child of the window and ends with it. Terminals on other machines always run in theirs.");
+    ed.defvar("terminal-persistent", json!(true), "Terminals on this machine run in its terminal host (serpis-node terminals), so they outlive the window and other devices reach them; off, a terminal is a child of the window and ends with it. Terminals on other machines always run in theirs.");
     ed.defvar("terminal-poll-seconds", json!(1.0), "How often machines are asked what their shown terminals are doing (the program in front, for activity).");
-    ed.defvar("terminal-history-lines", json!(5000), "Lines of what a terminal printed before it was attached, for its scrollback.");
     ed.defvar("terminal-follow-machine", json!(true), "new-terminal opens on the machine of the buffer you are in (a chat or terminal on another machine), in its folder there.");
     ed.define_command("remote-new-terminal", "Open a terminal on another machine: pick the machine, then a folder there (params: machine, folder).", o, |ed, a| {
         let (machine, dir) = (a.str(0).map(str::to_string), a.str(1).map(str::to_string));

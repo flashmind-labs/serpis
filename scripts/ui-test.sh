@@ -23,8 +23,8 @@ mock=$!
 # A simulated caching provider (crates/serpis-testkit) for the cache tests.
 "$root/target/debug/serpis-mock-provider" "$tmp/cache-mock.port" "$tmp/cache-mock.log" &
 cache=$!
-# Terminals run in a terminal node per test home (never manymux's own socket, where your
-# terminals are), which outlives the window like the chat node: all stopped at the end (a test
+# Terminals run in a terminal host per test home (never the real one, where your terminals
+# are), which outlives the window like the chat node: all stopped at the end (a test
 # and its _restore share one, and the second checks what the first left running).
 stop_terminals() { for h in "$tmp"/home-*; do SERPIS_TERMINAL_SOCKET="$h/.t.sock" "$root/target/debug/serpis-node" stop-terminals >/dev/null 2>&1 || true; done; }
 trap 'kill $mock $cache 2>/dev/null; stop_terminals' EXIT

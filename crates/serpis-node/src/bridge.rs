@@ -1,8 +1,6 @@
 //! `serpis-node agent`: what a client elsewhere runs here over ssh. It joins its stdin and
 //! stdout to this machine's node socket, starting the node first if none is running, and adds
-//! nothing of its own: the bytes are the protocol. With `SERPIS_BRIDGE=terminals` it joins
-//! them to the machine's terminal node instead ([`crate::terminals`]), whose protocol is
-//! manymux's.
+//! nothing of its own: the bytes are the protocol.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -10,21 +8,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tokio::net::UnixStream;
 
-/// Join stdin and stdout to the node at `socket` (or the terminal node, as
-/// `SERPIS_BRIDGE` says) until either side closes.
+/// Join stdin and stdout to the node at `socket` until either side closes.
 pub async fn agent(socket: &Path) -> Result<()> {
     let exe = std::env::current_exe().context("finding serpis-node")?;
-    let stream = if std::env::var("SERPIS_BRIDGE").is_ok_and(|b| b == "terminals") {
-        let socket = crate::terminals::socket();
-        crate::terminals::ensure(&exe, &socket).await?;
-        UnixStream::connect(&socket).await?
-    } else {
-        match UnixStream::connect(socket).await {
-            Ok(s) => s,
-            Err(_) => {
-                start_node(&exe, socket)?;
-                wait_for(socket).await?
-            }
+    let stream = match UnixStream::connect(socket).await {
+        Ok(s) => s,
+        Err(_) => {
+            start_node(&exe, socket)?;
+            wait_for(socket).await?
         }
     };
     let (mut from_node, mut to_node) = stream.into_split();

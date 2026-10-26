@@ -25,6 +25,29 @@ pub mod tag {
     pub const CALL: u8 = 0x01;
     pub const REPLY: u8 = 0x02;
     pub const EVENT: u8 = 0x03;
+    /// A terminal's bytes, raw ([`terminal_frame`]): what was typed, client to node; what it
+    /// printed, node to client (an attached one).
+    pub const TERMINAL: u8 = 0x04;
+}
+
+/// A [`tag::TERMINAL`] frame: the terminal's name, then its bytes.
+pub fn terminal_frame(name: &str, bytes: &[u8]) -> Vec<u8> {
+    let name = &name.as_bytes()[..name.len().min(255)];
+    let len = 1 + name.len() + bytes.len();
+    let mut out = Vec::with_capacity(5 + len);
+    out.push(tag::TERMINAL);
+    out.extend_from_slice(&(len as u32).to_be_bytes());
+    out.push(name.len() as u8);
+    out.extend_from_slice(name);
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// A [`tag::TERMINAL`] frame's name and bytes.
+pub fn parse_terminal(body: &[u8]) -> Option<(String, &[u8])> {
+    let n = *body.first()? as usize;
+    let name = std::str::from_utf8(body.get(1..1 + n)?).ok()?;
+    Some((name.to_string(), &body[1 + n..]))
 }
 
 /// A request and the id its reply will carry.
@@ -166,12 +189,11 @@ pub enum Request {
     /// The folders in a directory on the node (`~` and relative paths start from its home),
     /// for picking where a chat runs.
     Dirs { path: String },
-    /// The terminals on the node's machine (its terminal node, manymux's: `serpis-node
-    /// terminals`, or an `mm` running there), with what each is doing.
+    /// The terminals on the node's machine (held by its terminal host, `serpis-node
+    /// terminals`), with what each is doing.
     Terminals,
     /// Start a terminal there: the user's login shell in `cwd` (`~` and relative paths start
-    /// from its home). Answered with `Terminal`; its bytes come over the terminal node's own
-    /// stream (`serpis-node agent` with `SERPIS_BRIDGE=terminals`).
+    /// from its home). Answered with `Terminal`; `AttachTerminal` shows it.
     NewTerminal {
         cwd: String,
         cols: u16,
@@ -182,6 +204,20 @@ pub enum Request {
     },
     /// End a terminal (its programs are hung up).
     KillTerminal { name: String },
+    /// Show a terminal: what it prints comes as [`tag::TERMINAL`] frames from now on, starting
+    /// with its screen (and, with `history`, what it printed before, for a fresh view's
+    /// scrollback). What is typed goes the same way, client to node.
+    AttachTerminal {
+        name: String,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        history: bool,
+    },
+    /// Stop showing it (it keeps running).
+    DetachTerminal { name: String },
+    /// The size the terminal is shown at.
+    ResizeTerminal { name: String, cols: u16, rows: u16 },
     /// Start the node when the machine boots and again when it crashes (a systemd user unit, a
     /// launchd agent), so chats cut off by either continue without anyone connecting. Answered
     /// with `Service`.
@@ -254,7 +290,7 @@ pub enum Response {
 /// A terminal on a machine, as its terminal node tells it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TerminalInfo {
-    /// What it is called there (`host/name` to manymux).
+    /// What it is called there.
     pub name: String,
     /// The title its program set, else the command.
     pub title: String,
@@ -297,6 +333,16 @@ pub enum Event {
     Message { level: NoticeLevel, text: String },
     /// Run a tool this client lent (`Lend`) for `chat`, and answer with `ToolDone`.
     ToolCall { chat: String, call: u64, name: String, args: serde_json::Value },
+    /// An attached terminal ended (`code`: how its program exited, when known).
+    TerminalExited {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+    },
+    /// What an attached terminal printed: a [`tag::TERMINAL`] frame, as the client hands it on
+    /// (never sent as an event).
+    #[serde(skip)]
+    TerminalOutput { name: String, data: Vec<u8> },
 }
 
 /// A tool a client lends: what the model is told about it.
@@ -354,6 +400,15 @@ pub struct SessionInfo {
     pub open: bool,
     #[serde(default)]
     pub running: bool,
+}
+
+/// A frame made again from its tag and body (as [`Decoder::next`] gives them), to pass on.
+pub fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + body.len());
+    out.push(tag);
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(body);
+    out
 }
 
 /// One frame's bytes.

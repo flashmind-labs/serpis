@@ -331,6 +331,11 @@ impl Client {
                                 }
                             }
                         }
+                        Ok(Some((tag::TERMINAL, body))) => {
+                            if let Some((name, data)) = wire::parse_terminal(&body) {
+                                let _ = ev_tx.send(Event::TerminalOutput { name, data: data.to_vec() });
+                            }
+                        }
                         Ok(Some((tag::EVENT, body))) => match serde_json::from_slice::<Event>(&body) {
                             Ok(e) => {
                                 let _ = ev_tx.send(e);
@@ -353,6 +358,11 @@ impl Client {
             }
         });
         (Client { out, pending, next: AtomicU64::new(1), hello: Hello::default(), _child: None, stderr: None, rt: tokio::runtime::Handle::current() }, ev_rx)
+    }
+
+    /// Type `bytes` into the terminal `name` (attached with `AttachTerminal`).
+    pub fn send_terminal(&self, name: &str, bytes: &[u8]) {
+        let _ = self.out.send(wire::terminal_frame(name, bytes));
     }
 
     /// Send a request and wait for its answer; the node's errors are errors. The request goes
@@ -398,87 +408,6 @@ impl Client {
 struct Failed {
     stderr: String,
     error: anyhow::Error,
-}
-
-/// A byte stream to the terminal node of a machine ([`crate::terminals`]): manymux's protocol.
-#[cfg(feature = "node")]
-pub struct Pipe {
-    pub read: Box<dyn AsyncRead + Unpin + Send>,
-    pub write: Box<dyn AsyncWrite + Unpin + Send>,
-    /// The ssh (or other) process carrying it, ended with the pipe.
-    pub child: Option<tokio::process::Child>,
-    /// What that process said on stderr (why it ended, when it did).
-    pub stderr: Arc<Mutex<String>>,
-    /// Done once the process has said all it will on stderr.
-    pub stderr_done: Option<tokio::task::JoinHandle<()>>,
-}
-
-#[cfg(feature = "node")]
-impl Pipe {
-    /// Why the far side ended the stream: what it said on stderr, waited for a moment (it is
-    /// read as it comes), and a build serpis lacks named as such. None when it said nothing.
-    pub async fn why(stderr: Arc<Mutex<String>>, done: Option<tokio::task::JoinHandle<()>>) -> Option<String> {
-        if let Some(done) = done {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), done).await;
-        }
-        let said = stderr.lock().unwrap().clone();
-        if let Some(system) = crate::deploy::wanted_system(&said) {
-            return Some(format!("serpis has no serpis-node build for {system} to run there"));
-        }
-        if crate::deploy::wanted(&said).is_some() {
-            return Some("the serpis-node build serpis expects isn't installed there yet".into());
-        }
-        (!said.trim().is_empty()).then(|| said.trim().to_string())
-    }
-}
-
-/// Open a stream to the terminal node of the machine `target` reaches, the way its chat node is
-/// reached, with `SERPIS_BRIDGE=terminals` (this machine's is started when none runs). A
-/// `Command` target gets the variable in its environment: one that runs the node somewhere
-/// else must pass it on.
-#[cfg(feature = "node")]
-pub async fn terminal_pipe(target: &Target) -> Result<Pipe> {
-    let local = |s: tokio::net::UnixStream| {
-        let (r, w) = s.into_split();
-        Pipe { read: Box::new(r), write: Box::new(w), child: None, stderr: Default::default(), stderr_done: None }
-    };
-    let socket = crate::terminals::socket();
-    let argv = match target {
-        Target::Local(_) => return Ok(local(tokio::net::UnixStream::connect(&socket).await.with_context(|| format!("no terminal node at {}", socket.display()))?)),
-        Target::Own { exe, .. } => {
-            crate::terminals::ensure(exe, &socket).await?;
-            return Ok(local(tokio::net::UnixStream::connect(&socket).await?));
-        }
-        Target::Ssh { host, ssh, ssh_args, env, command, deploy, ask } => {
-            let mut env = env.clone();
-            env.push(("SERPIS_BRIDGE".into(), "terminals".into()));
-            let mut argv = ssh.clone();
-            argv.extend(ssh_args.iter().cloned());
-            let run = command.clone().unwrap_or_else(|| crate::deploy::agent_command(deploy, *ask));
-            argv.extend([host.clone(), "--".into(), format!("{}{run}", env_prefix(&env))]);
-            argv
-        }
-        Target::Command(argv) => argv.clone(),
-    };
-    let (program, args) = argv.split_first().context("empty command")?;
-    let mut child = tokio::process::Command::new(program)
-        .args(args)
-        .env("SERPIS_BRIDGE", "terminals")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("starting {program}"))?;
-    let (read, write, err) = (child.stdout.take().unwrap(), child.stdin.take().unwrap(), child.stderr.take().unwrap());
-    let stderr: Arc<Mutex<String>> = Default::default();
-    let said = stderr.clone();
-    let done = tokio::spawn(async move {
-        let mut buf = String::new();
-        let _ = tokio::io::BufReader::new(err).read_to_string(&mut buf).await;
-        said.lock().unwrap().push_str(buf.trim());
-    });
-    Ok(Pipe { read: Box::new(read), write: Box::new(write), child: Some(child), stderr, stderr_done: Some(done) })
 }
 
 fn describe(t: &Target) -> String {
