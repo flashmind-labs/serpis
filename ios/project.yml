@@ -5,6 +5,9 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+configFiles:
+  Debug: Serpis.xcconfig
+  Release: Serpis.xcconfig
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -52,7 +55,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.serpis.phone
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serpis.phone$(SERPIS_BUNDLE_SUFFIX)
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
@@ -67,7 +70,7 @@ targets:
       - target: Serpis
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.serpis.phone.tests
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serpis.phone$(SERPIS_BUNDLE_SUFFIX).tests
         GENERATE_INFOPLIST_FILE: YES
   SerpisUITests:
     type: bundle.ui-testing
@@ -78,7 +81,7 @@ targets:
       - target: Serpis
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.serpis.phone.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: dev.serpis.phone$(SERPIS_BUNDLE_SUFFIX).uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Serpis
 schemes:

@@ -1,0 +1,4 @@
+// Settings of this machine's own (signing), from Local.xcconfig, which isn't checked in:
+//   DEVELOPMENT_TEAM = <your team id>
+//   SERPIS_BUNDLE_SUFFIX = .<something of yours>   (a free team needs app ids no one else has)
+#include? "Local.xcconfig"
