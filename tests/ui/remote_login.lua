@@ -76,12 +76,12 @@ steps({
   function(go)
     T.check("the machine list opens before rayfish answers", prompt():find("Run this chat on", 1, true) ~= nil, true)
     T.check("and shows that more is coming", serpis.minibuffer.loading(), true)
-    T.check("with what is known already", candidates(), "local")
+    T.check("with what is known already", candidates(), "local,Add a machine…")
     when(function() return not serpis.minibuffer.loading() end, go)
     return false
   end,
   function()
-    T.check("rayfish's peers join the open list", candidates(), "local,box.net.ray")
+    T.check("rayfish's peers join the open list", candidates(), "local,box.net.ray,Add a machine…")
     T.press("b o x . n e t . r a y RET")
   end,
   -- Connecting takes a second here: a card says so meanwhile.

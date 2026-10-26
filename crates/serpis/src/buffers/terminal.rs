@@ -175,7 +175,8 @@ fn rgb(c: RgbColor) -> Color32 {
 }
 
 
-fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -> anyhow::Result<(OwnedFd, nix::unistd::Pid)> {
+/// The user's shell on a new PTY: a login shell, or one that runs `command` and ends.
+fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool, command: Option<&str>) -> anyhow::Result<(OwnedFd, nix::unistd::Pid)> {
     use nix::pty::{ForkptyResult, Winsize, forkpty};
     let ws = Winsize {
         ws_row: rows,
@@ -187,7 +188,10 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
     // Build everything the child needs before forking (no allocation after fork).
     let prog = std::ffi::CString::new(shell.clone())?;
     let base = std::path::Path::new(&shell).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "sh".into());
-    let arg0 = std::ffi::CString::new(format!("-{base}"))?;
+    let argv = match command {
+        Some(c) => vec![std::ffi::CString::new(base.clone())?, std::ffi::CString::new("-c")?, std::ffi::CString::new(c)?],
+        None => vec![std::ffi::CString::new(format!("-{base}"))?],
+    };
     let cwd_c = std::ffi::CString::new(cwd.as_os_str().as_encoded_bytes())?;
     let mut env: Vec<std::ffi::CString> = std::env::vars()
         .filter(|(k, _)| !matches!(k.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM"))
@@ -197,7 +201,7 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
     env.push(std::ffi::CString::new("COLORTERM=truecolor")?);
     env.push(std::ffi::CString::new("TERM_PROGRAM=serpis")?);
     // zsh reads $ZDOTDIR/.zshenv first; ours restores ZDOTDIR and loads the prompt marks.
-    if let Some(dir) = (integration && base == "zsh").then(serpis_node::terminals::install_shell_integration).flatten() {
+    if let Some(dir) = (integration && command.is_none() && base == "zsh").then(serpis_node::terminals::install_shell_integration).flatten() {
         env.retain(|e| !e.as_bytes().starts_with(b"ZDOTDIR="));
         if let Some(z) = std::env::var_os("ZDOTDIR") {
             env.push(std::ffi::CString::new(format!("SERPIS_ZDOTDIR={}", z.to_string_lossy()))?);
@@ -211,7 +215,7 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
             unsafe {
                 nix::libc::chdir(cwd_c.as_ptr());
             }
-            let _ = nix::unistd::execve(&prog, &[arg0.as_c_str()], &env);
+            let _ = nix::unistd::execve(&prog, &argv, &env);
             unsafe { nix::libc::_exit(127) }
         }
         ForkptyResult::Parent { child, master } => Ok((master, child)),
@@ -220,7 +224,8 @@ fn spawn_shell(cwd: &std::path::Path, cols: u16, rows: u16, integration: bool) -
 
 impl TerminalBuffer {
     /// A shell in `params.cwd` (else the editor's directory) on `params.machine` (else this
-    /// one), or the terminal `params.terminal` running there already.
+    /// one), or the terminal `params.terminal` running there already. `params.command` runs
+    /// that (in the shell, on this machine, as a child of the window) instead, and ends with it.
     pub fn new(ed: &mut Editor, params: &serde_json::Value) -> anyhow::Result<Self> {
         let (cols, rows) = (100u16, 30u16);
         let integration = ed.var("terminal-shell-integration").and_then(serde_json::Value::as_bool).unwrap_or(true);
@@ -230,7 +235,8 @@ impl TerminalBuffer {
         let (tx, rx) = mpsc::channel();
         let remote_cwd = params.get("cwd").and_then(serde_json::Value::as_str).filter(|_| machine.as_deref().is_some_and(|m| m != crate::remote::LOCAL)).map(str::to_string);
         let cwd = params.get("cwd").and_then(serde_json::Value::as_str).map(crate::expand_home).filter(|d| d.is_dir()).unwrap_or_else(|| ed.cwd.clone());
-        let (io, sink) = if machine.is_some() || attach.is_some() || persistent {
+        let command = params.get("command").and_then(serde_json::Value::as_str).map(str::to_string);
+        let (io, sink) = if command.is_none() && (machine.is_some() || attach.is_some() || persistent) {
             let machine = machine.unwrap_or_else(|| crate::remote::LOCAL.to_string());
             let open = match attach {
                 Some(name) => crate::terminals::Open::Attach { name },
@@ -240,15 +246,15 @@ impl TerminalBuffer {
             let sink = Sink::Node(link.input());
             (Io::Node(Box::new(link)), sink)
         } else {
-            Self::spawn_child(ed, &cwd, cols, rows, integration, tx)?
+            Self::spawn_child(ed, &cwd, cols, rows, integration, command.as_deref(), tx)?
         };
         let cwd = remote_cwd.map(std::path::PathBuf::from).unwrap_or(cwd);
         Self::with_io(ed, io, sink, rx, cwd, cols, rows)
     }
 
     /// A shell as a child of this window, read on a thread of its own.
-    fn spawn_child(ed: &mut Editor, cwd: &std::path::Path, cols: u16, rows: u16, integration: bool, tx: mpsc::Sender<PtyMsg>) -> anyhow::Result<(Io, Sink)> {
-        let (master, child) = spawn_shell(cwd, cols, rows, integration)?;
+    fn spawn_child(ed: &mut Editor, cwd: &std::path::Path, cols: u16, rows: u16, integration: bool, command: Option<&str>, tx: mpsc::Sender<PtyMsg>) -> anyhow::Result<(Io, Sink)> {
+        let (master, child) = spawn_shell(cwd, cols, rows, integration, command)?;
         let master = Arc::new(master);
         let reader = nix::unistd::dup(master.as_raw_fd())?;
         let repaint = ed.main_sender();

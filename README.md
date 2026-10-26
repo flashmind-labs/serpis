@@ -224,7 +224,20 @@ and settings; keymaps, commands and the UI do nothing there (`serpis.where` is `
 reloads it too. Tools that need the window (`serpis_lua`, `serpis_api`, and Lua tools only the
 window defines) are lent by each window to the chats it shows, wherever they run.
 
-Machines are ssh destinations: `remote-hosts` (`serpis.var.set("remote-hosts", {"gpu-box",
+`machine-add` (or "Add a machine…" wherever serpis asks for a machine) adds one: it suggests
+the hosts in your ssh config, your Tailscale machines, rayfish peers, machines on this network
+that offer ssh and the ones used before, or takes any ssh destination (`me@10.0.0.5`,
+`ssh://me@box:2222`, an EC2 name). serpis then logs in, and walks you through what stands in
+the way: a host key it hasn't seen is shown by its fingerprint and, once you trust it, kept in
+serpis's own `~/.serpis/known_hosts` (`remote-known-hosts`; ssh's own is read, never written,
+and every login checks host keys strictly); a machine that doesn't take your key gets it with
+`ssh-copy-id`, in a terminal where you type the password once (or the key goes on the clipboard,
+or you log in as another account). Named, it is kept (`remote-machines`) and serpis installs its
+node there. `machine-rename`, `machine-remove` and `machine-forget-host-key` (after a machine
+was reinstalled) do the rest; each source of suggestions can be turned off (`machine-suggest-*`),
+and the `machine-added` hook runs once one is added.
+
+Machines are ssh destinations: those added, `remote-hosts` (`serpis.var.set("remote-hosts", {"gpu-box",
 "me@lab"})`, or `{name, host, env = {...}}` tables), plus the peers of your
 [rayfish](https://github.com/rayfish/rayfish) networks (`remote-rayfish`), named
 `host.network.ray`. With rayfish, `ray ssh on` and `ray ssh allow <network> <this machine> --user

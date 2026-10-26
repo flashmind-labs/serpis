@@ -30,7 +30,7 @@ fontique = { version = "0.11", default-features = false, features = ["system", "
 # LuaJIT (Lua 5.1 + extensions), like Neovim: fast, and familiar to plugin authors.
 mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", features = ["kitty-graphics", "png"] }
-nix = { version = "0.29", features = ["term", "fs", "signal", "process", "ioctl"] }
+nix = { version = "0.29", features = ["term", "fs", "signal", "process", "ioctl", "hostname"] }
 libloading = "0.8"
 notify = "8"
 ropey = "1.6"

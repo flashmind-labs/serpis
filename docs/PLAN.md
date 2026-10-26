@@ -388,6 +388,24 @@ Steps:
    machines with the device key and host key checks. Tests: `crates/serpis-mobile/tests/core.rs`
    (a real ssh server in the test, a node, the mock model), `ios/ui-test.sh` (unit tests, and a
    UI test through the whole flow against `ios/test-machine.sh`, screens saved).
+7. Adding machines, on the desktop (in progress, branch `add-machine`, agreed 2026-10-26: rayfish
+   is one way among ssh config, Tailscale and plain ssh; machines are added and configured on the
+   desktop only). `machine-add` (`crates/serpis/src/machines.rs`, and "Add a machine…" in the
+   machine picker) suggests the ssh config's hosts (and its includes), Tailscale peers (not
+   phones), rayfish peers, Bonjour ssh machines (dns-sd, avahi-browse) and the ones used before,
+   or takes any ssh destination; logs in and handles what stands in the way: an unknown host key
+   (fingerprint shown, trusted into serpis's own `~/.serpis/known_hosts`, never ssh's; logins
+   check strictly), a refused key (`ssh-copy-id` in a terminal, the key on the clipboard, another
+   account), a changed host key (refused; `machine-forget-host-key`). Kept in `remote-machines`;
+   `machine-rename`, `machine-remove`. Tests: unit tests of the parsers in `machines.rs`,
+   `tests/ui/machine_add.lua` (stand-in ssh, ssh-copy-id and tailscale).
+   Next, the phone: it gets machines from the desktop, not by adding them itself. The desktop
+   shows a QR code with the machines (name, ssh destination, port) and their trusted host keys,
+   public data only; the phone scans it and trusts exactly those keys (pinned, no first-use
+   guess). The phone's own key still has to reach each machine's authorized_keys: the phone
+   shows its public key, the desktop takes it (paste, e.g. through Universal Clipboard, or a
+   second QR read by the Mac's camera) and adds it there over its own logins. Open: whether the
+   QR should carry a one-time way back to the desktop so the key goes over by itself.
 
 ### Later (left open on the way; pick up when they matter)
 

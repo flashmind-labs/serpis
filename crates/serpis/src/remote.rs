@@ -38,7 +38,7 @@ pub struct Machine {
     /// What it is called here (the host, unless `remote-hosts` names it).
     pub name: String,
     pub target: Target,
-    /// Where it was found: "remote-hosts" or "rayfish".
+    /// Where it was found: "remote-hosts", "added" (machine-add) or "rayfish".
     pub source: &'static str,
     /// rayfish's state for it (active, idle, offline), if known.
     pub detail: String,
@@ -93,14 +93,23 @@ pub struct Remotes {
     pub targets: HashMap<String, Target>,
     /// What the machines' terminals are doing.
     pub terminals: crate::terminals::Polls,
+    /// What machine-add is doing.
+    pub adding: crate::machines::Adding,
     /// Each machine's connection and the buffers showing its terminals, for their bytes, which
     /// go between them without the window's thread.
     pub wires: crate::terminals::Wires,
 }
 
-/// The machines chats can run on: `remote-hosts`, then rayfish peers.
+/// The machines chats can run on: `remote-hosts`, the ones added (`remote-machines`), then
+/// rayfish peers.
 pub fn machines(ed: &mut Editor) -> Vec<Machine> {
     let mut out = configured(ed);
+    for (name, host) in crate::machines::added(ed) {
+        if !out.iter().any(|o| o.name == name) {
+            let target = ssh_target(ed, &host, None);
+            out.push(Machine { name, target, source: "added", detail: String::new() });
+        }
+    }
     if ed.var("remote-rayfish").and_then(Value::as_bool).unwrap_or(true) {
         refresh_rayfish(ed);
         // A configured machine replaces the peer it reaches (`alice@box.net.ray` says which
@@ -187,6 +196,14 @@ async fn build_node(root: &std::path::Path, store: &std::path::Path, system: &st
     serpis_node::deploy::scan(store).into_iter().find(|n| n.os_arch == system).with_context(|| format!("the build for {system} isn't in {}", store.display()))
 }
 
+/// How an ssh target logs in: `user@host`, or the host.
+pub fn ssh_login(t: &Target) -> Option<String> {
+    match t {
+        Target::Ssh { host, .. } => Some(host.clone()),
+        _ => None,
+    }
+}
+
 /// The host an ssh target reaches, without its user.
 fn ssh_host(t: &Target) -> Option<String> {
     match t {
@@ -195,7 +212,7 @@ fn ssh_host(t: &Target) -> Option<String> {
     }
 }
 
-fn ssh_target(ed: &mut Editor, host: &str, command: Option<String>) -> Target {
+pub(crate) fn ssh_target(ed: &mut Editor, host: &str, command: Option<String>) -> Target {
     // The account being tried, else the one remote-users keeps, for a host given without one.
     let account = (!host.contains('@')).then(|| ed.remote.trying.get(host).cloned().or_else(|| ed.var("remote-users").and_then(|u| u.get(host)?.as_str().map(str::to_string)))).flatten();
     let login = account.map(|a| format!("{a}@{host}")).unwrap_or_else(|| host.to_string());
@@ -207,6 +224,14 @@ fn ssh_target(ed: &mut Editor, host: &str, command: Option<String>) -> Target {
     if let Some(Value::Array(extra)) = ed.var("remote-ssh-args") {
         ssh_args.extend(extra.iter().filter_map(Value::as_str).map(str::to_string));
     }
+    // The host keys serpis trusts (machine-add asks), and ssh's, read only. ssh keeps an option's
+    // first value: these come after remote-ssh-args, which can say otherwise.
+    let mut files = vec![crate::machines::known_hosts(ed)];
+    if ed.var("remote-ssh-known-hosts").and_then(Value::as_bool).unwrap_or(true) {
+        files.push(crate::expand_home("~/.ssh/known_hosts"));
+    }
+    let files: Vec<String> = files.iter().map(|f| format!("\"{}\"", f.display())).collect();
+    ssh_args.extend(["-o".into(), format!("UserKnownHostsFile={}", files.join(" ")), "-o".into(), "StrictHostKeyChecking=yes".into()]);
     *run = command.or_else(|| ed.var_str("remote-node-command")).filter(|c| !c.is_empty());
     *deploy = node_builds(ed);
     t
@@ -481,8 +506,12 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
     }
 }
 
-/// Whether `remote-hosts` names the account for `machine` itself (`user@host`).
+/// Whether `remote-hosts` or `remote-machines` names the account for `machine` itself
+/// (`user@host`).
 fn account_named(ed: &Editor, machine: &str) -> bool {
+    if crate::machines::added(ed).iter().any(|(n, h)| n == machine && h.contains('@')) {
+        return true;
+    }
     let Some(Value::Array(list)) = ed.var("remote-hosts") else { return false };
     list.iter().any(|h| match h {
         Value::String(host) => host == machine && host.contains('@'),
@@ -1283,15 +1312,17 @@ fn moved_failed(ed: &mut Editor, id: BufferId, error: String) {
 pub fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnOnce(&mut Editor, String) + 'static) {
     let cands = machine_candidates(ed, with_local);
     let loading = ed.remote.rayfish_loading;
-    if cands.is_empty() && !loading {
-        ed.message("No machines: add ssh hosts to remote-hosts (or install rayfish), e.g. serpis.var.set(\"remote-hosts\", {\"gpu-box\"})");
-        return;
+    // None yet: add one, and go on with it.
+    if cands.len() == 1 && !loading {
+        return crate::machines::add(ed, None, None, Some(Box::new(f)));
     }
     ed.remote.picker = Some((prompt.to_string(), with_local));
     ed.completing_read(prompt, cands, false, move |ed, c, typed| {
         ed.remote.picker = None;
         let name = c.map(|c| c.value).unwrap_or(typed);
-        if !name.trim().is_empty() {
+        if name == crate::machines::ADD {
+            crate::machines::add(ed, None, None, Some(Box::new(f)));
+        } else if !name.trim().is_empty() {
             f(ed, name.trim().to_string());
         }
     });
@@ -1301,6 +1332,7 @@ pub fn pick_machine(ed: &mut Editor, prompt: &str, with_local: bool, f: impl FnO
 
 /// The open machine picker, again with what is known now (rayfish answered).
 fn refresh_picker(ed: &mut Editor) {
+    crate::machines::refresh(ed);
     let Some((prompt, with_local)) = ed.remote.picker.clone() else { return };
     if ed.minibuffer.as_ref().is_none_or(|m| m.prompt != prompt) {
         ed.remote.picker = None;
@@ -1330,6 +1362,7 @@ fn machine_candidates(ed: &mut Editor, with_local: bool) -> Vec<Candidate> {
         };
         cands.push(Candidate::new(m.name.clone()).detail(detail));
     }
+    cands.push(Candidate::new("Add a machine…").value(crate::machines::ADD).detail("ssh config, Tailscale, rayfish, this network, or any ssh destination"));
     cands
 }
 
@@ -1416,6 +1449,7 @@ fn run_lent(ed: &mut Editor, machine: &str, chat: String, call: u64, name: Strin
 
 /// Once a frame: what changed for the nodes goes to them (tools lent, this machine's settings).
 pub fn tick(ed: &mut Editor) {
+    crate::machines::tick(ed);
     let up = |ed: &Editor, m: &str| match ed.remote.conns.get(m) {
         Some(Conn::Up(c)) if c.is_open() => Some(c.clone()),
         _ => None,
