@@ -378,7 +378,18 @@ Steps:
    was noted mid-tool, the machine rebooted with nobody logged in (lingering on), systemd started
    the node 9 s after boot and the turn continued (`tests/reboot.rs`, opt-in, two runs around the
    reboot). Not tried yet: a real launchd. (The node's own Lua was done in 3e.)
-6. The iOS app.
+6. The iOS app (in progress, branch `ios-app`): a polished chat app and nothing else (no Lua,
+   extensions, terminals or cache detail). `crates/serpis-mobile` is its Rust core: ssh
+   in-process (russh), this device's ed25519 key (kept by the app in the Keychain), host keys
+   accepted by the person, and serpis's own protocol client over `serpis-node agent`, found as
+   `~/.serpis/bin/serpis-node-current` (every node start points it at its build) or on PATH; it
+   never installs one. Swift sees it through UniFFI (`Core`, `Listener`), requests and events
+   as the protocol's JSON. `ios/` is the SwiftUI app (XcodeGen's `project.yml`;
+   `ios/build-rust.sh` builds the core into an xcframework): every machine's chats in one list,
+   a chat live with Markdown, tool lines, photos, the model; new chats by machine and folder;
+   machines with the device key and host key checks. Tests: `crates/serpis-mobile/tests/core.rs`
+   (a real ssh server in the test, a node, the mock model), `ios/ui-test.sh` (unit tests, and a
+   UI test through the whole flow against `ios/test-machine.sh`, screens saved).
 
 ### Later (left open on the way; pick up when they matter)
 
@@ -393,6 +404,15 @@ Terminals (step 4):
   bells, titles, exits) could replace part of that.
 - Editing a terminal's command line in normal state waits up to 400 ms for each echo
   (`ECHO_TIMEOUT`); over a slow link to another machine that may be too short.
+
+Phone app:
+- serpis-proto pulls in serpis-ai (and its HTTP client) for a few types; the phone carries it.
+  Moving those types to a small crate would trim the app.
+- Not tried on a real phone or against a real machine yet.
+
+Tests:
+- The first desktop UI run after a rebuild sometimes fails a few checks that pass on the next
+  run (a freshly built binary's first launch is slow on macOS).
 
 Machines and nodes:
 - Release builds of the node, downloaded when a machine needs one (pinned under step 2).

@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "SerpisCore"
+ffi_module_name = "SerpisCoreFFI"
+ffi_module_filename = "SerpisCoreFFI"

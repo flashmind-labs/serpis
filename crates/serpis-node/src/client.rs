@@ -220,10 +220,13 @@ impl Client {
             Target::Own { socket, exe } => {
                 let s = match tokio::net::UnixStream::connect(socket).await {
                     Ok(s) => s,
+                    #[cfg(feature = "node")]
                     Err(_) => {
                         crate::bridge::start_node(exe, socket).map_err(failed)?;
                         crate::bridge::wait_for(socket).await.map_err(failed)?
                     }
+                    #[cfg(not(feature = "node"))]
+                    Err(e) => return Err(failed(anyhow!("no node at {} to connect to, and this build can't start {}: {e}", socket.display(), exe.display()))),
                 };
                 let (r, w) = s.into_split();
                 Self::over(r, w, None)
@@ -285,6 +288,17 @@ impl Client {
         c._child = Some(child);
         c.stderr = Some((said, task));
         Ok((c, e))
+    }
+
+    /// Greet a node over a stream already open to it (an ssh channel the caller made, as the
+    /// phone app does), and be its client.
+    pub async fn over_stream(r: impl AsyncRead + Unpin + Send + 'static, w: impl AsyncWrite + Unpin + Send + 'static, name: &str) -> Result<(Client, mpsc::UnboundedReceiver<Event>)> {
+        let (mut client, events) = Self::over(r, w, None);
+        match client.call(Request::Hello { version: wire::VERSION, client: name.to_string() }).await? {
+            Response::Hello { host, serpis, home, setup, build, notes, .. } => client.hello = Hello { host, serpis, home, setup, build, outdated: false, notes },
+            other => bail!("the node answered hello with {other:?}"),
+        }
+        Ok((client, events))
     }
 
     fn over(mut r: impl AsyncRead + Unpin + Send + 'static, mut w: impl AsyncWrite + Unpin + Send + 'static, stderr: Option<Arc<Mutex<String>>>) -> (Client, mpsc::UnboundedReceiver<Event>) {
@@ -387,6 +401,7 @@ struct Failed {
 }
 
 /// A byte stream to the terminal node of a machine ([`crate::terminals`]): manymux's protocol.
+#[cfg(feature = "node")]
 pub struct Pipe {
     pub read: Box<dyn AsyncRead + Unpin + Send>,
     pub write: Box<dyn AsyncWrite + Unpin + Send>,
@@ -398,6 +413,7 @@ pub struct Pipe {
     pub stderr_done: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[cfg(feature = "node")]
 impl Pipe {
     /// Why the far side ended the stream: what it said on stderr, waited for a moment (it is
     /// read as it comes), and a build serpis lacks named as such. None when it said nothing.
@@ -420,6 +436,7 @@ impl Pipe {
 /// reached, with `SERPIS_BRIDGE=terminals` (this machine's is started when none runs). A
 /// `Command` target gets the variable in its environment: one that runs the node somewhere
 /// else must pass it on.
+#[cfg(feature = "node")]
 pub async fn terminal_pipe(target: &Target) -> Result<Pipe> {
     let local = |s: tokio::net::UnixStream| {
         let (r, w) = s.into_split();

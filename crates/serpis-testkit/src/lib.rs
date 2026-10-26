@@ -3,6 +3,7 @@
 
 pub mod mock;
 pub mod sim;
+pub mod sshd;
 
 pub use mock::{LogEntry, Mock, Reply, Script, commands};
 pub use sim::{Config, Miss, Outcome, Simulator, Wire};

@@ -4,7 +4,7 @@
 //! (`remote-install-service`).
 //!
 //! The service runs `~/.serpis/bin/serpis-node-current`, a link to whichever build last started
-//! the node: serpis installs each build under its own name, and a node started by a client
+//! the node (every node notes itself there as it starts): serpis installs each build under its own name, and a node started by a client
 //! (`serpis-node agent`, a window) goes through the service once there is one, pointing the link
 //! at itself first. `$SERPIS_SERVICE_DIR` and `$SERPIS_SERVICE_CTL` put the service file and the
 //! program that runs `systemctl`/`launchctl` elsewhere (tests).
@@ -150,6 +150,12 @@ pub fn plist(exe: &Path, env: &[(String, String)], log: &Path) -> String {
         vars = vars,
         log = xml(&log.to_string_lossy()),
     )
+}
+
+/// Note `exe` as the build running this machine's node: what the service runs, and what a
+/// client that can't install nodes (the phone) runs ([`crate::deploy::FOUND_COMMAND`]).
+pub fn note_current(exe: &Path) -> Result<()> {
+    relink(exe)
 }
 
 /// Point the service's link at `exe`.

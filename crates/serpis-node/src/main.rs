@@ -30,6 +30,9 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => return Err(e),
             };
             tracing::info!("serpis-node {} listening on {}", serpis_node::VERSION, node.socket.display());
+            if let Err(e) = std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| serpis_node::service::note_current(&exe)) {
+                tracing::warn!("noting this build as the current one: {e:#}");
+            }
             node.wait();
             Ok(())
         }

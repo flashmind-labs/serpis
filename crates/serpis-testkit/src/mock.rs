@@ -70,10 +70,13 @@ pub fn last_user_text(wire: Wire, body: &Value) -> Option<String> {
 }
 
 /// `READ <n>` reads f0.txt … f<n-1>.txt in one response, `CALL <tool> <json>` calls any tool
-/// with those arguments, `SLEEP` runs `sleep 5`, `FAIL` answers
+/// with those arguments, `SLEEP` runs `sleep 5`, `SHOW` answers in Markdown, `FAIL` answers
 /// with an error, `OVERFLOW` fails the first time with a context-overflow error, a compaction
 /// request gets a checkpoint summary, anything else gets "ok"; after tool results the model says
 /// "done".
+/// What `SHOW` answers.
+pub const SHOW: &str = "Here's how the build is wired:\n\n## Steps\n\n1. **Fetch** the crates\n2. Build with `cargo build --release`\n3. Run the tests\n   - unit tests\n   - the UI suite\n\n```sh\ncargo build --release\ncargo test --workspace\n```\n\n> Release builds link std statically.\n\nThat's all *it* needs.";
+
 pub fn commands() -> Script {
     let mut overflowed = std::collections::HashSet::new();
     Box::new(move |wire, body| match last_user_text(wire, body) {
@@ -90,6 +93,8 @@ pub fn commands() -> Script {
         }
         Some(t) if t.starts_with("SLEEP") => Reply::ToolCalls(vec![("bash".into(), json!({"command": "sleep 5"}))]),
         Some(t) if t.starts_with("FAIL") => Reply::Error(400, "synthetic failure".into()),
+        // An answer with most of what Markdown has, for screens that show answers.
+        Some(t) if t.starts_with("SHOW") => Reply::Text(SHOW.into()),
         Some(_) => Reply::Text("ok".into()),
     })
 }

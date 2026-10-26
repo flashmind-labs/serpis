@@ -11,13 +11,19 @@
 //!
 //! Chats here are [`serpis_chat::Chat`]s, the same as on the desktop, and contain no GUI code.
 
+#[cfg(feature = "node")]
 pub mod bridge;
 pub mod client;
 pub mod deploy;
+#[cfg(feature = "node")]
 pub mod lua;
+#[cfg(feature = "node")]
 pub mod workspace;
+#[cfg(feature = "node")]
 pub mod server;
+#[cfg(feature = "node")]
 pub mod service;
+#[cfg(feature = "node")]
 pub mod terminals;
 
 use std::path::PathBuf;

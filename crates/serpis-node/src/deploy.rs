@@ -85,6 +85,11 @@ pub fn scan(dir: &Path) -> Vec<NodeBinary> {
 /// non-interactive ssh session often has a short PATH (no `~/.local/bin`).
 const LOOKUP: &str = r#"for p in serpis-node "$HOME/.local/bin/serpis-node" "$HOME/.cargo/bin/serpis-node"; do command -v "$p" >/dev/null 2>&1 && exec "$p" agent; done; echo "serpis-node is not installed on $(hostname) (not on PATH, nor in ~/.local/bin or ~/.cargo/bin), and serpis has no build for $(uname -sm)" >&2; exit 127"#;
 
+/// What a client that can't install nodes (the phone app) runs on a machine to reach its node:
+/// the build that last started a node there (`~/.serpis/bin/serpis-node-current`), else a
+/// serpis-node on PATH or in the usual places. Exits 127, saying so, when there is none.
+pub const FOUND_COMMAND: &str = r#"sh -c 'for p in "$HOME/.serpis/bin/serpis-node-current" serpis-node "$HOME/.local/bin/serpis-node" "$HOME/.cargo/bin/serpis-node"; do command -v "$p" >/dev/null 2>&1 && exec "$p" agent; done; echo "serpis-node is not set up on $(hostname): open a chat there once from serpis on a computer" >&2; exit 127'"#;
+
 /// What runs on a machine to reach its node: the build of `nodes` for its system, checked. For
 /// another system it says which ([`SYSTEM_MARKER`]) when `ask` (serpis may get a build for it),
 /// else runs a serpis-node found there. One `sh -c`, so it works under any login shell (fish

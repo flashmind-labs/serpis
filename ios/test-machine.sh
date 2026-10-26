@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# A machine for the app to reach in the simulator, made of throwaway parts on this one: a home
+# with serpis-node in it (as the desktop leaves a machine), the mock model as its default, and
+# an ssh server on 127.0.0.1 letting in a device key made for the test. Nothing of yours is
+# read or touched.
+#
+#   ios/test-machine.sh <dir>     prints the environment the UI tests read, and stays up
+set -euo pipefail
+dir="${1:?a directory for the machine}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cargo build -q --manifest-path "$root/Cargo.toml" -p serpis-node -p serpis-testkit
+mkdir -p "$dir/home/project/src" "$dir/home/notes" "$dir/home/.serpis/bin" "$dir/agent" "$dir/node"
+printf '# project\n' > "$dir/home/project/README.md"
+ln -sf "$root/target/debug/serpis-node" "$dir/home/.serpis/bin/serpis-node-current"
+[ -f "$dir/device" ] || ssh-keygen -q -t ed25519 -N "" -C "serpis ui test" -f "$dir/device"
+
+"$root/target/debug/serpis-mock-provider" "$dir/mock.port" "$dir/mock.log" &
+mock=$!
+sshd=
+trap 'kill $mock ${sshd:-} 2>/dev/null; HOME="$dir/home" SERPIS_NODE_DIR="$dir/node" SERPIS_NODE_SOCKET="$dir/node/node.sock" "$root/target/debug/serpis-node" stop >/dev/null 2>&1' EXIT
+trap 'exit 130' INT TERM
+for _ in $(seq 50); do [ -s "$dir/mock.port" ] && break; sleep 0.1; done
+cat > "$dir/agent/models.json" <<JSON
+{"providers":{"mock":{"name":"Mock","baseUrl":"http://127.0.0.1:$(cat "$dir/mock.port")/api/v1","api":"openai-completions","apiKey":"x","compat":{"openRouter":true},"models":[{"id":"m","name":"Mock model","contextWindow":200000}]}}}
+JSON
+printf '{"session-directory":"%s/sessions","agent-model":"mock/m"}' "$dir" > "$dir/node/settings.json"
+
+# What the server runs commands with: the machine's environment.
+HOME="$dir/home" SERPIS_NODE_DIR="$dir/node" SERPIS_NODE_SOCKET="$dir/node/node.sock" SERPIS_AGENT_DIR="$dir/agent" \
+  SERPIS_CONFIG_DIR="$dir/config" SERPIS_TERMINAL_SOCKET="$dir/t.sock" \
+  "$root/target/debug/serpis-test-sshd" "$dir/device.pub" "$dir/sshd.port" &
+sshd=$!
+for _ in $(seq 50); do [ -s "$dir/sshd.port" ] && break; sleep 0.1; done
+read -r port fingerprint < "$dir/sshd.port" || true
+echo "SERPIS_TEST_ADDRESS=me@127.0.0.1:$port"
+echo "SERPIS_TEST_FINGERPRINT=$fingerprint"
+echo "SERPIS_TEST_KEY=$dir/device"
+echo "SERPIS_TEST_HOME=$dir/home"
+wait $sshd
