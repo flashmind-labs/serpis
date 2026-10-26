@@ -401,6 +401,27 @@ Terminals (step 4):
   it changes instead.
 - Editing a terminal's command line in normal state waits up to 400 ms for each echo
   (`ECHO_TIMEOUT`); over a slow link to another machine that may be too short.
+- Typing in a terminal on another machine feels sluggish (nvim especially). Measured 2026-10-26
+  against a laptop on the same Wi-Fi; mostly the network, not serpis:
+  - serpis's own path (window → ssh → `serpis-node agent` → node → terminal host → PTY and back)
+    costs about 1 ms per key without a network, 3 ms for a reply in two writes. To that machine,
+    typing every 30 ms, a key comes back in 9–11 ms, the same as plain ssh.
+  - At typing pace (a key every 250 ms) everything is slow, serpis or not: plain `ssh -T` 52 ms
+    median (up to 200), a tty session the same, ping over the LAN 50 ms average (up to 175;
+    4 ms at 30 ms intervals), even the router 16 ms. That is Wi-Fi power saving: radios doze
+    between packets. The laptop had `iw dev wlan0 get power_save` on; `sudo iw dev wlan0 set
+    power_save off` (NetworkManager: `wifi.powersave = 2`) would be the thing to try first. The
+    Mac's side dozes too (the router numbers).
+  - `ssh -T` (no tty) was suspected (no TCP_NODELAY, bulk IPQoS) and measured not to matter.
+  - What serpis adds, in the window: the reply waits 5–11 ms after arriving before the buffer
+    takes it, and the window draws continuously while idle (about two terminal draws every
+    16 ms with nothing changing), so bytes wait for the next frame and its vsync. Drawing only
+    when something changed would cut that and save power; check it doesn't slow local terminals.
+  - Ideas beyond that: predictive local echo (mosh-style) for the shell prompt; a keepalive
+    trickle while typing to keep radios awake (wasteful; measure first).
+  - Measuring: `cargo run --release -p serpis-node --example terminal_latency -- <command that
+    runs serpis-node agent there>` (GAP=250 for typing pace). Run it against a throwaway node
+    there (its own HOME, SERPIS_NODE_DIR, sockets and SHELL=/bin/sh), never the real one.
 
 Phone app:
 - serpis-proto pulls in serpis-ai (and its HTTP client) for a few types; the phone carries it.
