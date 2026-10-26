@@ -284,8 +284,8 @@ pill (`chat-toggle-keep-going`). Scripts hear of it through the `turn-cut-off` h
 A node that isn't running is started by whatever connects to it next. For a chat to continue
 after a reboot or a crash with nobody connecting (an agent working through the night),
 `remote-install-service` installs the machine's node as a service (asking first): a systemd
-user unit on Linux, a launchd agent on a Mac, which start it at boot (Linux: once `sudo loginctl
-enable-linger <user>` lets the user's services run without a login, which serpis says) and again
+user unit on Linux, a launchd agent on a Mac, which start it at boot (Linux: once `loginctl
+enable-linger <user>`, with sudo where it asks, lets the user's services run without a login, which serpis says) and again
 after a crash. `remote-uninstall-service` removes it.
 
 ## Terminals on any machine

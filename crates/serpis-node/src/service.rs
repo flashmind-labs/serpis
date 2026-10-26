@@ -89,7 +89,7 @@ fn ctl(m: Manager, args: &[&str]) -> Result<String> {
         let run = PathBuf::from(format!("/run/user/{}", nix::unistd::getuid()));
         if !run.join("bus").exists() && std::env::var_os("SERPIS_SERVICE_CTL").is_none() {
             let user = nix::unistd::User::from_uid(nix::unistd::getuid()).ok().flatten().map(|u| u.name).unwrap_or_default();
-            bail!("no systemd user manager runs for {user} now (nobody is logged in, and lingering is off): run `sudo loginctl enable-linger {user}` there, then try again");
+            bail!("no systemd user manager runs for {user} now (nobody is logged in, and lingering is off): run `loginctl enable-linger {user}` there (with sudo, if it asks), then try again");
         }
         cmd.env("XDG_RUNTIME_DIR", run);
     }
@@ -190,7 +190,7 @@ pub fn install(exe: &Path, socket: &Path) -> Result<Report> {
             let user = nix::unistd::User::from_uid(nix::unistd::getuid()).ok().flatten().map(|u| u.name).unwrap_or_default();
             let linger = std::process::Command::new("loginctl").args(["show-user", &user, "-p", "Linger"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim() == "Linger=yes").unwrap_or(false);
             if !linger && std::env::var_os("SERPIS_SERVICE_CTL").is_none() {
-                note = Some(format!("for it to start at boot without anyone logged in, run once there: sudo loginctl enable-linger {user}"));
+                note = Some(format!("for it to start at boot without anyone logged in, run once there: loginctl enable-linger {user} (with sudo, if it asks for authentication)"));
             }
         }
         Manager::Launchd => {
