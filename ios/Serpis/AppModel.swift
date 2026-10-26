@@ -180,7 +180,7 @@ final class AppModel {
         loading = false
     }
 
-    private func refresh(_ m: Machine) async {
+    private func refresh(_ m: Machine, again: Bool = true) async {
         await connect(m)
         guard link(m.id).isOnline else { return }
         do {
@@ -202,6 +202,13 @@ final class AppModel {
             listed[m.id] = Array(rows.values)
             rebuildRows()
         } catch {
+            // A connection that looked open but wasn't (the phone slept, the network changed):
+            // connected afresh, once.
+            if again {
+                core?.disconnect(machine: m.id)
+                links[m.id] = .offline(nil)
+                return await refresh(m, again: false)
+            }
             links[m.id] = .offline(Self.describe(error))
         }
     }

@@ -341,7 +341,7 @@ struct Tool: Hashable {
     /// How long the stretch took, when its steps say.
     static func took(_ tools: [Tool]) -> String? {
         let ms = tools.compactMap(\.elapsedMs).reduce(0, +)
-        guard ms > 0 else { return nil }
+        guard ms >= 100 else { return nil }
         let s = Double(ms) / 1000
         return s < 10 ? String(format: "%.1fs", s) : s < 90 ? "\(Int(s))s" : "\(Int(s / 60))m \(Int(s) % 60)s"
     }
@@ -411,7 +411,7 @@ struct ToolStep: View {
         case "edit", "write", "ls": return tool.folder.isEmpty ? nil : tool.folder
         case "grep", "find":
             let lines = tool.result?.text.split(separator: "\n").count ?? 0
-            let place = tool.path.isEmpty ? "" : "in \((tool.path as NSString).abbreviatingWithTildeInPath)"
+            let place = tool.path.isEmpty || tool.path == "." ? "" : "in \((tool.path as NSString).abbreviatingWithTildeInPath)"
             return [place, tool.result == nil ? "" : (lines == 1 ? "1 result" : "\(lines) results")].filter { !$0.isEmpty }.joined(separator: " · ")
         default: return nil
         }
@@ -553,6 +553,8 @@ struct OutputCard: View {
 /// A change to a file: lines removed in red, added in green, with the lines around them.
 struct DiffView: View {
     let diff: String
+    /// The card's width, which each line's wash fills at least.
+    @State private var width: CGFloat = 0
 
     struct Line: Hashable {
         var sign: Character
@@ -587,13 +589,15 @@ struct DiffView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: width, alignment: .leading)
                     .background(wash(l.sign))
                 }
             }
-            .font(.system(size: 12, design: .monospaced))
+            .font(.system(size: 11.5, design: .monospaced))
             .padding(.vertical, 8)
+            .fixedSize(horizontal: true, vertical: true)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .background(Color.codeCard, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.hairline, lineWidth: 0.5))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))

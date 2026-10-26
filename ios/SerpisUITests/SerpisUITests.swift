@@ -9,6 +9,8 @@ final class SerpisUITests: XCTestCase {
 
     private func shot(_ name: String) {
         guard let dir = env["SERPIS_SHOTS"] else { return }
+        // Not mid-animation.
+        Thread.sleep(forTimeInterval: 0.6)
         let url = URL(fileURLWithPath: dir).appendingPathComponent("\(name).png")
         try? XCUIScreen.main.screenshot().pngRepresentation.write(to: url)
     }
@@ -67,7 +69,8 @@ final class SerpisUITests: XCTestCase {
         app.buttons["Send"].tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'updated the readme'")).firstMatch.waitForExistence(timeout: 30), "the answer after the work")
         // The keyboard away, for the screens.
-        app.scrollViews["transcript"].swipeDown()
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "a tap on the transcript puts the keyboard away")
         shot("7b-work")
         let work = app.buttons.matching(identifier: "work").allElementsBoundByIndex.last!
         work.tap()

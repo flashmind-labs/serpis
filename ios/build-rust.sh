@@ -21,7 +21,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 # it builds set, which ring's C half would compile against instead of the target's.
 export PATH="$HOME/.cargo/bin:$PATH"
 unset SDKROOT IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET
-export IPHONEOS_DEPLOYMENT_TARGET=17.0
+export IPHONEOS_DEPLOYMENT_TARGET=18.0
 # The workspace links std dynamically for the desktop's plugins (.cargo/config.toml); the app
 # links it statically. RUSTFLAGS replaces the config's flags, and a target directory of its own
 # keeps the two kinds of build from rebuilding each other.

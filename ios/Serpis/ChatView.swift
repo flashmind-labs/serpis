@@ -10,9 +10,12 @@ struct ChatView: View {
     @State private var images: [SentImage] = []
     @State private var sending = false
     @FocusState private var typing: Bool
+    /// Where the transcript is scrolled: it follows new text only while it is at the bottom.
+    @State private var position = ScrollPosition(edge: .bottom)
+    @State private var atBottom = true
 
     var body: some View {
-        ScrollViewReader { proxy in
+        ZStack(alignment: .bottom) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 20) {
                     let items = Item.of(chat.entries)
@@ -25,17 +28,25 @@ struct ChatView: View {
                     if chat.running, case .some(.user) = chat.entries.last {
                         Working()
                     }
-                    Color.clear.frame(height: 1).id("end")
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
             }
             .scrollDismissesKeyboard(.interactively)
+            // A tap on the transcript puts the keyboard away, as in any chat.
+            .simultaneousGesture(TapGesture().onEnded { typing = false })
             .accessibilityIdentifier("transcript")
             .defaultScrollAnchor(.bottom)
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 48
+            } action: { _, bottom in
+                atBottom = bottom
+            }
+            // New text is followed while you're at the bottom; scrolled up to read, nothing moves.
             .onChange(of: chat.entries) { _, _ in
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) }
+                if atBottom { position.scrollTo(edge: .bottom) }
             }
             .overlay {
                 if chat.entries.isEmpty && !chat.running {
@@ -47,7 +58,24 @@ struct ChatView: View {
                     .foregroundStyle(.secondary)
                 }
             }
+            if !atBottom {
+                Button {
+                    withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 38, height: 38)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.hairline, lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 10)
+                .transition(.scale(scale: 0.8).combined(with: .opacity))
+                .accessibilityLabel("Scroll to the bottom")
+            }
         }
+        .animation(.snappy, value: atBottom)
         .safeAreaInset(edge: .bottom) { composer }
         .navigationTitle(chat.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -173,6 +201,7 @@ struct ChatView: View {
         picked = []
         sending = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
         Task {
             if !(await chat.send(text, images: attached)) {
                 // Refused: what was written is still there to send again.

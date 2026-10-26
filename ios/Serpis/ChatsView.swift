@@ -12,14 +12,23 @@ struct ChatsView: View {
         NavigationStack(path: $path) {
             List {
                 problems
-                ForEach(filtered) { row in
-                    Button {
-                        path.append(app.chat(row.machine, row.chat, path: row.path))
-                    } label: {
-                        ChatRowView(row: row, machine: app.machine(row.machine)?.name ?? "")
+                ForEach(Self.sections(filtered), id: \.title) { section in
+                    Section {
+                        ForEach(section.rows) { row in
+                            Button {
+                                path.append(app.chat(row.machine, row.chat, path: row.path))
+                            } label: {
+                                ChatRowView(row: row, machine: app.machine(row.machine)?.name ?? "")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("chat-row")
+                        }
+                    } header: {
+                        Text(section.title)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(nil)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("chat-row")
                 }
             }
             .listStyle(.plain)
@@ -49,6 +58,20 @@ struct ChatsView: View {
             .sheet(isPresented: $machines) { MachinesView() }
             .task { await app.refresh() }
         }
+    }
+
+    /// The rows by when: working now, then today, yesterday, this week, and before.
+    static func sections(_ rows: [ChatRow], now: Date = .now) -> [(title: String, rows: [ChatRow])] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let yesterday = cal.date(byAdding: .day, value: -1, to: today)!
+        let week = cal.date(byAdding: .day, value: -7, to: today)!
+        var out: [(title: String, rows: [ChatRow])] = [("Working", []), ("Today", []), ("Yesterday", []), ("Previous 7 days", []), ("Older", [])]
+        for r in rows {
+            let i = r.running ? 0 : r.modified >= today ? 1 : r.modified >= yesterday ? 2 : r.modified >= week ? 3 : 4
+            out[i].rows.append(r)
+        }
+        return out.filter { !$0.rows.isEmpty }
     }
 
     private var filtered: [ChatRow] {
