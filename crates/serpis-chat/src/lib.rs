@@ -1113,7 +1113,7 @@ impl Chat {
             }
         }
         self.title = l.name.clone().unwrap_or_else(|| title_from(first_prompt.as_deref().unwrap_or("")));
-        let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| fmt_age(d) + " ago").unwrap_or_default();
+        let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(fmt_ago).unwrap_or_default();
         self.notice(format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), Tone::Meta);
         self.custom_entries = l.entries.clone();
         self.system_prompt = None;
@@ -1254,6 +1254,14 @@ pub fn fmt_age(d: Duration) -> String {
         60..=3599 => format!("{}m", s / 60),
         3600..=86_399 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86_400),
+    }
+}
+
+/// How long ago, in words: `just now`, `5m ago`.
+pub fn fmt_ago(d: Duration) -> String {
+    match fmt_age(d) {
+        a if a == "now" => "just now".into(),
+        a => format!("{a} ago"),
     }
 }
 

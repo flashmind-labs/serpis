@@ -374,8 +374,10 @@ Steps:
    `tests/service.rs` (with a stand-in service manager), `tests/ui/keep_going.lua`. Tried with a
    real systemd (2026-10-26, Arch, systemd 262, over rayfish ssh, in a throwaway node directory):
    started through the unit, restarted 4 s after `kill -9`, and found the user's manager with no
-   `XDG_RUNTIME_DIR` (rayfish's ssh doesn't go through PAM). Not tried yet: a real launchd, and a
-   boot with lingering on. (The node's own Lua was done in 3e.)
+   `XDG_RUNTIME_DIR` (rayfish's ssh doesn't go through PAM). A real reboot too (same day): the chat
+   was noted mid-tool, the machine rebooted with nobody logged in (lingering on), systemd started
+   the node 9 s after boot and the turn continued (`tests/reboot.rs`, opt-in, two runs around the
+   reboot). Not tried yet: a real launchd. (The node's own Lua was done in 3e.)
 6. The iOS app.
 
 ### Later (left open on the way; pick up when they matter)

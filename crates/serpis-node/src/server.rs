@@ -1229,7 +1229,7 @@ impl Node {
         }).collect();
         let keep_going = self.lua.var("chat-keep-going").and_then(|v| v.as_bool()).unwrap_or(true);
         let limit = self.lua.var("chat-keep-going-limit").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
-        let ago = stopped.map(|d| format!("{} ago", serpis_chat::fmt_age(d))).unwrap_or_else(|| "a moment ago".into());
+        let ago = stopped.map(serpis_chat::fmt_ago).unwrap_or_else(|| "just now".into());
         for o in &open {
             let p = PathBuf::from(&o.path);
             if !p.exists() {
