@@ -54,8 +54,10 @@ impl Term {
     fn printed(&mut self, bytes: &[u8]) {
         self.last_output = Instant::now();
         self.kept.extend_from_slice(bytes);
-        if self.kept.len() > KEEP {
-            // Cut at a line's start, so what is kept doesn't begin inside an escape sequence.
+        // Cut back to `KEEP` once it is twice that (cutting every time would move the whole
+        // megabyte for every few bytes printed), at a line's start, so what is kept doesn't
+        // begin inside an escape sequence.
+        if self.kept.len() > 2 * KEEP {
             let over = self.kept.len() - KEEP;
             let cut = self.kept[over..].iter().position(|&b| b == b'\n').map_or(over, |i| over + i + 1);
             self.kept.drain(..cut);
@@ -368,6 +370,12 @@ fn answer(terms: &Terms, conn: u64, tx: &mpsc::UnboundedSender<Vec<u8>>, request
             }
             Response::Ok
         }
+        Request::RepaintTerminal { name } => {
+            if let Some(t) = terms.lock().unwrap().get(&name) {
+                let _ = tx.send(wire::terminal_frame(&name, &t.paint(false)));
+            }
+            Response::Ok
+        }
         Request::ResizeTerminal { name, cols, rows } => {
             if let Some(t) = terms.lock().unwrap().get_mut(&name) {
                 t.resize(cols, rows);
@@ -481,7 +489,7 @@ mod tests {
         for _ in 0..(super::KEEP / line.len() + 10) {
             t.printed(line);
         }
-        assert!(t.kept.len() <= super::KEEP);
+        assert!(t.kept.len() <= 2 * super::KEEP);
         assert!(t.kept.starts_with(line), "kept from a line's start");
         // A character split across two reads reaches the screen whole.
         let e = "é".as_bytes();

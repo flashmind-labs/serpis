@@ -1281,6 +1281,9 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     )?;
     s.set("theme", theme)?;
 
+    // The wall clock, in seconds (fractions to the microsecond), for timing things.
+    s.set("time", lua.create_function(|_, ()| Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)))?)?;
+
     // Timers.
     s.set(
         "defer",

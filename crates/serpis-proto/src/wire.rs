@@ -218,6 +218,8 @@ pub enum Request {
     DetachTerminal { name: String },
     /// The size the terminal is shown at.
     ResizeTerminal { name: String, cols: u16, rows: u16 },
+    /// Its screen again, as a [`tag::TERMINAL`] frame (after a view skipped what it printed).
+    RepaintTerminal { name: String },
     /// Start the node when the machine boots and again when it crashes (a systemd user unit, a
     /// launchd agent), so chats cut off by either continue without anyone connecting. Answered
     /// with `Service`.

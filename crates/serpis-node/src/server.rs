@@ -50,8 +50,6 @@ impl Config {
 enum Msg {
     Connected { client: u64, tx: tmpsc::Sender<Vec<u8>> },
     Call { client: u64, body: Vec<u8> },
-    /// A client typed into a terminal: the frame, for the terminal host.
-    Terminal { client: u64, frame: Vec<u8> },
     Gone { client: u64 },
     /// A chat has news.
     Wake,
@@ -192,16 +190,28 @@ async fn accept(listener: tokio::net::UnixListener, tx: mpsc::Sender<Msg>) {
 async fn connection(stream: tokio::net::UnixStream, client: u64, tx: mpsc::Sender<Msg>) {
     let (mut rd, mut wr) = stream.into_split();
     let (otx, mut orx) = tmpsc::channel::<Vec<u8>>(QUEUE);
-    if tx.send(Msg::Connected { client, tx: otx }).is_err() {
+    // Terminals' bytes queue apart, and the writer takes everything else first: an answer or a
+    // chat's news never waits behind a terminal printing.
+    let (dtx, mut drx) = tmpsc::channel::<Vec<u8>>(TERMINAL_QUEUE);
+    if tx.send(Msg::Connected { client, tx: otx.clone() }).is_err() {
         return;
     }
     let writer = tokio::spawn(async move {
-        while let Some(bytes) = orx.recv().await {
+        loop {
+            let bytes = tokio::select! {
+                biased;
+                b = orx.recv() => b,
+                b = drx.recv() => b,
+            };
+            let Some(bytes) = bytes else { break };
             if wr.write_all(&bytes).await.is_err() {
                 break;
             }
         }
     });
+    // The client's link to the terminal host, once it uses a terminal: its terminal calls and
+    // bytes go there from here, without the node's thread.
+    let mut terminals: Option<tmpsc::UnboundedSender<Vec<u8>>> = None;
     let mut decoder = wire::Decoder::default();
     let mut buf = vec![0u8; 64 * 1024];
     'read: loop {
@@ -212,14 +222,23 @@ async fn connection(stream: tokio::net::UnixStream, client: u64, tx: mpsc::Sende
         decoder.push(&buf[..n]);
         loop {
             match decoder.next() {
-                Ok(Some((tag::CALL, body))) => {
-                    if tx.send(Msg::Call { client, body }).is_err() {
-                        break 'read;
+                Ok(Some((tag::CALL, body))) => match serde_json::from_slice::<Call>(&body) {
+                    Ok(mut call) if is_terminal(&call.request) => {
+                        if let Request::NewTerminal { cwd, .. } = &mut call.request {
+                            *cwd = from_home(cwd).to_string_lossy().into_owned();
+                        }
+                        let link = terminals.get_or_insert_with(|| terminal_link(otx.clone(), dtx.clone()));
+                        let _ = link.send(wire::encode(tag::CALL, &call));
                     }
-                }
+                    _ => {
+                        if tx.send(Msg::Call { client, body }).is_err() {
+                            break 'read;
+                        }
+                    }
+                },
                 Ok(Some((tag::TERMINAL, body))) => {
-                    if tx.send(Msg::Terminal { client, frame: wire::frame(tag::TERMINAL, &body) }).is_err() {
-                        break 'read;
+                    if let Some(link) = &terminals {
+                        let _ = link.send(wire::frame(tag::TERMINAL, &body));
                     }
                 }
                 // Frames of kinds this node doesn't know are skipped.
@@ -233,7 +252,107 @@ async fn connection(stream: tokio::net::UnixStream, client: u64, tx: mpsc::Sende
         }
     }
     let _ = tx.send(Msg::Gone { client });
+    drop(terminals);
     let _ = writer.await;
+}
+
+/// Frames of terminal bytes queued for a client; past that, a terminal's bytes are skipped
+/// until there's room, and its screen is painted afresh (a slow link sees the screen as it is,
+/// not a backlog).
+const TERMINAL_QUEUE: usize = 256;
+
+fn is_terminal(r: &Request) -> bool {
+    matches!(
+        r,
+        Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::AttachTerminal { .. } | Request::DetachTerminal { .. } | Request::ResizeTerminal { .. } | Request::RepaintTerminal { .. }
+    )
+}
+
+/// A link from a client to the terminal host (started if none runs): what is sent on it goes
+/// there; what comes back goes to the client, answers and events on `control`, terminals' bytes
+/// on `data`.
+fn terminal_link(control: tmpsc::Sender<Vec<u8>>, data: tmpsc::Sender<Vec<u8>>) -> tmpsc::UnboundedSender<Vec<u8>> {
+    let (link, mut to_host) = tmpsc::unbounded_channel::<Vec<u8>>();
+    // Weak: the link ends when the client lets go of it.
+    let again = link.downgrade();
+    tokio::spawn(async move {
+        let socket = crate::terminals::socket();
+        let reached = async {
+            crate::terminals::ensure(&std::env::current_exe()?, &socket).await?;
+            Ok::<_, anyhow::Error>(tokio::net::UnixStream::connect(&socket).await?)
+        };
+        let stream = match reached.await {
+            Ok(s) => s,
+            Err(e) => {
+                // Its calls are answered with why.
+                let message = format!("this machine's terminals can't be reached: {e:#}");
+                while let Some(f) = to_host.recv().await {
+                    if f.first() == Some(&tag::CALL)
+                        && let Ok(call) = serde_json::from_slice::<Call>(&f[5..])
+                    {
+                        let _ = control.send(wire::encode(tag::REPLY, &Reply { id: call.id, response: Response::Error { message: message.clone() } })).await;
+                    }
+                }
+                return;
+            }
+        };
+        let (mut rd, mut wr) = stream.into_split();
+        tokio::spawn(async move {
+            while let Some(f) = to_host.recv().await {
+                if wr.write_all(&f).await.is_err() {
+                    break;
+                }
+            }
+        });
+        // Terminals whose bytes were skipped, to paint afresh when there's room.
+        let mut behind: std::collections::HashSet<String> = Default::default();
+        let mut decoder = wire::Decoder::default();
+        let mut buf = vec![0u8; 64 * 1024];
+        'read: loop {
+            // Behind on a terminal, it is checked now and then whether there's room again, even
+            // if the terminal has gone quiet.
+            let read = tokio::select! {
+                r = rd.read(&mut buf) => Some(r),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)), if !behind.is_empty() => None,
+            };
+            match read {
+                Some(Ok(0) | Err(_)) => break,
+                Some(Ok(n)) => decoder.push(&buf[..n]),
+                None => {}
+            }
+            while let Ok(Some((t, body))) = decoder.next() {
+                match t {
+                    tag::TERMINAL => {
+                        let Some((name, _)) = wire::parse_terminal(&body) else { continue };
+                        if behind.contains(&name) {
+                            continue;
+                        }
+                        match data.try_send(wire::frame(t, &body)) {
+                            Ok(()) => {}
+                            Err(tmpsc::error::TrySendError::Full(_)) => {
+                                behind.insert(name);
+                            }
+                            Err(tmpsc::error::TrySendError::Closed(_)) => break 'read,
+                        }
+                    }
+                    // The answers to this link's own repaint asks (id 0) are the link's.
+                    tag::REPLY if serde_json::from_slice::<Reply>(&body).is_ok_and(|r| r.id == 0) => {}
+                    _ => {
+                        if control.send(wire::frame(t, &body)).await.is_err() {
+                            break 'read;
+                        }
+                    }
+                }
+            }
+            if !behind.is_empty() && data.capacity() >= TERMINAL_QUEUE / 2 {
+                let Some(link) = again.upgrade() else { break };
+                for name in behind.drain() {
+                    let _ = link.send(wire::encode(tag::CALL, &Call { id: 0, request: Request::RepaintTerminal { name } }));
+                }
+            }
+        }
+    });
+    link
 }
 
 /// The node's settings (`settings.json` in its directory): the same variables the desktop
@@ -319,9 +438,6 @@ struct Client {
     lagging: bool,
     /// Tools it runs for the chats it shows (`Lend`).
     lends: Vec<ToolSpec>,
-    /// Its connection to the terminal host (its terminal calls and what it types go there, and
-    /// what comes back goes to it), once it has used a terminal.
-    terminals: Option<tmpsc::UnboundedSender<Vec<u8>>>,
 }
 
 struct Node {
@@ -517,10 +633,9 @@ impl Node {
             for m in msg.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
                 match m {
                     Msg::Connected { client, tx } => {
-                        self.clients.insert(client, Client { tx, attached: BTreeSet::new(), lagging: false, lends: Vec::new(), terminals: None });
+                        self.clients.insert(client, Client { tx, attached: BTreeSet::new(), lagging: false, lends: Vec::new() });
                     }
                     Msg::Call { client, body } => stop |= self.call(client, &body),
-                    Msg::Terminal { client, frame } => self.to_terminals(client, frame),
                     Msg::Gone { client } => self.gone(client),
                     Msg::Wake => {}
                     Msg::Reply { client, id, response } => self.reply(client, id, response),
@@ -776,15 +891,6 @@ impl Node {
             self.answer_later(client, call.id, call.request);
             return false;
         }
-        // Terminals are the terminal host's: the call goes there, and its answer back.
-        if let Request::Terminals | Request::NewTerminal { .. } | Request::KillTerminal { .. } | Request::AttachTerminal { .. } | Request::DetachTerminal { .. } | Request::ResizeTerminal { .. } = &call.request {
-            let mut call = call;
-            if let Request::NewTerminal { cwd, .. } = &mut call.request {
-                *cwd = from_home(cwd).to_string_lossy().into_owned();
-            }
-            self.to_terminals(client, wire::encode(tag::CALL, &call));
-            return false;
-        }
         // Installing the service runs commands: done elsewhere too.
         if let Request::InstallService | Request::UninstallService = &call.request {
             self.answer_service(client, call.id, call.request);
@@ -1019,6 +1125,7 @@ impl Node {
             | Request::AttachTerminal { .. }
             | Request::DetachTerminal { .. }
             | Request::ResizeTerminal { .. }
+            | Request::RepaintTerminal { .. }
             | Request::InstallService
             | Request::UninstallService => unreachable!("answered elsewhere"),
             Request::Stop => Response::Ok,
@@ -1081,66 +1188,6 @@ impl Node {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.transfer).map_err(|e| e.to_string())?;
         Ok(self.transfer.join(name))
-    }
-
-    /// Send `frame` to the terminal host for `client`, connecting it first (and starting the
-    /// host, when none runs). What the host says goes straight to the client.
-    fn to_terminals(&mut self, client: u64, frame: Vec<u8>) {
-        let Some(c) = self.clients.get_mut(&client) else { return };
-        if let Some(t) = &c.terminals {
-            let _ = t.send(frame);
-            return;
-        }
-        let (htx, mut hrx) = tmpsc::unbounded_channel::<Vec<u8>>();
-        let _ = htx.send(frame);
-        c.terminals = Some(htx);
-        let back = c.tx.clone();
-        self.rt.spawn(async move {
-            let socket = crate::terminals::socket();
-            let reached = async {
-                crate::terminals::ensure(&std::env::current_exe()?, &socket).await?;
-                Ok::<_, anyhow::Error>(tokio::net::UnixStream::connect(&socket).await?)
-            };
-            let stream = match reached.await {
-                Ok(s) => s,
-                Err(e) => {
-                    // Its calls are answered with why.
-                    let message = format!("this machine's terminals can't be reached: {e:#}");
-                    while let Some(f) = hrx.recv().await {
-                        if f.first() == Some(&tag::CALL)
-                            && let Ok(call) = serde_json::from_slice::<Call>(&f[5..])
-                        {
-                            let _ = back.send(wire::encode(tag::REPLY, &Reply { id: call.id, response: Response::Error { message: message.clone() } })).await;
-                        }
-                    }
-                    return;
-                }
-            };
-            let (mut rd, mut wr) = stream.into_split();
-            tokio::spawn(async move {
-                while let Some(f) = hrx.recv().await {
-                    if wr.write_all(&f).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            // Whole frames only: the client's stream carries the node's own frames between them.
-            let mut decoder = wire::Decoder::default();
-            let mut buf = vec![0u8; 64 * 1024];
-            'read: loop {
-                match rd.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        decoder.push(&buf[..n]);
-                        while let Ok(Some((t, body))) = decoder.next() {
-                            if back.send(wire::frame(t, &body)).await.is_err() {
-                                break 'read;
-                            }
-                        }
-                    }
-                }
-            }
-        });
     }
 
     /// Install or remove the node's service off this thread, and answer when done.

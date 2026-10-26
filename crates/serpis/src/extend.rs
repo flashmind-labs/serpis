@@ -24,6 +24,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.error", "(text): show an error."),
     ("serpis.reload", "(): reload the whole Lua config now (init.lua and extensions); errors become messages."),
     ("serpis.defer", "(ms, fn): run fn once after ms milliseconds on the UI thread."),
+    ("serpis.time", "(): the wall clock in seconds, to the microsecond (to time things)."),
     ("serpis.schedule", "(fn): run fn at the start of the next tick."),
     // Commands.
     ("serpis.command.define", "(name, fn(args), doc?): define an M-x command; args.params holds the parameters it was run with, args.prefix the C-u argument."),
