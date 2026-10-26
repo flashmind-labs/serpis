@@ -112,8 +112,9 @@ pub struct Link {
     wires: Wires,
     /// Where what it prints goes.
     to: mpsc::Sender<PtyMsg>,
-    /// The size it is shown at.
-    size: (u16, u16),
+    /// The size it is shown at now (shared with its attach, which may go out later: the first
+    /// layout happens before the machine has said it started the terminal).
+    size: Arc<Mutex<(u16, u16)>>,
     /// Attached now: what it prints arrives (false while starting, connecting, after a drop).
     pub online: bool,
     /// What the machine last said about it.
@@ -136,13 +137,14 @@ impl Link {
         let killed = Arc::new(AtomicBool::new(false));
         let named: Arc<Mutex<Option<String>>> = Default::default();
         let wires = ed.remote.wires.clone();
-        let link = Link { machine: machine.to_string(), name: named.clone(), wires: wires.clone(), to: to.clone(), size, online: false, info: None, killed: killed.clone() };
+        let shown = Arc::new(Mutex::new(size));
+        let link = Link { machine: machine.to_string(), name: named.clone(), wires: wires.clone(), to: to.clone(), size: shown.clone(), online: false, info: None, killed: killed.clone() };
         let m = machine.to_string();
         match open {
             Open::Attach { name } => {
                 *named.lock().unwrap() = Some(name.clone());
                 wires.show(&m, &name, to.clone());
-                attach(ed, &m, &name, size, true, to);
+                attach(ed, &m, &name, shown, true, to);
             }
             Open::New { cwd, integration } => {
                 let request = Request::NewTerminal { cwd, cols: size.0, rows: size.1, integration };
@@ -151,7 +153,7 @@ impl Link {
                     Ok(Response::Terminal { name }) => {
                         *named.lock().unwrap() = Some(name.clone());
                         wires.show(&m, &name, to.clone());
-                        attach(ed, &m, &name, size, false, to);
+                        attach(ed, &m, &name, shown, false, to);
                     }
                     Ok(other) => fail(&to, &format!("{m} answered {other:?}")),
                     Err(e) => fail(&to, &e),
@@ -173,7 +175,7 @@ impl Link {
 
     /// Shown at another size.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.size = (cols, rows);
+        *self.size.lock().unwrap() = (cols, rows);
         if let Some(name) = self.name() {
             self.wires.request(&self.machine, Request::ResizeTerminal { name, cols, rows });
         }
@@ -197,8 +199,10 @@ fn fail(to: &mpsc::Sender<PtyMsg>, why: &str) {
 
 /// Show `name` of `machine`: what it prints arrives from now on, starting with its screen (and,
 /// for a fresh view, what it printed before).
-fn attach(ed: &mut Editor, machine: &str, name: &str, size: (u16, u16), history: bool, to: mpsc::Sender<PtyMsg>) {
-    let request = Request::AttachTerminal { name: name.to_string(), cols: size.0, rows: size.1, history };
+fn attach(ed: &mut Editor, machine: &str, name: &str, size: Arc<Mutex<(u16, u16)>>, history: bool, to: mpsc::Sender<PtyMsg>) {
+    // The size it is shown at by now.
+    let (cols, rows) = *size.lock().unwrap();
+    let request = Request::AttachTerminal { name: name.to_string(), cols, rows, history };
     crate::remote::request(ed, machine, request, move |ed, r| match r {
         Ok(_) => {
             let _ = to.send(PtyMsg::Online(true));
@@ -226,7 +230,7 @@ pub fn reattach(ed: &mut Editor, machine: &str) {
             && link.machine == machine
             && let Some(name) = link.name()
         {
-            again.push((name, link.size, link.to.clone()));
+            again.push((name, link.size.clone(), link.to.clone()));
         }
     }
     for (name, size, to) in again {

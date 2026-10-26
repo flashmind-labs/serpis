@@ -29,7 +29,7 @@ local function has(text) return (serpis.buffer.text() or ""):find(text, 1, true)
 local function prompt() return (serpis.buffer.text() or ""):find("%%") ~= nil end
 local function running() local p = serpis.buffer.process(); return p and p.running and p.name end
 
-local here, there
+local here, there, pty, box_cols
 local steps = {
   function(go)
     serpis.command.run("new-terminal")
@@ -59,6 +59,33 @@ local steps = {
   end,
   function(go)
     T.check("it runs there, in the folder", has("on-box-42 " .. boxhome .. "/proj;"), true)
+    -- Its shell knows how wide the window shows it (zsh fills the rest of a line that didn't end
+    -- in a newline, and a wrong width leaves a stray % behind).
+    serpis.buffer.insert('echo "cols=$(tput cols)x"\r')
+    when(function() return (serpis.buffer.text() or ""):match("cols=(%d+)x") ~= nil end, go)
+    return false
+  end,
+  function(go)
+    box_cols = (serpis.buffer.text() or ""):match("cols=(%d+)x")
+    -- A terminal on a PTY of the window's, in the same window: its width is the window's.
+    serpis.var.set("terminal-persistent", false)
+    pty = serpis.buffer.create("terminal")
+    serpis.buffer.show(pty)
+    serpis.var.set("terminal-persistent", true)
+    when(prompt, function()
+      serpis.defer(500, function()
+        serpis.buffer.insert('echo "cols=$(tput cols)x"\r')
+        when(function() return (serpis.buffer.text() or ""):match("cols=(%d+)x") ~= nil end, go)
+      end)
+    end)
+    return false
+  end,
+  function()
+    T.check("the box's shell is as wide as the window shows it", box_cols, (serpis.buffer.text() or ""):match("cols=(%d+)x"))
+    serpis.buffer.kill(pty)
+    serpis.buffer.show(there)
+  end,
+  function(go)
     serpis.buffer.insert("sleep 3\r")
     when(function() return running() == "sleep" end, go)
     return false
