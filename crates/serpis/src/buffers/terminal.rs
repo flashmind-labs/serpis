@@ -44,8 +44,6 @@ pub const DEFAULT_PROMPT_REGEXP: &str = "^[^#$%>λ❯→➜]{0,60}[#$%>λ❯→�
 pub enum PtyMsg {
     Data(Vec<u8>),
     Exit,
-    /// What the terminal node calls the terminal (once it has started it).
-    Name(String),
     /// Attached to it, or not (connecting, or a dropped connection being retried).
     Online(bool),
 }
@@ -622,11 +620,6 @@ impl TerminalBuffer {
                 return true;
             }
             PtyMsg::Exit => self.exit_seen = true,
-            PtyMsg::Name(n) => {
-                if let Io::Node(l) = &mut self.io {
-                    l.name = Some(n);
-                }
-            }
             PtyMsg::Online(on) => {
                 if let Io::Node(l) = &mut self.io {
                     l.online = on;
@@ -957,9 +950,9 @@ impl Buffer for TerminalBuffer {
             ed.run_hook("terminal-exited", &serde_json::Value::Null);
         }
         if let Io::Node(l) = &mut self.io
-            && let Some(name) = &l.name
+            && let Some(name) = l.name()
         {
-            l.info = crate::terminals::info(ed, &l.machine, name);
+            l.info = crate::terminals::info(ed, &l.machine, &name);
         }
         if got {
             if let Ok(t) = self.term.title() {
@@ -1299,7 +1292,7 @@ impl Buffer for TerminalBuffer {
                 status.push(format!("on {}", l.machine));
             }
             if !l.online && !self.exited {
-                status.push(if l.name.is_some() { "connecting…".into() } else { "starting…".into() });
+                status.push(if l.name().is_some() { "connecting…".into() } else { "starting…".into() });
             }
         }
         Modeline {

@@ -111,12 +111,14 @@ fn environment(socket: &Path) -> Vec<(String, String)> {
     env
 }
 
-/// A systemd user unit for the node.
+/// A systemd user unit for the node. (systemd reads `%` as the start of a specifier, `%h` its
+/// home: written `%%`, it stays a `%`.)
 pub fn unit(exe: &Path, env: &[(String, String)]) -> String {
+    let quote = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%");
     let mut s = String::from("[Unit]\nDescription=serpis node: runs serpis chats on this machine\n\n[Service]\n");
-    s.push_str(&format!("ExecStart=\"{}\" serve\n", exe.display()));
+    s.push_str(&format!("ExecStart=\"{}\" serve\n", quote(&exe.to_string_lossy())));
     for (k, v) in env {
-        s.push_str(&format!("Environment=\"{k}={}\"\n", v.replace('\\', "\\\\").replace('"', "\\\"")));
+        s.push_str(&format!("Environment=\"{k}={}\"\n", quote(v)));
     }
     s.push_str("Restart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n");
     s
@@ -244,10 +246,10 @@ mod tests {
 
     #[test]
     fn the_unit_runs_the_link_and_restarts_on_failure() {
-        let env = vec![("PATH".to_string(), "/usr/bin:/a \"b\"".to_string())];
+        let env = vec![("PATH".to_string(), "/usr/bin:/a \"b\":/50%".to_string())];
         let u = unit(Path::new("/h/.serpis/bin/serpis-node-current"), &env);
         assert!(u.contains("ExecStart=\"/h/.serpis/bin/serpis-node-current\" serve\n"), "{u}");
-        assert!(u.contains("Environment=\"PATH=/usr/bin:/a \\\"b\\\"\"\n"), "{u}");
+        assert!(u.contains("Environment=\"PATH=/usr/bin:/a \\\"b\\\":/50%%\"\n"), "{u}");
         assert!(u.contains("Restart=on-failure") && u.contains("WantedBy=default.target"), "{u}");
         let p = plist(Path::new("/h/x&y"), &env, Path::new("/h/node.log"));
         assert!(p.contains("<string>/h/x&amp;y</string><string>serve</string>"), "{p}");

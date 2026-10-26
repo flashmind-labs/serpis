@@ -170,15 +170,21 @@ pub async fn spawn(exe: &Path, socket: &Path, cwd: &Path, size: (u16, u16), inte
         command.push(format!("SERPIS_SHELL_DIR={}", dir.display()));
     }
     command.extend([shell.clone(), "-l".into()]);
-    let taken: Vec<String> = match call(socket, Some(exe), Request::List).await? {
+    // Named after the shell, the first name free; one taken meanwhile (another terminal
+    // started at the same moment) is passed over.
+    let mut taken: Vec<String> = match call(socket, Some(exe), Request::List).await? {
         Response::Sessions(s) => s.into_iter().map(|s| s.name).collect(),
         _ => Vec::new(),
     };
-    let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|n| !taken.contains(n)).unwrap_or_default();
-    let spec = SpawnSpec { name: Some(name), command, cwd: Some(cwd.to_string_lossy().into_owned()), size: Size::new(size.0, size.1), label: Some(base) };
-    match call(socket, None, Request::Spawn(spec)).await? {
-        Response::Spawned { name } => Ok(name),
-        other => bail!("the terminal node answered a spawn with {other:?}"),
+    loop {
+        let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|n| !taken.contains(n)).unwrap_or_default();
+        let spec = SpawnSpec { name: Some(name.clone()), command: command.clone(), cwd: Some(cwd.to_string_lossy().into_owned()), size: Size::new(size.0, size.1), label: Some(base.clone()) };
+        match call(socket, None, Request::Spawn(spec)).await {
+            Ok(Response::Spawned { name }) => return Ok(name),
+            Ok(other) => bail!("the terminal node answered a spawn with {other:?}"),
+            Err(e) if format!("{e:#}").contains("already exists") && taken.len() < 1000 => taken.push(name),
+            Err(e) => return Err(e),
+        }
     }
 }
 

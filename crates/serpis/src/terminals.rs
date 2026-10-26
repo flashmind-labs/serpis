@@ -31,8 +31,9 @@ pub enum Out {
 /// A terminal buffer's terminal on a machine.
 pub struct Link {
     pub machine: String,
-    /// Its name there, once it has been started.
-    pub name: Option<String>,
+    /// Its name there, once it has been started (set as the machine answers, so a buffer killed
+    /// at any moment after that ends it).
+    name: Arc<std::sync::Mutex<Option<String>>>,
     pub out: UnboundedSender<Out>,
     /// Attached now (false while connecting, and while a dropped connection is retried).
     pub online: bool,
@@ -55,11 +56,12 @@ impl Link {
     pub fn open(ed: &mut Editor, machine: &str, open: Open, size: (u16, u16), to: mpsc::Sender<PtyMsg>) -> Link {
         let (out, rx) = unbounded_channel();
         let killed = Arc::new(AtomicBool::new(false));
-        let link = Link { machine: machine.to_string(), name: None, out, online: false, info: None, killed: killed.clone() };
+        let named: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        let link = Link { machine: machine.to_string(), name: named.clone(), out, online: false, info: None, killed: killed.clone() };
         let m = machine.to_string();
         match open {
             Open::Attach { name, history } => {
-                let _ = to.send(PtyMsg::Name(name.clone()));
+                *named.lock().unwrap() = Some(name.clone());
                 attach(ed, &m, name, history, size, rx, to);
             }
             Open::New { cwd, integration } => {
@@ -67,7 +69,7 @@ impl Link {
                 crate::remote::request(ed, machine, request, move |ed, r| match r {
                     Ok(Response::Terminal { name }) if killed.load(Ordering::Relaxed) => crate::remote::send(ed, &m, Request::KillTerminal { name }),
                     Ok(Response::Terminal { name }) => {
-                        let _ = to.send(PtyMsg::Name(name.clone()));
+                        *named.lock().unwrap() = Some(name.clone());
                         attach(ed, &m, name, 0, size, rx, to);
                     }
                     Ok(other) => fail(&to, &format!("{m} answered {other:?}")),
@@ -78,6 +80,11 @@ impl Link {
         link
     }
 
+    /// Its name there, once it has been started.
+    pub fn name(&self) -> Option<String> {
+        self.name.lock().unwrap().clone()
+    }
+
     pub fn send(&self, out: Out) {
         let _ = self.out.send(out);
     }
@@ -85,8 +92,8 @@ impl Link {
     /// The buffer is going: end the terminal there.
     pub fn kill(&self, ed: &mut Editor) {
         self.killed.store(true, Ordering::Relaxed);
-        if let Some(name) = &self.name {
-            crate::remote::send(ed, &self.machine, Request::KillTerminal { name: name.clone() });
+        if let Some(name) = self.name() {
+            crate::remote::send(ed, &self.machine, Request::KillTerminal { name });
         }
         self.send(Out::Detach);
     }
@@ -213,7 +220,7 @@ fn linked(ed: &Editor) -> Vec<(BufferId, String, Option<String>)> {
         .iter()
         .filter_map(|(id, s)| {
             let link = s.buf.as_ref()?.as_any().downcast_ref::<TerminalBuffer>()?.link()?;
-            Some((id, link.machine.clone(), link.name.clone()))
+            Some((id, link.machine.clone(), link.name()))
         })
         .collect()
 }
@@ -257,17 +264,28 @@ pub fn open_terminals(ed: &Editor) -> Value {
     Value::Array(list)
 }
 
-/// Show the terminals that were shown last time, if they still run.
+/// Show the terminals that were shown last time, if they still run (each machine is asked).
 pub fn reopen(ed: &mut Editor, list: &Value) {
-    let shown = linked(ed);
+    let mut wanted: HashMap<String, Vec<String>> = HashMap::new();
     for v in list.as_array().into_iter().flatten() {
-        let (Some(m), Some(n)) = (v["machine"].as_str(), v["name"].as_str()) else { continue };
-        if shown.iter().any(|(_, sm, sn)| sm == m && sn.as_deref() == Some(n)) {
-            continue;
+        if let (Some(m), Some(n)) = (v["machine"].as_str(), v["name"].as_str()) {
+            wanted.entry(m.to_string()).or_default().push(n.to_string());
         }
-        if let Err(e) = attach_buffer(ed, m, n, false) {
-            tracing::warn!("reopening terminal {m}/{n}: {e:#}");
-        }
+    }
+    for (m, names) in wanted {
+        let m2 = m.clone();
+        crate::remote::request(ed, &m, Request::Terminals, move |ed, r| {
+            let Ok(Response::Terminals { terminals }) = r else { return };
+            let shown = linked(ed);
+            for n in names.iter().filter(|n| terminals.iter().any(|t| &t.name == *n)) {
+                if shown.iter().any(|(_, sm, sn)| *sm == m2 && sn.as_deref() == Some(n.as_str())) {
+                    continue;
+                }
+                if let Err(e) = attach_buffer(ed, &m2, n, false) {
+                    tracing::warn!("reopening terminal {m2}/{n}: {e:#}");
+                }
+            }
+        });
     }
 }
 
