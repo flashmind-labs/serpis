@@ -58,8 +58,26 @@ final class SerpisUITests: XCTestCase {
         composer.tap()
         composer.typeText(#"CALL bash {"command": "ls"}"#)
         app.buttons["Send"].tap()
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Ran'")).firstMatch.waitForExistence(timeout: 30), "the tool shows as a line")
+        XCTAssertTrue(app.buttons["work"].waitForExistence(timeout: 30), "the tool shows, folded into its stretch of work")
         shot("7-tool")
+
+        // A stretch of work, folded into one line, and opened.
+        composer.tap()
+        composer.typeText("WORK on the readme")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'updated the readme'")).firstMatch.waitForExistence(timeout: 30), "the answer after the work")
+        // The keyboard away, for the screens.
+        app.scrollViews["transcript"].swipeDown()
+        shot("7b-work")
+        let work = app.buttons.matching(identifier: "work").allElementsBoundByIndex.last!
+        work.tap()
+        let command = app.buttons.matching(NSPredicate(format: "label CONTAINS 'ls -la'")).firstMatch
+        XCTAssertTrue(command.waitForExistence(timeout: 5), "its steps show")
+        command.tap()
+        let edit = app.buttons.matching(NSPredicate(format: "label CONTAINS 'README.md' AND label CONTAINS '+'")).firstMatch
+        shot("7c-work-open")
+        if edit.waitForExistence(timeout: 5) { edit.tap() }
+        shot("7d-work-diff")
 
         // Back: the chat is in the list.
         app.navigationBars.buttons.element(boundBy: 0).tap()

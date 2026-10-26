@@ -14,9 +14,13 @@ struct ChatView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(Array(chat.entries.enumerated()), id: \.offset) { _, entry in
-                        EntryView(entry: entry)
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    let items = Item.of(chat.entries)
+                    ForEach(items) { item in
+                        switch item {
+                        case .entry(_, let entry): EntryView(entry: entry)
+                        case .work(_, let entries): WorkView(entries: entries, live: chat.running && item.id == items.last?.id)
+                        }
                     }
                     if chat.running, case .some(.user) = chat.entries.last {
                         Working()
@@ -28,6 +32,7 @@ struct ChatView: View {
                 .padding(.bottom, 8)
             }
             .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("transcript")
             .defaultScrollAnchor(.bottom)
             .onChange(of: chat.entries) { _, _ in
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) }

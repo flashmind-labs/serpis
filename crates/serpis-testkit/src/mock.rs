@@ -69,17 +69,37 @@ pub fn last_user_text(wire: Wire, body: &Value) -> Option<String> {
     }
 }
 
+/// What `SHOW` answers (and `WORK`, once its tools are done): most of what Markdown has.
+pub const SHOW: &str = "Here's how the build is wired, and what each part costs.\n\n## Steps\n\n1. **Fetch** the crates (cached after the first time)\n2. Build with `cargo build --release`\n3. Run the tests\n   - the unit tests, in about *ten seconds*\n   - the UI suite, which drives a real window\n\n### Timings\n\n| Step | Cold | Warm |\n|---|---:|---:|\n| Fetch | 40s | 0s |\n| Build | 3m 10s | 12s |\n| Tests | 1m 05s | 58s |\n\n```sh\ncargo build --release\ncargo test --workspace\n```\n\n> Release builds link std statically, so the binary runs anywhere.\n\n---\n\nThat's all **it** needs: no services, no setup.";
+
+/// The latest thing the person wrote, whatever came after it.
+fn latest_user_text(body: &Value) -> String {
+    for m in body["messages"].as_array().into_iter().flatten().rev() {
+        if m["role"] != "user" {
+            continue;
+        }
+        let text: String = match &m["content"] {
+            Value::String(s) => s.clone(),
+            Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect(),
+            _ => String::new(),
+        };
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    String::new()
+}
+
 /// `READ <n>` reads f0.txt … f<n-1>.txt in one response, `CALL <tool> <json>` calls any tool
-/// with those arguments, `SLEEP` runs `sleep 5`, `SHOW` answers in Markdown, `FAIL` answers
+/// with those arguments, `SLEEP` runs `sleep 5`, `SHOW` answers in Markdown, `WORK` runs a
+/// command, reads, edits and searches README.md and then answers like `SHOW`, `FAIL` answers
 /// with an error, `OVERFLOW` fails the first time with a context-overflow error, a compaction
 /// request gets a checkpoint summary, anything else gets "ok"; after tool results the model says
 /// "done".
-/// What `SHOW` answers.
-pub const SHOW: &str = "Here's how the build is wired:\n\n## Steps\n\n1. **Fetch** the crates\n2. Build with `cargo build --release`\n3. Run the tests\n   - unit tests\n   - the UI suite\n\n```sh\ncargo build --release\ncargo test --workspace\n```\n\n> Release builds link std statically.\n\nThat's all *it* needs.";
-
 pub fn commands() -> Script {
     let mut overflowed = std::collections::HashSet::new();
     Box::new(move |wire, body| match last_user_text(wire, body) {
+        None if latest_user_text(body).starts_with("WORK") => Reply::Text(format!("{SHOW}\n\nI also updated the readme.")),
         None => Reply::Text("done".into()),
         Some(t) if t.contains("structured context checkpoint summary") => Reply::Text("## Goal\nKeep testing serpis.\n\n## Next Steps\n1. Carry on.".into()),
         Some(t) if t.starts_with("OVERFLOW") && overflowed.insert(t.clone()) => Reply::Error(400, "prompt is too long: 250000 tokens > 200000 maximum".into()),
@@ -93,6 +113,12 @@ pub fn commands() -> Script {
         }
         Some(t) if t.starts_with("SLEEP") => Reply::ToolCalls(vec![("bash".into(), json!({"command": "sleep 5"}))]),
         Some(t) if t.starts_with("FAIL") => Reply::Error(400, "synthetic failure".into()),
+        Some(t) if t.starts_with("WORK") => Reply::ToolCalls(vec![
+            ("bash".into(), json!({"command": "ls -la && git status --short"})),
+            ("read".into(), json!({"path": "README.md"})),
+            ("edit".into(), json!({"path": "README.md", "edits": [{"oldText": "# project", "newText": "# project\n\nA small demo of serpis on a phone."}]})),
+            ("grep".into(), json!({"pattern": "project", "path": "."})),
+        ]),
         // An answer with most of what Markdown has, for screens that show answers.
         Some(t) if t.starts_with("SHOW") => Reply::Text(SHOW.into()),
         Some(_) => Reply::Text("ok".into()),
