@@ -371,8 +371,11 @@ Steps:
    `~/.serpis/bin/serpis-node-current`, which every start points at its build, so reboots and
    crashes restart it; a client finding no node starts it through the service. Tests:
    `crates/serpis-node/tests/keep_going.rs` (killed with `kill -9`: continued, parked, waiting),
-   `tests/service.rs` (with a stand-in service manager), `tests/ui/keep_going.lua`. Never tried
-   with a real systemd or launchd yet. (The node's own Lua was done in 3e.)
+   `tests/service.rs` (with a stand-in service manager), `tests/ui/keep_going.lua`. Tried with a
+   real systemd (2026-10-26, Arch, systemd 262, over rayfish ssh, in a throwaway node directory):
+   started through the unit, restarted 4 s after `kill -9`, and found the user's manager with no
+   `XDG_RUNTIME_DIR` (rayfish's ssh doesn't go through PAM). Not tried yet: a real launchd, and a
+   boot with lingering on. (The node's own Lua was done in 3e.)
 6. The iOS app.
 
 ### Later (left open on the way; pick up when they matter)
