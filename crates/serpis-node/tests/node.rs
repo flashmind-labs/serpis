@@ -146,6 +146,22 @@ fn a_node_runs_chats_for_clients_anywhere() {
         assert_eq!(sessions.len(), 1, "{sessions:?}");
         assert!(sessions[0].path.starts_with(&*root.join("sessions").to_string_lossy()));
         assert_eq!(sessions[0].title, "READ 2");
+        // And those of the other directories the desktop lists (pi's): every device lists the same.
+        let other = root.join("pi-sessions/--project--");
+        std::fs::create_dir_all(&other).unwrap();
+        let text = std::fs::read_to_string(&sessions[0].path).unwrap().replace(&sessions[0].id, "from-pi");
+        std::fs::write(other.join("2026-01-01T00-00-00-000Z_from-pi.jsonl"), text).unwrap();
+        std::fs::write(node_dir.join("settings.json"), json!({"session-directory": root.join("sessions"), "session-directories": [root.join("pi-sessions")]}).to_string()).unwrap();
+        let mut listed = Vec::new();
+        for _ in 0..60 {
+            let Response::Sessions { sessions } = a.call(Request::Sessions { limit: None }).await.unwrap() else { panic!() };
+            listed = sessions.into_iter().map(|s| s.id).collect();
+            if listed.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(listed.contains(&"from-pi".to_string()), "{listed:?}");
 
         // Closing a chat keeps its session, which resumes as a chat again.
         a.call(Request::Close { chat: chat.clone() }).await.unwrap();

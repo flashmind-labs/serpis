@@ -19,6 +19,7 @@ struct ChatsView: View {
                         ChatRowView(row: row, machine: app.machine(row.machine)?.name ?? "")
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("chat-row")
                 }
             }
             .listStyle(.plain)
@@ -120,9 +121,11 @@ struct ChatRowView: View {
                 .lineLimit(1)
             }
             Spacer(minLength: 8)
-            Text(row.modified, format: .relative(presentation: .numeric, unitsStyle: .abbreviated))
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            if row.modified > .distantPast {
+                Text(row.modified, format: .relative(presentation: .numeric, unitsStyle: .abbreviated))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())

@@ -18,7 +18,8 @@ final class SerpisUITests: XCTestCase {
             throw XCTSkip("no test machine: run ios/test-machine.sh and pass its environment as TEST_RUNNER_*")
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-SerpisMachines", #"[{"id":"box","name":"box","address":"\#(address)"}]"#, "-SerpisDeviceKey", key]
+        let data = NSTemporaryDirectory() + "serpis-ui-\(UUID().uuidString)"
+        app.launchArguments = ["-SerpisMachines", #"[{"id":"box","name":"box","address":"\#(address)"}]"#, "-SerpisDeviceKey", key, "-SerpisData", data]
         app.launch()
 
         // A machine never reached: its key is asked about first.
@@ -64,5 +65,33 @@ final class SerpisUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.staticTexts["SHOW me how it builds"].waitForExistence(timeout: 20))
         shot("8-list")
+
+        // A second chat goes to the top: the latest first.
+        app.buttons["new-chat"].tap()
+        XCTAssertTrue(app.buttons["project"].waitForExistence(timeout: 20))
+        app.buttons["project"].tap()
+        app.buttons["Start a chat here"].tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 20))
+        composer.tap()
+        composer.typeText("the second one")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts["ok"].waitForExistence(timeout: 30))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let rows = app.buttons.matching(identifier: "chat-row")
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(rows.element(boundBy: 0).label.contains("the second one"), "the latest first: \(rows.element(boundBy: 0).label)")
+
+        // Quit and back: the chats are listed in the same order, and open.
+        app.terminate()
+        app.launch()
+        let back = rows.firstMatch.waitForExistence(timeout: 30)
+        shot("9-relaunched")
+        XCTAssertTrue(back)
+        XCTAssertTrue(rows.element(boundBy: 0).label.contains("the second one"), "after a restart too: \(rows.element(boundBy: 0).label)")
+        XCTAssertTrue(rows.element(boundBy: 1).label.contains("SHOW me how it builds"))
+        shot("9-after-restart")
+        rows.element(boundBy: 0).tap()
+        XCTAssertTrue(app.staticTexts["the second one"].waitForExistence(timeout: 20), "it opens, with what was said")
+        shot("10-reopened")
     }
 }

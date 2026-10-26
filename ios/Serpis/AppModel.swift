@@ -54,18 +54,22 @@ final class AppModel {
     @ObservationIgnored private var chats: [String: ChatModel] = [:]
     @ObservationIgnored private var listed: [String: [ChatRow]] = [:]
     @ObservationIgnored private let store: UserDefaults
+    /// Connections being made, by machine: whoever asks meanwhile waits for the same one.
+    @ObservationIgnored private var connecting: [String: Task<Void, Never>] = [:]
 
     init(store: UserDefaults = .standard) {
         self.store = store
         machines = (try? JSONDecoder().decode([Machine].self, from: store.data(forKey: "machines") ?? Data())) ?? []
         // Under UI tests (they name the machines), a fresh place each run: nothing accepted before.
-        let testing = ProcessInfo.processInfo.arguments.contains("-SerpisMachines")
-        let data = testing
-            ? FileManager.default.temporaryDirectory.appendingPathComponent("serpis-ui-\(UUID().uuidString)")
-            : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("core")
+        // (`-SerpisData <dir>` keeps it across launches of one test.)
+        let args = ProcessInfo.processInfo.arguments
+        let given = args.firstIndex(of: "-SerpisData").flatMap { args.indices.contains($0 + 1) ? URL(fileURLWithPath: args[$0 + 1]) : nil }
+        let data = given
+            ?? (args.contains("-SerpisMachines")
+                ? FileManager.default.temporaryDirectory.appendingPathComponent("serpis-ui-\(UUID().uuidString)")
+                : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("core"))
         do {
             // UI tests give the app a key of theirs (`-SerpisDeviceKey <file>`), kept nowhere.
-            let args = ProcessInfo.processInfo.arguments
             let testKey = args.firstIndex(of: "-SerpisDeviceKey").flatMap { args.indices.contains($0 + 1) ? try? String(contentsOfFile: args[$0 + 1], encoding: .utf8) : nil }
             let core = try Core(dataDir: data.path, key: testKey ?? DeviceKey.load(), listener: Bridge(self))
             if testKey == nil, DeviceKey.load() == nil { DeviceKey.save(core.privateKey()) }
@@ -110,10 +114,18 @@ final class AppModel {
         await connect(m)
     }
 
-    /// Connect `m` unless it is connected.
+    /// Connect `m` unless it is connected (or being connected: then wait for that).
     func connect(_ m: Machine) async {
         guard let core else { return }
         if core.isConnected(machine: m.id), link(m.id).isOnline { return }
+        if let running = connecting[m.id] { return await running.value }
+        let task = Task { await self.connectNow(m, core) }
+        connecting[m.id] = task
+        await task.value
+        connecting[m.id] = nil
+    }
+
+    private func connectNow(_ m: Machine, _ core: Core) async {
         links[m.id] = .connecting
         do {
             let hello = try JSONDecoder().decode(Hello.self, from: Data(try await core.connect(machine: m.id, address: m.address).utf8))
@@ -180,7 +192,8 @@ final class AppModel {
                 rows[session.id] = ChatRow(machine: m.id, chat: session.id, title: session.title, cwd: session.cwd, modified: Date(timeIntervalSince1970: session.modified / 1000), running: session.running, path: session.path)
             }
             for c in o.chats ?? [] {
-                var row = rows[c.chat] ?? ChatRow(machine: m.id, chat: c.chat, title: c.state.title, cwd: c.state.cwd, modified: .now, running: false)
+                // Open, but not among the saved ones (nothing said yet): when is unknown, so last.
+                var row = rows[c.chat] ?? ChatRow(machine: m.id, chat: c.chat, title: c.state.title, cwd: c.state.cwd, modified: .distantPast, running: false)
                 row.running = c.state.running
                 row.step = c.state.step
                 if !c.state.title.isEmpty { row.title = c.state.title }

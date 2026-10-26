@@ -914,7 +914,16 @@ impl Node {
             }
             Request::Sessions { limit } => {
                 let open: HashMap<PathBuf, bool> = self.chats.values().filter_map(|s| Some((s.chat.session.as_ref()?.path.clone(), s.chat.running() || s.chat.compacting()))).collect();
-                let mut sessions: Vec<SessionInfo> = serpis_chat::session::list(&[self.session_root()], &mut self.session_cache)
+                // Its own, and the other directories the desktop lists (pi's, by default), so every
+                // device lists the same chats.
+                let mut roots = vec![self.session_root()];
+                let more = self.lua.var("session-directories").unwrap_or_else(|| json!(["~/.pi/agent/sessions"]));
+                for d in more.as_array().into_iter().flatten().filter_map(|d| d.as_str()).map(from_home) {
+                    if !roots.contains(&d) {
+                        roots.push(d);
+                    }
+                }
+                let mut sessions: Vec<SessionInfo> = serpis_chat::session::list(&roots, &mut self.session_cache)
                     .into_iter()
                     .map(|i| SessionInfo {
                         open: open.contains_key(&i.path),

@@ -158,9 +158,15 @@ pub fn note_current(exe: &Path) -> Result<()> {
     relink(exe)
 }
 
-/// Point the service's link at `exe`.
+/// Point the service's link at `exe` (the binary itself: a node started through the link sees
+/// the link as its path on macOS, and pointing the link at that would make it point at itself).
 fn relink(exe: &Path) -> Result<()> {
+    let exe = exe.canonicalize().with_context(|| format!("finding the binary {} is", exe.display()))?;
+    let exe = exe.as_path();
     let l = link();
+    if l.canonicalize().is_ok_and(|now| now == exe) {
+        return Ok(());
+    }
     std::fs::create_dir_all(l.parent().context("no directory for the link")?)?;
     let tmp = l.with_extension("new");
     let _ = std::fs::remove_file(&tmp);

@@ -57,6 +57,8 @@ struct Machine {
     client: Arc<Client>,
     _ssh: ssh::Connection,
     _tasks: ssh::Tasks,
+    /// Replaced by a newer connection, or let go of: its end isn't the machine's.
+    superseded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// This device's way to its machines.
@@ -143,8 +145,10 @@ impl Core {
                     }
                 };
                 let hello = serde_json::json!({"host": client.hello.host, "home": client.hello.home, "serpis": client.hello.serpis}).to_string();
-                let machine = Arc::new(Machine { client: Arc::new(client), _ssh: conn, _tasks: tasks });
-                // Events go to the app as they come; the end of them is the connection closing.
+                let superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let machine = Arc::new(Machine { client: Arc::new(client), _ssh: conn, _tasks: tasks, superseded: superseded.clone() });
+                // Events go to the app as they come; the end of them is the connection closing,
+                // unless a newer one took its place.
                 let em = m.clone();
                 tokio::spawn(async move {
                     while let Some(ev) = events.recv().await {
@@ -152,14 +156,18 @@ impl Core {
                             listener.event(em.clone(), json);
                         }
                     }
-                    let why = ended.lock().unwrap().stderr.trim().to_string();
-                    listener.closed(em, why);
+                    if !superseded.load(std::sync::atomic::Ordering::Relaxed) {
+                        let why = ended.lock().unwrap().stderr.trim().to_string();
+                        listener.closed(em, why);
+                    }
                 });
                 Ok::<_, MobileError>((machine, hello))
             })
             .await
             .map_err(failed)??;
-        self.machines.lock().unwrap().insert(machine, made.0);
+        if let Some(old) = self.machines.lock().unwrap().insert(machine, made.0) {
+            old.superseded.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(made.1)
     }
 
@@ -184,6 +192,8 @@ impl Core {
 
     /// Stop talking to `machine` (its chats keep running there).
     pub fn disconnect(&self, machine: String) {
-        self.machines.lock().unwrap().remove(&machine);
+        if let Some(old) = self.machines.lock().unwrap().remove(&machine) {
+            old.superseded.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
