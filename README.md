@@ -327,6 +327,25 @@ user unit on Linux, a launchd agent on a Mac, which start it at boot (Linux: onc
 enable-linger <user>`, with sudo where it asks, lets the user's services run without a login, which serpis says) and again
 after a crash. `remote-uninstall-service` removes it.
 
+## Claude Code
+
+With the `claude` CLI installed and logged in, its models show up in `chat-select-model` as
+`claude-code/opus`, `claude-code/sonnet`, ... (the list your account offers, asked from `claude`
+itself). A chat on one of them runs its turns through Claude Code, with its harness, tools,
+permission rules, compaction, MCP servers and login, so a Claude subscription pays for it. It is
+still an ordinary serpis chat: the same transcript, tool cards and diffs, session files, resume,
+hooks, sidebar, other machines (each with its own `claude`) and the phone. One `claude` process
+serves a chat, and its session id is the chat's, so resuming the chat resumes Claude Code's
+session. Switching a chat to Claude Code midway hands it the conversation so far. Its tools are
+shown under serpis's names where they match (`Bash` is `bash`, `Edit` is `edit` with its diff);
+its todo list and plans get cards of their own. Thinking levels are its `--effort` levels, and
+`chat-compact` sends `/compact`.
+
+Permission prompts go to `before-tool-call` handlers first, then `claude-code-permission-prompts`
+answers them (`allow`, like serpis's own agent, or `deny`). `claude-code-permission-mode`,
+`claude-code-args` and `claude-code-path` set the rest.
+`cargo run -p serpis-chat --example claude_code_smoke -- <dir> <prompt>` tries it headless.
+
 ## Terminals on any machine
 
 A terminal on this machine is a child of the window, on a PTY of its own: the quickest it can

@@ -1,6 +1,7 @@
 //! serpis-ai: a Rust port of pi-ai — one streaming interface over many LLM providers.
 
 pub mod api;
+pub mod claude_code;
 pub mod overflow;
 pub mod registry;
 pub mod stream;

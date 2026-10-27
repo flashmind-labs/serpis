@@ -386,29 +386,39 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &StreamOptions) -> anyh
     })
 }
 
-pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
-    let oauth = is_oauth_token(opts.api_key.as_deref().unwrap_or_default());
-    em.emit(StreamEvent::Start);
+/// Turns Anthropic stream events (`message_start`, `content_block_delta`, ...) into the
+/// message being built in an [`Emitter`]. Claude Code's `stream_event`s carry the same events.
+pub struct EventReader {
+    /// Anthropic block index -> (content index, partial json for tool calls)
+    blocks: HashMap<u64, (usize, String)>,
+    model_id: String,
+    /// The model whose prices apply (a fallback model's, when one answered).
+    usage_model: Model,
+    /// The request's tools, when tool names were sent as Claude Code's.
+    oauth_tools: Option<Vec<Tool>>,
+}
 
-    // Anthropic block index -> (content index, partial json for tool calls)
-    let mut blocks: HashMap<u64, (usize, String)> = HashMap::new();
-    let mut usage_model = model.clone();
-    for_each_sse(resp, &opts.cancel, |ev| {
-        let Ok(data) = serde_json::from_str::<Value>(&ev.data) else { return Ok(true) };
-        let ty = data["type"].as_str().unwrap_or(ev.event.as_deref().unwrap_or(""));
+impl EventReader {
+    pub fn new(model: &Model, oauth_tools: Option<Vec<Tool>>) -> Self {
+        EventReader { blocks: HashMap::new(), model_id: model.id.clone(), usage_model: model.clone(), oauth_tools }
+    }
+
+    /// Apply one event of type `ty`; Err for an `error` event.
+    pub fn handle(&mut self, ty: &str, data: &Value, em: &mut Emitter) -> anyhow::Result<()> {
         match ty {
             "message_start" => {
                 let m = &data["message"];
                 em.output.response_id = m["id"].as_str().map(str::to_string);
-                if let Some(rm) = m["model"].as_str().filter(|rm| *rm != model.id) {
+                if let Some(rm) = m["model"].as_str().filter(|rm| *rm != self.model_id) {
                     em.output.response_model = Some(rm.to_string());
-                    if let Some(cost) = model
+                    if let Some(cost) = self
+                        .usage_model
                         .compat_value("allowedFallbackModels")
                         .and_then(Value::as_array)
                         .and_then(|a| a.iter().find(|f| f["model"] == rm))
                         .and_then(|f| serde_json::from_value::<ModelCost>(f["cost"].clone()).ok())
                     {
-                        usage_model.cost = cost;
+                        self.usage_model.cost = cost;
                     }
                 }
                 let u = &m["usage"];
@@ -419,7 +429,7 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, o
                 usage.cache_write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                 usage.cache_write_1h = u.pointer("/cache_creation/ephemeral_1h_input_tokens").and_then(Value::as_u64);
                 usage.recompute_total();
-                calculate_cost(&usage_model, usage);
+                calculate_cost(&self.usage_model, usage);
             }
             "content_block_start" => {
                 let idx = data["index"].as_u64().unwrap_or(0);
@@ -430,11 +440,11 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, o
                         if let Some(t) = cb["text"].as_str().filter(|t| !t.is_empty()) {
                             em.push_text(ci, t);
                         }
-                        blocks.insert(idx, (ci, String::new()));
+                        self.blocks.insert(idx, (ci, String::new()));
                     }
                     Some("thinking") => {
                         let ci = em.start_thinking(cb["signature"].as_str().map(str::to_string));
-                        blocks.insert(idx, (ci, String::new()));
+                        self.blocks.insert(idx, (ci, String::new()));
                     }
                     Some("redacted_thinking") => {
                         let ci = em.start_thinking(cb["data"].as_str().map(str::to_string));
@@ -442,20 +452,23 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, o
                             *thinking = "[Reasoning redacted]".into();
                             *redacted = true;
                         }
-                        blocks.insert(idx, (ci, String::new()));
+                        self.blocks.insert(idx, (ci, String::new()));
                     }
                     Some("tool_use") => {
                         let name = cb["name"].as_str().unwrap_or("");
-                        let name = if oauth { from_cc_name(name, &ctx.tools) } else { name.to_string() };
+                        let name = match &self.oauth_tools {
+                        Some(tools) => from_cc_name(name, tools),
+                        None => name.to_string(),
+                    };
                         let ci = em.start_tool_call(cb["id"].as_str().unwrap_or("").to_string(), name);
-                        blocks.insert(idx, (ci, String::new()));
+                        self.blocks.insert(idx, (ci, String::new()));
                     }
                     _ => {}
                 }
             }
             "content_block_delta" => {
                 let idx = data["index"].as_u64().unwrap_or(0);
-                let Some((ci, json)) = blocks.get_mut(&idx) else { return Ok(true) };
+                let Some((ci, json)) = self.blocks.get_mut(&idx) else { return Ok(()) };
                 let ci = *ci;
                 let d = &data["delta"];
                 match d["type"].as_str() {
@@ -477,7 +490,7 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, o
             }
             "content_block_stop" => {
                 let idx = data["index"].as_u64().unwrap_or(0);
-                if let Some((ci, json)) = blocks.remove(&idx) {
+                if let Some((ci, json)) = self.blocks.remove(&idx) {
                     let is_tool = matches!(em.output.content.get(ci), Some(AssistantContent::ToolCall(_)));
                     em.finish_block(ci, is_tool.then_some(json.as_str()));
                 }
@@ -524,7 +537,7 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, o
                         usage.reasoning = Some(v);
                     }
                     usage.recompute_total();
-                    calculate_cost(&usage_model, usage);
+                    calculate_cost(&self.usage_model, usage);
                 }
             }
             "error" => {
@@ -533,6 +546,19 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, o
             }
             _ => {}
         }
+        Ok(())
+    }
+}
+
+pub async fn stream_inner(resp: reqwest::Response, model: Model, ctx: Context, opts: StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+    let oauth = is_oauth_token(opts.api_key.as_deref().unwrap_or_default());
+    em.emit(StreamEvent::Start);
+
+    let mut events = EventReader::new(&model, oauth.then(|| ctx.tools.clone()));
+    for_each_sse(resp, &opts.cancel, |ev| {
+        let Ok(data) = serde_json::from_str::<Value>(&ev.data) else { return Ok(true) };
+        let ty = data["type"].as_str().unwrap_or(ev.event.as_deref().unwrap_or("")).to_string();
+        events.handle(&ty, &data, em)?;
         Ok(true)
     })
     .await?;

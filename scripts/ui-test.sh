@@ -44,6 +44,8 @@ stop_boxes() {
 }
 trap 'kill $mock $cache 2>/dev/null; stop_terminals; stop_boxes' EXIT
 for _ in $(seq 50); do [[ -s "$tmp/mock.port" && -s "$tmp/cache-mock.port" ]] && break; sleep 0.1; done
+# Never the real claude CLI (its login, sessions): no Claude Code models in UI tests.
+export SERPIS_CLAUDE_CODE_PATH=""
 export SERPIS_TEST_MOCK_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/v1" SERPIS_TEST_MOCK_LOG="$tmp/mock.log"
 export SERPIS_TEST_CACHE_URL="http://127.0.0.1:$(cat "$tmp/cache-mock.port")" SERPIS_TEST_CACHE_LOG="$tmp/cache-mock.log"
 fail=0

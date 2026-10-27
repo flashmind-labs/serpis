@@ -224,6 +224,8 @@ pub struct Chat {
     entries: Transcript,
     pub history: Vec<Message>,
     agent: Option<AgentHandle>,
+    /// The `claude` process of a chat on a Claude Code model, kept between turns.
+    claude: serpis_agent::claude_code::ClaudeCode,
     tx: mpsc::Sender<Done>,
     rx: mpsc::Receiver<Done>,
     wake: Wake,
@@ -283,6 +285,7 @@ impl Chat {
             entries: Transcript::default(),
             history: Vec::new(),
             agent: None,
+            claude: Default::default(),
             tx,
             rx,
             wake,
@@ -317,6 +320,11 @@ impl Chat {
         chat
     }
 
+    /// Whether this chat runs on Claude Code (a `claude-code/*` model).
+    pub fn is_claude_code(&self) -> bool {
+        self.model.as_ref().is_some_and(|m| m.api == serpis_ai::claude_code::PROVIDER)
+    }
+
     pub fn running(&self) -> bool {
         self.agent.is_some()
     }
@@ -346,6 +354,7 @@ impl Chat {
 
     pub fn clear(&mut self) {
         self.abort();
+        self.claude.stop();
         self.entries.clear();
         self.history.clear();
         self.totals = Usage::default();
@@ -361,6 +370,9 @@ impl Chat {
     }
 
     pub fn set_model(&mut self, m: Model) {
+        if m.api != serpis_ai::claude_code::PROVIDER {
+            self.claude.stop();
+        }
         self.thinking = clamp_thinking_level(&m, self.thinking);
         self.model = Some(m);
     }
@@ -436,6 +448,10 @@ impl Chat {
             self.entries.push(Entry::User { text, queued: true, images });
             return Ok(());
         }
+        if self.is_claude_code() {
+            self.answer_cut_off_calls(host);
+            return self.start_claude(host, vec![msg]);
+        }
         let Some(cfg) = self.agent_config(host) else { return Err("No model selected".into()) };
         // A turn that was cut off and not continued (parked, or not kept going).
         self.answer_cut_off_calls(host);
@@ -503,11 +519,78 @@ impl Chat {
         self.agent = Some(serpis_agent::run(self.history.clone(), prompts, cfg, emit));
     }
 
+    /// Run a turn on Claude Code: the `claude` CLI runs it, with its own tools, permissions and
+    /// context, and its events come back as an agent's would. Its session id is the chat's.
+    fn start_claude(&mut self, host: &mut dyn Host, prompts: Vec<Message>) -> Result<(), String> {
+        let Some(model) = self.model.clone() else { return Err("No model selected".into()) };
+        let binary = match host.var_str("claude-code-path").filter(|p| !p.is_empty()) {
+            Some(p) => Some(expand_home(&p)),
+            None => host.registry().claude_code_binary(),
+        };
+        let Some(binary) = binary else {
+            let why = "Claude Code isn't installed on this machine (claude not found; set claude-code-path)".to_string();
+            host.notify(Level::Error, why.clone());
+            return Err(why);
+        };
+        self.ensure_session(host);
+        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
+        self.record(host, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
+        // Thinking levels are Claude Code's efforts; `off` only where the model can do without.
+        let (effort, env) = match model.thinking_map(self.thinking) {
+            Some(Some("off")) => (None, vec![("MAX_THINKING_TOKENS".to_string(), "0".to_string())]),
+            Some(Some(v)) => (Some(v.to_string()), Vec::new()),
+            _ => (None, Vec::new()),
+        };
+        let args = match host.var("claude-code-args") {
+            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        let launch = serpis_agent::claude_code::Launch {
+            binary,
+            cwd: self.cwd.clone(),
+            model: model.id.clone(),
+            effort,
+            permission_mode: host.var_str("claude-code-permission-mode").unwrap_or_else(|| "default".into()),
+            args,
+            env,
+        };
+        let cfg = serpis_agent::claude_code::RunConfig {
+            launch,
+            session_id: self.session_id.clone(),
+            model,
+            hooks: host.tool_hooks(),
+            allow_prompts: host.var_str("claude-code-permission-prompts").as_deref() != Some("deny"),
+        };
+        // Prompt cache bookkeeping is Claude Code's own: what it sends isn't serpis's to know.
+        self.sent = None;
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
+        let emit: serpis_agent::EmitFn = Arc::new(move |ev| {
+            let _ = tx.send(Done::Agent(ev));
+            wake();
+        });
+        let rt = host.runtime();
+        let _guard = rt.enter();
+        self.last_error = None;
+        self.agent = Some(self.claude.run(self.history.clone(), prompts, cfg, emit));
+        Ok(())
+    }
+
     /// Replace the messages before a cut point with a summary (manually, or automatically near
     /// the context window). The summary is asked for in the conversation itself, so the request
     /// reads the prompt cache; see `serpis_agent::compaction`.
     pub fn compact(&mut self, host: &mut dyn Host, reason: CompactReason, instructions: Option<String>) {
         use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, summary_request};
+        if self.is_claude_code() {
+            // Claude Code compacts its own context (automatically, or with /compact).
+            if reason == CompactReason::Manual {
+                let text = match instructions {
+                    Some(i) if !i.trim().is_empty() => format!("/compact {i}"),
+                    _ => "/compact".to_string(),
+                };
+                let _ = self.submit(host, text, Vec::new(), true, None);
+            }
+            return;
+        }
         if self.running() || self.compacting.is_some() {
             if reason == CompactReason::Manual {
                 host.notify(Level::Info, "Wait for the agent to finish before compacting".into());
@@ -818,6 +901,9 @@ impl Chat {
             return false;
         }
         self.answer_cut_off_calls(host);
+        if self.is_claude_code() {
+            return self.start_claude(host, Vec::new()).is_ok();
+        }
         let Some(cfg) = self.agent_config(host) else { return false };
         self.start_agent(host, cfg, Vec::new());
         true
@@ -1296,6 +1382,24 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
             }
             q.join(" | ")
         }
+        // Claude Code's own tools.
+        "Task" | "Agent" => match arg(args, "subagent_type") {
+            "" => arg(args, "description").to_string(),
+            kind => format!("{} ({kind})", arg(args, "description")),
+        },
+        "WebFetch" => arg(args, "url").to_string(),
+        "TodoWrite" => {
+            let todos = args.get("todos").and_then(Value::as_array).cloned().unwrap_or_default();
+            let done = todos.iter().filter(|t| t["status"] == "completed").count();
+            let now = todos.iter().find(|t| t["status"] == "in_progress").and_then(|t| t["activeForm"].as_str().or(t["content"].as_str()));
+            match now {
+                Some(n) => format!("{done}/{} done · {n}", todos.len()),
+                None => format!("{done}/{} done", todos.len()),
+            }
+        }
+        "NotebookEdit" => arg(args, "notebook_path").to_string(),
+        "Skill" => arg(args, "skill").to_string(),
+        "ExitPlanMode" => "plan ready".into(),
         _ => {
             let s = args.to_string();
             if s == "{}" { String::new() } else { s }

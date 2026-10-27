@@ -261,6 +261,44 @@ Deferred until usage data asks for them:
 Sources: serpis' request path (2026-10-21), pi 1.3.0's `cache-warmer.js`, and Cloudflare's
 "obsessive inference optimization" post.
 
+## Claude Code as a chat's agent
+
+Goal: the same chats, on Claude Code's harness and the user's Claude subscription, the way t3code
+wraps it. Started 2026-10-27.
+
+| Topic | Decision |
+|---|---|
+| How | Speak the `claude` CLI's stream-json protocol directly (`-p --input-format stream-json --output-format stream-json`, `control_request`s for the handshake, permission prompts and interrupts), as the TS/Python Agent SDKs do internally. No SDK: no Node on machines, nothing but `claude` itself. |
+| Where it plugs in | A provider (`claude-code`, `Model::api`) whose chats run `serpis_agent::claude_code` instead of the agent loop. It emits the same `AgentEvent`s, so the transcript, sessions, hooks, node, desktop and phone don't know the difference. Its stream events go through the Anthropic adapter's own `EventReader`. |
+| Process | One per chat, kept between turns; restarted (with `--resume`) when the model, effort, permission mode or arguments change, or after it dies. Session id = the chat's id. |
+| Context | Claude Code's session holds it. Turns another model answered (a chat switched to Claude Code, or one whose session isn't on this machine) go with the next prompt as text. |
+| Tools | Shown under serpis's names and argument names where serpis has the tool; its other tools keep their names and get their own cards (TodoWrite, ExitPlanMode) and summaries (Task, WebFetch, Skill). |
+| Permissions | `can_use_tool` → `before-tool-call` → `claude-code-permission-prompts`. Its own allow/deny rules and `claude-code-permission-mode` apply first. AskUserQuestion is refused with a request to ask in plain text. |
+| Models | Discovered from `initialize` (no prompt) with the other catalogs, every 6h; aliases until then. Offered only where `claude` is installed and set up (`~/.claude` exists), so throwaway homes in tests never start it. |
+| Cost | Each turn's `total_cost_usd` goes on its last reply. serpis's prompt cache bookkeeping is off for these chats (what Claude Code sends isn't serpis's to know). |
+
+*Done*: `serpis_ai::claude_code` (finding the CLI, models, discovery), `serpis_agent::claude_code`
+(the engine), `Chat` running it, the four settings, cards. Tests: unit tests of the tool mapping,
+diffs and replay; `crates/serpis-chat/tests/claude_code.rs` drives real chats through
+`serpis-fake-claude` (serpis-testkit), a stand-in CLI: turns, one process, an edit's permission
+prompt and diff, refusal by a hook and by the setting, interrupt, effort change, an API error,
+`/compact`, resume, and a session missing on this machine. Checked against the real CLI
+(2.1.311, Haiku 5.5) with `examples/claude_code_smoke.rs`: Write with a permission prompt, Read,
+Edit with its diff, cost, resume remembering the conversation.
+
+Next:
+- Permission prompts answered by the person: a pending-approval entry in the transcript (proto,
+  desktop, phone) with allow once / always (Claude Code's `permission_suggestions`) / deny.
+  Then AskUserQuestion as a form, and plan approval.
+- The phone's own lines for Claude Code's tools (todo list, subagents); it shows mapped tools
+  already.
+- Subagents: their steps (`parent_tool_use_id`) are skipped; show them inside their Task card.
+- Mid-turn steering: messages sent while it works wait for the turn's end today.
+- Moving a chat carries serpis's session but not Claude Code's (`~/.claude/projects/...`); it is
+  caught up with the conversation as text instead. Carry the session file along.
+- The account (`initialize`'s `account`, rate limit events) in the model picker and header.
+- Claude Code's `system/compact_boundary` and its context use in the header.
+
 ## Chats and terminals on other machines, and the iOS app
 
 Goal: start chats and terminals on your laptop or on dedicated boxes, pick the machine from a

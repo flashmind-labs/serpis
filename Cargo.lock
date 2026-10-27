@@ -4615,6 +4615,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
+ "futures",
  "proptest",
  "serde_json",
  "serpis-agent",

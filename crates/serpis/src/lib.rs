@@ -151,6 +151,10 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("chat-compact-instructions", Value::Null, "What compaction summaries should focus on, besides pi's checkpoint format (goal, progress, decisions, next steps).");
     ed.defvar("agent-live-context", json!(false), "Rebuild the system prompt (AGENTS.md / CLAUDE.md, agent-guidelines, agent-append-system-prompt) for every message instead of keeping the one a chat started with. Any change then rewrites the chat's whole prompt cache; chat-refresh-context picks up changes once.");
     ed.defvar("agent-append-system-prompt", Value::Null, "Text appended to the system prompt.");
+    ed.defvar("claude-code-path", Value::Null, "The claude CLI that chats on claude-code/* models run (their turns go through Claude Code: its harness, tools, permissions and login, a Claude subscription included). Unset: claude on PATH, ~/.local/bin/claude or ~/.claude/local/claude. Each machine uses its own.");
+    ed.defvar("claude-code-permission-mode", json!("default"), "Claude Code's permission mode for its chats: \"default\", \"acceptEdits\", \"plan\", \"auto\", \"dontAsk\" or \"bypassPermissions\". Its own settings' allow and deny rules apply in every mode.");
+    ed.defvar("claude-code-permission-prompts", json!("allow"), "What Claude Code's permission prompts get once before-tool-call handlers let them through: \"allow\" (like serpis's own agent, which never asks) or \"deny\" (Claude Code is told to ask you in its reply instead). Tools its rules allow, such as Read, never prompt.");
+    ed.defvar("claude-code-args", json!([]), "More arguments for the claude CLI of Claude Code chats, e.g. [\"--append-system-prompt\", \"Be brief.\"] or [\"--mcp-config\", \"~/mcp.json\"].");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
     ed.defvar("extensions-disabled", json!([]), "Lua extensions in <config>/extensions not to load, by name (\"max-money\" for max-money.lua).");
     ed.defvar("terminal-image-storage-mb", json!(320), "Memory for images programs show in a terminal (Kitty graphics protocol: yazi previews, kitten icat...), per terminal; 0 turns terminal images off.");

@@ -1192,7 +1192,8 @@ fn default_expanded(name: &str, result: Option<&ToolResultMessage>) -> bool {
         Some(r) if r.is_error => true,
         // Images are what you want to see.
         Some(r) if r.content.iter().any(|c| matches!(c, UserContent::Image { .. })) => true,
-        _ => matches!(name, "edit" | "write"),
+        // Claude Code's plan (its todo list, a plan to approve) is what you want to see.
+        _ => matches!(name, "edit" | "write" | "TodoWrite" | "ExitPlanMode"),
     }
 }
 
@@ -1279,6 +1280,20 @@ fn tool_lines(
                     let spans = shift(hl.get(i), 2);
                     body.push((StyledLine::new(format!("+ {l}"), Face::DiffAdd).spans(spans), Some(t.diff_add_bg)));
                 }
+            }
+        } else if name == "TodoWrite" {
+            // Claude Code's todo list, as a checklist.
+            for todo in args.get("todos").and_then(Value::as_array).into_iter().flatten() {
+                let (mark, text, face) = match todo["status"].as_str() {
+                    Some("completed") => ("☑", todo["content"].as_str(), Face::Dim),
+                    Some("in_progress") => ("◐", todo["activeForm"].as_str().or(todo["content"].as_str()), Face::Bold),
+                    _ => ("☐", todo["content"].as_str(), Face::ToolOutput),
+                };
+                body.push((StyledLine::new(format!("{mark} {}", text.unwrap_or("")), face), None));
+            }
+        } else if name == "ExitPlanMode" {
+            for l in arg(args, "plan").lines() {
+                body.push((StyledLine::new(l, Face::AssistantText), None));
             }
         } else if name == "bash" {
             let cmd = arg(args, "command");

@@ -154,6 +154,8 @@ struct State {
     models_file: ModelsFile,
     auth: BTreeMap<String, Credential>,
     errors: Vec<String>,
+    /// The `claude` CLI, when installed: Claude Code models are offered then.
+    claude_code: Option<PathBuf>,
 }
 
 /// Thread-safe model registry. Cheap to clone.
@@ -222,6 +224,7 @@ impl Registry {
         st.auth = auth;
         st.catalog = catalog;
         st.errors = errors;
+        st.claude_code = crate::claude_code::find_binary();
     }
 
     pub fn load_errors(&self) -> Vec<String> {
@@ -241,7 +244,15 @@ impl Registry {
                 out.push(id.clone());
             }
         }
+        if st.claude_code.is_some() && !out.iter().any(|p| p == crate::claude_code::PROVIDER) {
+            out.push(crate::claude_code::PROVIDER.into());
+        }
         out
+    }
+
+    /// The `claude` CLI found when the registry was last loaded.
+    pub fn claude_code_binary(&self) -> Option<PathBuf> {
+        self.state.read().unwrap().claude_code.clone()
     }
 
     /// Whether `provider`'s credential is an OAuth login (its tokens belong to one machine:
@@ -294,6 +305,22 @@ impl Registry {
                 Err(e) => errors.push(format!("{provider}: {e:#}")),
             }
         }
+        if let Some(binary) = self.claude_code_binary() {
+            let stale = {
+                let st = self.state.read().unwrap();
+                st.catalog.get(crate::claude_code::PROVIDER).is_none_or(|e| now_ms().saturating_sub(e.checked_at) > CATALOG_REFRESH_MS)
+            };
+            if stale || force {
+                match crate::claude_code::discover(&binary).await {
+                    Ok(d) if !d.models.is_empty() => {
+                        let entry = StoreEntry { models: d.models, checked_at: now_ms() };
+                        self.state.write().unwrap().catalog.insert(crate::claude_code::PROVIDER.into(), entry);
+                    }
+                    Ok(_) => {}
+                    Err(e) => errors.push(format!("{}: {e:#}", crate::claude_code::PROVIDER)),
+                }
+            }
+        }
         self.save_store();
         errors
     }
@@ -313,6 +340,10 @@ impl Registry {
         let mut covered = std::collections::HashSet::new();
 
         for (provider, entry) in &st.catalog {
+            // Claude Code's list stays while its CLI is installed.
+            if provider == crate::claude_code::PROVIDER && st.claude_code.is_none() {
+                continue;
+            }
             let cfg = st.models_file.providers.get(provider);
             for m in &entry.models {
                 if m.extra.get("type").and_then(Value::as_str).is_some_and(|t| t != "chat") {
@@ -326,6 +357,9 @@ impl Registry {
                 out.push(m);
             }
             covered.insert(provider.clone());
+        }
+        if st.claude_code.is_some() && !st.catalog.contains_key(crate::claude_code::PROVIDER) {
+            out.extend(crate::claude_code::fallback_models());
         }
 
         for (provider, cfg) in &st.models_file.providers {

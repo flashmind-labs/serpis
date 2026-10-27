@@ -16,5 +16,6 @@ uuid.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 proptest = "1"
 serpis-testkit.workspace = true

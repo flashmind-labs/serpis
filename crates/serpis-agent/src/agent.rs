@@ -87,6 +87,9 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
+    pub(crate) fn new() -> Self {
+        AgentHandle { cancel: CancellationToken::new(), steering: Default::default(), follow_ups: Default::default() }
+    }
     /// Inject a message before the next model call (interrupting the current plan).
     pub fn steer(&self, msg: Message) {
         self.steering.lock().unwrap().push(msg);
@@ -98,16 +101,16 @@ impl AgentHandle {
     pub fn abort(&self) {
         self.cancel.cancel();
     }
+    /// The steering messages queued so far, then the follow-ups.
+    pub(crate) fn take_queued(&self) -> (Vec<Message>, Vec<Message>) {
+        (std::mem::take(&mut *self.steering.lock().unwrap()), std::mem::take(&mut *self.follow_ups.lock().unwrap()))
+    }
 }
 
 /// Start an agent run over `history` with new `prompts`. Events go to `emit`; the transcript
 /// owner appends each `MessageEnd` message.
 pub fn run(history: Vec<Message>, prompts: Vec<Message>, cfg: AgentConfig, emit: EmitFn) -> AgentHandle {
-    let handle = AgentHandle {
-        cancel: CancellationToken::new(),
-        steering: Default::default(),
-        follow_ups: Default::default(),
-    };
+    let handle = AgentHandle::new();
     let h = handle.clone();
     tokio::spawn(async move {
         emit(AgentEvent::AgentStart);
