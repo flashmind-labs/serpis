@@ -173,8 +173,10 @@ struct ChatState: Decodable, Hashable {
     var lastError: String?
     /// Claude Code's permission mode, for a chat on it.
     var permissionMode: String?
+    /// How much the reply being written has thought (an estimate), while it runs.
+    var thinkingTokens: Int?
 
-    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error, permission_mode }
+    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error, permission_mode, thinking_tokens }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -186,6 +188,7 @@ struct ChatState: Decodable, Hashable {
         sessionId = (try? c.decode(String.self, forKey: .session_id)) ?? ""
         lastError = try? c.decode(String.self, forKey: .last_error)
         permissionMode = try? c.decode(String.self, forKey: .permission_mode)
+        thinkingTokens = try? c.decode(Int.self, forKey: .thinking_tokens)
     }
 }
 

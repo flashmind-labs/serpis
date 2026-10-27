@@ -626,12 +626,21 @@ impl ChatBuffer {
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
                     if !continuation && (has_content || *streaming || error.is_some()) {
-                        let mut label = format!("◆  {}", short_model(model));
-                        if *streaming && blocks.is_empty() {
-                            label.push_str("  ·  thinking…");
-                        }
+                        let label = format!("◆  {}", short_model(model));
                         let diamond = "◆".len();
                         push(&mut out, &mut owner, StyledLine::new(label, Face::Label).spans(vec![(0..diamond, Face::Accent)]).gap(26.0 * k).pad(0.0, 4.0 * k), Some(ei));
+                    }
+                    // How much it has thought, while it writes (Claude Code's estimate).
+                    let thought = if *streaming { self.node.state.thinking_tokens.filter(|n| *n > 0).map(|n| format!(" · ~{} tokens", fmt_tokens(n))).unwrap_or_default() } else { String::new() };
+                    // Nothing to show yet (its thinking hidden, or not sent at all): it is thinking.
+                    let visible = blocks.iter().any(|b| match b {
+                        AssistantContent::Text { text, .. } => !text.trim().is_empty(),
+                        AssistantContent::Thinking { thinking, redacted, .. } => *redacted || !thinking.trim().is_empty(),
+                        AssistantContent::ToolCall(_) => true,
+                    });
+                    if *streaming && !visible && error.is_none() {
+                        let blk = Block::new(Color32::TRANSPARENT).bar(t.accent);
+                        push(&mut out, &mut owner, StyledLine::new(format!("Thinking…{thought}"), Face::Meta).block(blk.nth(0, 1)).indent(14.0 * k).gap(10.0 * k).pad(2.0 * k, 2.0 * k), Some(ei));
                     }
                     for b in blocks {
                         match b {
@@ -649,7 +658,7 @@ impl ChatBuffer {
                                     None => &body[body.len() - 3..],
                                 };
                                 let blk = Block::new(Color32::TRANSPARENT).bar(t.border);
-                                let head = if *streaming { "Thinking…".to_string() } else if body.len() > shown.len() && body.len() > 1 { format!("Thought · {} lines", body.len()) } else { "Thought".to_string() };
+                                let head = if *streaming { format!("Thinking…{thought}") } else if body.len() > shown.len() && body.len() > 1 { format!("Thought · {} lines", body.len()) } else { "Thought".to_string() };
                                 let n = shown.len() + 1;
                                 thinking_lines.push(out.len());
                                 push(&mut out, &mut owner, StyledLine::new(head, Face::Meta).block(blk.nth(0, n)).indent(14.0 * k).gap(10.0 * k).pad(2.0 * k, 2.0 * k), Some(ei));
@@ -1500,8 +1509,13 @@ fn tool_lines(
                 body.push((StyledLine::new(format!("{mark} {}", text.unwrap_or("")), face), None));
             }
         } else if name == "ExitPlanMode" {
+            // Its plan is Markdown: headings stand out, the rest reads as prose.
             for l in arg(args, "plan").lines() {
-                body.push((StyledLine::new(l, Face::AssistantText), None));
+                let heading = l.trim_start().strip_prefix('#').map(|h| h.trim_start_matches('#').trim());
+                body.push(match heading {
+                    Some(h) => (StyledLine::new(h, Face::Bold), None),
+                    None => (StyledLine::new(l, Face::AssistantText), None),
+                });
             }
         } else if name == "AskUserQuestion" {
             // Claude Code's questions, with their options; then what was answered.
@@ -1551,6 +1565,8 @@ fn tool_lines(
     if let Some(a) = ask {
         if name == "AskUserQuestion" {
             body.push((StyledLine::new("Answer it? C-c C-y answer · C-c C-d skip", Face::Warning), None));
+        } else if name == "ExitPlanMode" {
+            body.push((StyledLine::new("Approve this plan? C-c C-y yes · C-c C-a yes, accepting edits · C-c C-d keep planning", Face::Warning), None));
         } else {
             let always = a.always.as_ref().map(|w| format!(" · C-c C-a always ({w})")).unwrap_or_default();
             body.push((StyledLine::new(format!("Allow it? C-c C-y yes{always} · C-c C-d no"), Face::Warning), None));
@@ -1918,7 +1934,18 @@ impl Buffer for ChatBuffer {
                 resp.clicked()
             };
             let question = name == "AskUserQuestion";
-            if question {
+            let plan = name == "ExitPlanMode";
+            if plan {
+                if button(ui, "allow", "Approve", "Approve the plan: it goes on asking before edits (C-c C-y; chat-approve-plan picks another mode)", true) {
+                    run = Some("chat-allow");
+                }
+                if button(ui, "always", "Accept edits", "Approve the plan, and accept its edits from here (C-c C-a)", false) {
+                    run = Some("chat-allow-always");
+                }
+                if button(ui, "deny", "Keep planning", "Say what should change; it plans on (C-c C-d)", false) {
+                    run = Some("chat-keep-planning");
+                }
+            } else if question {
                 if button(ui, "allow", "Answer", "Answer its questions in the minibuffer (C-c C-y)", true) {
                     run = Some("chat-answer-questions");
                 }
@@ -1939,7 +1966,9 @@ impl Buffer for ChatBuffer {
                 }
             }
             let summary = serpis_chat::tool_summary(name, args);
-            let label = if question {
+            let label = if plan {
+                "Claude Code's plan is ready".to_string()
+            } else if question {
                 format!("Claude Code asks: {summary}")
             } else if summary.is_empty() {
                 format!("Allow {name}?")

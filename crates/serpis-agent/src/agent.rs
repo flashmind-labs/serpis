@@ -43,6 +43,9 @@ pub enum AgentEvent {
     /// The agent's permission mode is now this (Claude Code's: it switches itself too, as
     /// when a plan is approved or edits are allowed for the session).
     PermissionMode(String),
+    /// The reply being written has thought about `tokens` more tokens (an estimate, while its
+    /// thinking streams or is left out of the stream).
+    ThinkingTokens(u64),
 }
 
 pub type EmitFn = Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -61,6 +64,8 @@ pub enum Answer {
     Deny(Option<String>),
     /// The person's answers to the questions it asks: question to answer.
     Answers(std::collections::BTreeMap<String, String>),
+    /// The plan it asks to carry out is approved: on, in this permission mode.
+    Plan(String),
 }
 
 /// Where the answer to a [`AgentEvent::ToolAsk`] goes; the first answer counts. Dropping
@@ -144,15 +149,28 @@ pub struct AgentHandle {
     pub cancel: CancellationToken,
     steering: Arc<Mutex<Vec<Message>>>,
     follow_ups: Arc<Mutex<Vec<Message>>>,
+    steered: Arc<tokio::sync::Notify>,
 }
 
 impl AgentHandle {
     pub(crate) fn new() -> Self {
-        AgentHandle { cancel: CancellationToken::new(), steering: Default::default(), follow_ups: Default::default() }
+        AgentHandle { cancel: CancellationToken::new(), steering: Default::default(), follow_ups: Default::default(), steered: Default::default() }
     }
     /// Inject a message before the next model call (interrupting the current plan).
     pub fn steer(&self, msg: Message) {
         self.steering.lock().unwrap().push(msg);
+        self.steered.notify_one();
+    }
+
+    /// Wakes when a steering message is queued (an agent that takes them as they come, such
+    /// as Claude Code, waits on it).
+    pub(crate) async fn steered(&self) {
+        self.steered.notified().await
+    }
+
+    /// The steering messages queued so far.
+    pub(crate) fn take_steering(&self) -> Vec<Message> {
+        std::mem::take(&mut *self.steering.lock().unwrap())
     }
     /// Queue a message to run once the agent would otherwise stop.
     pub fn follow_up(&self, msg: Message) {

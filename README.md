@@ -366,6 +366,15 @@ its reply instead.
 `claude-code-permission-mode`, `claude-code-args` and `claude-code-path` set the rest.
 `cargo run -p serpis-chat --example claude_code_smoke -- <dir> <prompt>` tries it headless.
 
+While it thinks, its reply says so (`Thinking… · ~1.2k tokens`, its own estimate); its thinking
+itself comes summarized (`claude-code-thinking-display`) and shows as any chat's does. A message
+sent while it works goes to it at once and is taken in at its next step, in the same turn, as
+in its own prompt (shown queued until then); `chat-send-follow-up` still waits for the turn to
+end. A plan it asks to carry out (plan mode) waits on its card: `C-c C-y` approves it (it goes
+on asking before edits), `C-c C-a` approves it accepting edits, `chat-approve-plan` picks any
+mode, and `C-c C-d` (Keep planning) asks what should change. A resumed chat keeps its mode, its
+subagents' steps, how its background work ended, and why it went on by itself.
+
 Its permission mode shows in the composer the way its own prompt line shows it
 (`⏵⏵ auto mode on`, `⏸ plan mode on`, `⏵⏵ accept edits on`), on the phone too. `S-TAB` cycles
 through `claude-code-permission-mode-cycle` (default, accept edits, plan, auto) and a click on it

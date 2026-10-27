@@ -38,6 +38,9 @@ pub struct Launch {
     pub effort: Option<String>,
     /// `--permission-mode`: default, acceptEdits, plan, auto, dontAsk, bypassPermissions.
     pub permission_mode: String,
+    /// `--thinking-display`: summarized (its thinking is sent as a summary), omitted or
+    /// highlights; None leaves it to Claude Code (which leaves thinking out of the stream).
+    pub thinking_display: Option<String>,
     /// More arguments (`claude-code-args`).
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -238,6 +241,7 @@ impl ClaudeCode {
 /// message queued while they ran: Claude Code takes one message at a time. `going`: a turn
 /// it started itself is under way, read first.
 async fn turns(p: &mut Process, mut queue: VecDeque<Message>, mut context: Option<String>, mut going: bool, cfg: &RunConfig, h: &AgentHandle, emit: &EmitFn) -> Result<()> {
+    let mut late = false;
     loop {
         if !going {
             let Some(msg) = queue.pop_front() else { return Ok(()) };
@@ -251,6 +255,18 @@ async fn turns(p: &mut Process, mut queue: VecDeque<Message>, mut context: Optio
         if stopped {
             return Ok(());
         }
+        // Sent while it worked but too late for that turn: it takes them as its next one.
+        if !p.steers.is_empty() && !late {
+            late = true;
+            going = true;
+            continue;
+        }
+        // (Never said taken in: kept as sent, rather than waited on.)
+        for (_, msg) in p.steers.drain(..) {
+            emit(AgentEvent::MessageStart(msg.clone()));
+            emit(AgentEvent::MessageEnd(msg));
+        }
+        late = false;
         let (steer, follow) = h.take_queued();
         queue.extend(steer.into_iter().chain(follow));
     }
@@ -463,6 +479,9 @@ struct Process {
     nested_calls: HashMap<String, String>,
     /// Its permission mode, as it last said.
     mode: String,
+    /// Messages sent while it worked (`priority: next`), by the uuid they went with, until
+    /// it says it took them in (`command_lifecycle` started).
+    steers: Vec<(String, Message)>,
     launch: Launch,
     /// The end of what it wrote to stderr, for when it dies.
     stderr: Arc<Mutex<String>>,
@@ -478,6 +497,9 @@ impl Process {
             .args([if resume { "--resume" } else { "--session-id" }, &cfg.session_id]);
         if let Some(e) = &l.effort {
             cmd.args(["--effort", e]);
+        }
+        if let Some(d) = &l.thinking_display {
+            cmd.args(["--thinking-display", d]);
         }
         cmd.args(&l.args).envs(l.env.iter().cloned()).current_dir(&l.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(unix)]
@@ -515,7 +537,7 @@ impl Process {
                 }
             }
         });
-        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), launch: l.clone(), stderr, next_request: 0 };
+        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), steers: Vec::new(), launch: l.clone(), stderr, next_request: 0 };
         p.initialize().await?;
         Ok(p)
     }
@@ -574,6 +596,13 @@ impl Process {
         let sub = v["subtype"].as_str().unwrap_or("");
         if v["type"] == "system" && sub.starts_with("task_") {
             self.task(sub, v, emit);
+            return true;
+        }
+        // How much it thinks, as it does (its thinking itself may not be sent).
+        if v["type"] == "system" && sub == "thinking_tokens" {
+            if let Some(d) = v["estimated_tokens_delta"].as_u64() {
+                emit(AgentEvent::ThinkingTokens(d));
+            }
             return true;
         }
         // It says what mode it is in when it starts, and when that changes.
@@ -736,6 +765,18 @@ impl Process {
             let ahead = self.pending.pop_front();
             let v = if ahead.is_some() { ahead } else { tokio::select! {
                 v = self.lines.recv() => v,
+                // Sent while it works: it takes them in at its next step, as its own prompt does.
+                _ = h.steered(), if !interrupted => {
+                    for msg in h.take_steering() {
+                        let uuid = uuid::Uuid::new_v4().to_string();
+                        let mut line = user_line(&msg, None);
+                        line["priority"] = json!("next");
+                        line["uuid"] = json!(uuid);
+                        self.send(&line).await?;
+                        self.steers.push((uuid, msg));
+                    }
+                    continue;
+                }
                 _ = h.cancel.cancelled(), if !interrupted => {
                     interrupted = true;
                     self.request(json!({"subtype": "interrupt"})).await?;
@@ -760,6 +801,15 @@ impl Process {
                 continue;
             }
             match v["type"].as_str().unwrap_or("") {
+                // A message sent while it worked, taken in now: it is the chat's from here.
+                "command_lifecycle" if v["state"] == "started" => {
+                    if let Some(i) = self.steers.iter().position(|(u, _)| v["command_uuid"].as_str() == Some(u.as_str())) {
+                        let (_, msg) = self.steers.remove(i);
+                        t.close_open(StopReason::Stop, None);
+                        emit(AgentEvent::MessageStart(msg.clone()));
+                        emit(AgentEvent::MessageEnd(msg));
+                    }
+                }
                 "stream_event" => t.event(&v["event"]),
                 "assistant" => t.whole(&v),
                 "user" => t.results(&v),
@@ -810,6 +860,8 @@ impl Process {
                     ToolGate::Allow(args) => args,
                 };
                 let suggestions = req.get("permission_suggestions").filter(|s| s.as_array().is_some_and(|a| !a.is_empty()));
+                // A plan to approve: "always" goes on accepting edits, as its own prompt offers.
+                let plan = tool == "ExitPlanMode";
                 let answer = match cfg.prompts {
                     Prompts::Allow => Answer::Allow,
                     Prompts::Deny => Answer::Deny(Some(
@@ -818,14 +870,31 @@ impl Process {
                     Prompts::Ask => {
                         let (reply, rx) = AskReply::new();
                         let id = req["tool_use_id"].as_str().unwrap_or("").to_string();
-                        emit(AgentEvent::ToolAsk { id, always: suggestions.and_then(always_label), reply });
+                        let always = if plan { Some("accepting edits from here".to_string()) } else { suggestions.and_then(always_label) };
+                        emit(AgentEvent::ToolAsk { id, always, reply });
                         tokio::select! {
                             a = rx => a.unwrap_or(Answer::Deny(None)),
                             _ = h.cancel.cancelled() => return Ok(json!({"behavior": "deny", "message": "Stopped by the user", "interrupt": true})),
                         }
                     }
                 };
+                // A plan approved goes on in the mode chosen (allowing it: as it was before
+                // planning, asking first; always: accepting edits).
+                let answer = match answer {
+                    Answer::Allow if plan => Answer::Plan("default".into()),
+                    Answer::Always if plan => Answer::Plan("acceptEdits".into()),
+                    a => a,
+                };
                 Ok(match answer {
+                    Answer::Plan(mode) => json!({
+                        "behavior": "allow",
+                        "updatedInput": claude_input(tool, args),
+                        "updatedPermissions": [{"type": "setMode", "mode": mode, "destination": "session"}],
+                    }),
+                    Answer::Deny(why) if plan => json!({"behavior": "deny", "message": match why {
+                        Some(w) => format!("The user wants to keep planning. What should change: {w}"),
+                        None => "The user wants to keep planning: ask them what should change.".to_string(),
+                    }}),
                     Answer::Answers(answers) => {
                         let mut input = claude_input(tool, args);
                         input["answers"] = json!(answers);

@@ -312,6 +312,97 @@ local steps = {
     T.check("with what it said", has("The background command finished: bg-done."), true)
     T.check("and its card says how it ended", has("completed (exit code 0)"), true)
   end,
+  function(go)
+    -- Thinking that isn't sent still shows: a Thinking… line, with how much so far.
+    serpis.var.set("claude-code-thinking-display", "omitted")
+    serpis.defer(300, function()
+      d.text("think it over")
+      T.press("RET")
+      when(function() return has("Thinking… · ~") end, go)
+    end)
+    return false
+  end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      d.screenshot(shots .. "/claude-code-thinking.png")
+    end
+    T.check("a reply that is only thinking says so, with its tokens", has("Thinking… · ~"), true)
+    when(idle_with("Thought it through."), go)
+    return false
+  end,
+  function(go)
+    T.check("and goes once it answers", has("Thinking… · ~"), false)
+    -- Summarized (the default), its thinking shows as any chat's does.
+    serpis.var.set("claude-code-thinking-display", "summarized")
+    serpis.defer(300, function()
+      d.text("think again")
+      T.press("RET")
+      when(function() return idle_with("Thought it through.")() and has("Weighing it up.") end, go)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("summarized thinking shows", has("Weighing it up."), true)
+    -- A plan waits for approval, in its own words.
+    serpis.command.run("chat-select-permission-mode", "plan")
+    serpis.defer(300, function() ask("make a plan", go) end)
+    return false
+  end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      serpis.defer(1000, function() d.screenshot(shots .. "/claude-code-plan.png"); serpis.defer(500, go) end)
+      return false
+    end
+  end,
+  function(go)
+    T.check("the plan shows on its card", has("1. Create hello.txt"), true)
+    T.check("which asks to approve it", has("Approve this plan?"), true)
+    T.check("the bar offers accepting edits", d.composer()["always"] ~= nil, true)
+    -- Keep planning: say what should change.
+    click("deny")
+    when(function() return d.minibuffer() == "What should change? " end, function()
+      d.text("use hello.md")
+      serpis.defer(300, function()
+        T.press("RET")
+        when(function() return has("Heard: The user wants to keep planning. What should change: use hello.md") and not serpis.chat.running() end, go)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("keep planning says what should change", has("What should change: use hello.md"), true)
+    serpis.command.run("chat-select-permission-mode", "plan")
+    serpis.defer(300, function() ask("make a plan again", go) end)
+    return false
+  end,
+  function(go)
+    T.press("C-c C-a")
+    when(idle_with("Plan approved; on in acceptEdits."), go)
+    return false
+  end,
+  function(go)
+    T.check("C-c C-a approves it, accepting edits", has("Plan approved; on in acceptEdits."), true)
+    T.check("and the mode it goes on in shows", (serpis.chat.info() or {}).permission_mode, "acceptEdits")
+    -- A message typed while it works goes to it at once, in the same turn.
+    d.text("a long task")
+    T.press("RET")
+    when(function() return has("sleep 1; echo long-done") end, go)
+    return false
+  end,
+  function(go)
+    d.text("use tabs")
+    T.press("RET")
+    serpis.defer(150, function()
+      T.check("it shows as sent while it works", has("Queued · steers the running agent"), true)
+      when(idle_with("Done. You said: use tabs."), go)
+    end)
+    return false
+  end,
+  function()
+    T.check("it was taken in, in the same turn", has("Done. You said: use tabs."), true)
+  end,
   function()
     local log = sh("cat '" .. os.getenv("FAKE_CLAUDE_LOG") .. "'")
     T.check("Always passed Claude Code's suggestion back", log:find('"updatedPermissions":%[{"destination":"session","mode":"acceptEdits"') ~= nil, true)

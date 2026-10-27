@@ -180,21 +180,33 @@ struct Thought: View {
 
 /// The dots of a response that hasn't said anything yet.
 struct Working: View {
+    /// How much the reply has thought so far (an estimate), when that is known.
+    var thinking: Int? = nil
+
     var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 5) {
-                ForEach(0..<3) { i in
-                    Circle()
-                        .frame(width: 7, height: 7)
-                        .scaleEffect(0.75 + 0.25 * max(0, sin(t * 4 - Double(i) * 0.7)))
-                        .opacity(0.3 + 0.7 * max(0, sin(t * 4 - Double(i) * 0.7)))
+        HStack(spacing: 10) {
+            TimelineView(.animation) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                HStack(spacing: 5) {
+                    ForEach(0..<3) { i in
+                        Circle()
+                            .frame(width: 7, height: 7)
+                            .scaleEffect(0.75 + 0.25 * max(0, sin(t * 4 - Double(i) * 0.7)))
+                            .opacity(0.3 + 0.7 * max(0, sin(t * 4 - Double(i) * 0.7)))
+                    }
                 }
+                .foregroundStyle(.secondary)
             }
-            .foregroundStyle(.secondary)
+            if let n = thinking, n > 0 {
+                Text("Thinking · ~\(n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)") tokens")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+            }
         }
         .padding(.vertical, 6)
-        .accessibilityLabel("Working")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(thinking.map { "Thinking, about \($0) tokens" } ?? "Working")
     }
 }
 

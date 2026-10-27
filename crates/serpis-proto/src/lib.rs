@@ -166,6 +166,10 @@ pub enum Decision {
     /// each question's text to its answer (an option's label, several comma-separated, or
     /// their own words).
     Answers { answers: std::collections::BTreeMap<String, String> },
+    /// Approve the plan it asks to carry out (Claude Code's `ExitPlanMode`), going on in
+    /// permission mode `mode` (`default`, `acceptEdits`, `auto`, ...). A `Deny` keeps it
+    /// planning, with what should change.
+    Plan { mode: String },
 }
 
 /// An image in a user message, as the model received it.
@@ -254,6 +258,9 @@ pub struct ChatState {
     /// `auto`, `dontAsk` or `bypassPermissions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// How much the reply being written has thought so far (an estimate), while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
 }
 
 fn yes() -> bool {
@@ -280,6 +287,7 @@ impl Default for ChatState {
             cache_info: serde_json::Value::Null,
             keep_going: true,
             permission_mode: None,
+            thinking_tokens: None,
         }
     }
 }

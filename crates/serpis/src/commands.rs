@@ -829,6 +829,46 @@ pub fn install(ed: &mut Editor) {
         answer(ed, serpis_proto::Decision::Allow)
     });
     ed.define_command(
+        "chat-approve-plan",
+        "Approve the plan Claude Code asks to carry out, choosing the permission mode it goes on in (default: asks before edits; acceptEdits; auto; ...). Param: the mode.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            if !with_chat(ed, |c, _| c.waiting().is_some_and(|w| w.1 == "ExitPlanMode"))? {
+                ed.message("No plan is waiting for approval");
+                return Ok(());
+            }
+            let approve = move |ed: &mut Editor, mode: String| {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.answer(serpis_proto::Decision::Plan { mode }));
+            };
+            if let Some(m) = a.str(0) {
+                approve(ed, m.to_string());
+                return Ok(());
+            }
+            let modes = [("default", "asks before edits and commands"), ("acceptEdits", "edits without asking"), ("auto", "decides itself what is safe"), ("bypassPermissions", "never asks")];
+            let cands = modes.iter().map(|(m, d)| Candidate::new(*m).detail(*d)).collect();
+            ed.completing_read("Approve the plan, going on in: ", cands, true, move |ed, c, _| {
+                if let Some(c) = c {
+                    approve(ed, c.value);
+                }
+            });
+            Ok(())
+        },
+    );
+    ed.define_command("chat-keep-planning", "Don't approve the plan Claude Code asks to carry out: say what should change, and it plans on. Param: what should change.", o, |ed, a| {
+        let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+        let send = move |ed: &mut Editor, what: String| {
+            let message = Some(what).filter(|w| !w.trim().is_empty());
+            ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.answer(serpis_proto::Decision::Deny { message }));
+        };
+        if let Some(w) = a.str(0) {
+            send(ed, w.to_string());
+            return Ok(());
+        }
+        ed.read_string("What should change? ", "", move |ed, what| send(ed, what));
+        Ok(())
+    });
+    ed.define_command(
         "chat-answer-questions",
         "Answer the questions waiting for you (Claude Code's AskUserQuestion), one by one: pick an option or type your own answer; multiple-choice ones take picks until Done. Param: the answers, {question = answer}.",
         o,

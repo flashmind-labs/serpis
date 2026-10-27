@@ -228,6 +228,32 @@ final class SerpisUITests: XCTestCase {
         auto.tap()
         XCTAssertTrue(app.buttons["Permission mode: ⏵⏵ auto mode on"].waitForExistence(timeout: 20), "switched: \(mode.label)")
 
+        // A plan to approve: its own card, approved accepting edits.
+        mode.tap()
+        let planMode = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "⏸ plan mode on")).firstMatch
+        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        planMode.tap()
+        composer.tap()
+        composer.typeText("make a plan")
+        app.buttons["Send"].tap()
+        let plan = app.descendants(matching: .any)["plan"]
+        XCTAssertTrue(plan.waitForExistence(timeout: 30), "the plan waits for approval")
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        shot("14a-plan")
+        let accept = app.buttons["Accept edits"]
+        XCTAssertTrue(accept.waitForExistence(timeout: 5))
+        accept.tap()
+        XCTAssertTrue(app.staticTexts["Plan approved; on in acceptEdits."].waitForExistence(timeout: 30), "approved, it goes on")
+
+        // While it thinks, the phone says so, with how much.
+        composer.tap()
+        composer.typeText("think it over for a while")
+        app.buttons["Send"].tap()
+        let thinking = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Thinking, about'")).firstMatch
+        XCTAssertTrue(thinking.waitForExistence(timeout: 20), "thinking shows")
+        shot("14b-thinking")
+        XCTAssertTrue(app.staticTexts["Thought it through."].waitForExistence(timeout: 30))
+
         // A subagent's turn.
         composer.tap()
         composer.typeText("use a subagent")

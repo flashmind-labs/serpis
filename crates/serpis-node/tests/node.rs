@@ -130,6 +130,14 @@ fn a_node_runs_chats_for_clients_anywhere() {
         a.call(Request::SetPermissionMode { chat: cc.clone(), mode: "auto".into() }).await.unwrap();
         vc.until(&mut a_events, |v| v.state.as_ref().is_some_and(|s| s.permission_mode.as_deref() == Some("auto"))).await;
         assert!(a.call(Request::SetPermissionMode { chat: cc.clone(), mode: "yolo".into() }).await.is_err());
+        // A plan, approved over the wire as the phone does it.
+        a.call(Request::SetPermissionMode { chat: cc.clone(), mode: "plan".into() }).await.unwrap();
+        a.call(Request::Prompt { chat: cc.clone(), text: "make a plan".into(), images: vec![], follow_up: false, request_id: None }).await.unwrap();
+        vc.until(&mut a_events, |v| v.entries.iter().any(|e| matches!(e, Entry::Tool { name, ask: Some(_), .. } if name == "ExitPlanMode"))).await;
+        let tool = vc.entries.iter().find_map(|e| if let Entry::Tool { id, name, .. } = e { (name == "ExitPlanMode").then(|| id.clone()) } else { None }).unwrap();
+        let phone: serpis_proto::wire::Request = serde_json::from_value(json!({"op": "answer", "chat": cc, "tool": tool, "decision": {"kind": "plan", "mode": "acceptEdits"}})).expect("the phone's request reads");
+        a.call(phone).await.unwrap();
+        vc.until(&mut a_events, |v| v.idle() && v.entries.iter().any(|e| matches!(e, Entry::Assistant { blocks, .. } if blocks.iter().any(|b| matches!(b, serpis_ai::AssistantContent::Text { text, .. } if text == "Plan approved; on in acceptEdits."))))).await;
         a.call(Request::Close { chat: cc }).await.unwrap();
 
         // Mistakes are answered, not fatal.
@@ -170,6 +178,8 @@ fn a_node_runs_chats_for_clients_anywhere() {
 
         // Settings come from the node's own file: the session went where it says.
         let Response::Sessions { sessions } = a.call(Request::Sessions { limit: None }).await.unwrap() else { panic!() };
+        // (Beside the Claude Code chat's, from above.)
+        let sessions: Vec<_> = sessions.into_iter().filter(|s| s.title != "make a plan").collect();
         assert_eq!(sessions.len(), 1, "{sessions:?}");
         assert!(sessions[0].path.starts_with(&*root.join("sessions").to_string_lossy()));
         assert_eq!(sessions[0].title, "READ 2");
@@ -183,7 +193,7 @@ fn a_node_runs_chats_for_clients_anywhere() {
         for _ in 0..60 {
             let Response::Sessions { sessions } = a.call(Request::Sessions { limit: None }).await.unwrap() else { panic!() };
             listed = sessions.into_iter().map(|s| s.id).collect();
-            if listed.len() == 2 {
+            if listed.iter().any(|id| id == "from-pi") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

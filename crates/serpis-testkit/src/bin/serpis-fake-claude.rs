@@ -211,9 +211,94 @@ fn main() {
         if msg["type"] != "user" {
             continue;
         }
+        // A message sent with an id is said to be taken in, as Claude Code does.
+        if !msg["uuid"].is_null() {
+            out(json!({"type": "command_lifecycle", "command_uuid": msg["uuid"], "state": "started"}));
+        }
         let text = msg["message"]["content"].as_array().and_then(|b| b.iter().rev().find_map(|b| b["text"].as_str())).unwrap_or("").to_string();
         n += 1;
-        if text.contains("monitor") {
+        if text.contains("make a plan") {
+            // A plan to approve (ExitPlanMode): approved, it goes on in the mode it is given;
+            // refused, it says what it heard.
+            let id = format!("t{n}");
+            let input = json!({"plan": "# Plan\n1. Create hello.txt\n2. Write hi in it"});
+            start(&format!("m{n}a"));
+            call(0, &id, "ExitPlanMode", &input);
+            stop("tool_use");
+            out(json!({"type": "control_request", "request_id": format!("perm{n}"), "request": {"subtype": "can_use_tool", "tool_name": "ExitPlanMode", "input": input, "tool_use_id": id, "permission_suggestions": null}}));
+            let answer = loop {
+                let Some(l) = lines.next() else { return };
+                let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                log(json!({"got": v}));
+                if v["type"] == "control_response" {
+                    break v;
+                }
+            };
+            let r = &answer["response"]["response"];
+            let reply = if r["behavior"] == "allow" {
+                let mode = r["updatedPermissions"][0]["mode"].as_str().unwrap_or("default").to_string();
+                system("status", json!({"status": null, "permissionMode": mode}));
+                tool_result(&id, "User has approved your plan. You can now start coding.", None);
+                format!("Plan approved; on in {mode}.")
+            } else {
+                let why = r["message"].as_str().unwrap_or("").to_string();
+                out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": why, "is_error": true}]}, "parent_tool_use_id": null}));
+                format!("Planning on. Heard: {why}")
+            };
+            start(&format!("m{n}b"));
+            text_block(0, &reply);
+            stop("end_turn");
+            result(&session, None);
+        } else if text.contains("long task") {
+            // A command that takes a while; messages sent meanwhile (priority next) are taken
+            // in at the next step, and its answer says what they said, as Claude Code does.
+            let id = format!("t{n}");
+            start(&format!("m{n}a"));
+            call(0, &id, "Bash", &json!({"command": "sleep 1; echo long-done"}));
+            stop("tool_use");
+            let mut told: Vec<(Value, String)> = Vec::new();
+            for _ in 0..15 {
+                if let Ok(l) = rx.recv_timeout(Duration::from_millis(100)) {
+                    let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                    log(json!({"got": v}));
+                    if v["type"] == "user" && v["priority"] == "next" {
+                        out(json!({"type": "command_lifecycle", "command_uuid": v["uuid"], "state": "queued"}));
+                        told.push((v["uuid"].clone(), v["message"]["content"][0]["text"].as_str().unwrap_or("").to_string()));
+                    }
+                }
+            }
+            tool_result(&id, "long-done", None);
+            // Taken in at the next step.
+            for (uuid, _) in &told {
+                out(json!({"type": "command_lifecycle", "command_uuid": uuid, "state": "started"}));
+            }
+            let said: Vec<&str> = told.iter().map(|(_, t)| t.as_str()).collect();
+            start(&format!("m{n}b"));
+            text_block(0, &if said.is_empty() { "Done.".to_string() } else { format!("Done. You said: {}.", said.join("; ")) });
+            stop("end_turn");
+            for (uuid, _) in &told {
+                out(json!({"type": "command_lifecycle", "command_uuid": uuid, "state": "completed"}));
+            }
+            result(&session, None);
+        } else if text.contains("think") {
+            // A while thinking: its estimate grows; the thinking itself is sent only when
+            // asked for (--thinking-display summarized), as Claude Code does.
+            let summarized = after("--thinking-display").as_deref() == Some("summarized");
+            start(&format!("m{n}"));
+            ev(json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}));
+            let frames = if text.contains("a while") { 40 } else { 12 };
+            for i in 1..=frames {
+                system("thinking_tokens", json!({"estimated_tokens": i * 150, "estimated_tokens_delta": 150}));
+                if summarized && i == 1 {
+                    ev(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Weighing it up."}}));
+                }
+                std::thread::sleep(Duration::from_millis(180));
+            }
+            ev(json!({"type": "content_block_stop", "index": 0}));
+            text_block(1, "Thought it through.");
+            stop("end_turn");
+            result(&session, None);
+        } else if text.contains("monitor") {
             // A monitor: a shell task (its tool, Monitor, says so) that runs until stopped.
             let id = format!("t{n}");
             start(&format!("m{n}a"));

@@ -1014,7 +1014,7 @@ impl Node {
                 Response::Ok
             }
             Request::SetPermissionMode { chat, mode } => {
-                self.with_chat(&chat, |c, _| c.set_permission_mode(&mode))??;
+                self.with_chat(&chat, |c, h| c.set_permission_mode(h, &mode))??;
                 Response::Ok
             }
             Request::StopTask { chat, task } => {

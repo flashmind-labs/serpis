@@ -292,8 +292,9 @@ Next:
   `tests/ui/claude_code.lua` with real keys and clicks; the phone's card above its composer,
   `testAllowingWhatClaudeCodeAsks` against the test machine's stand-in claude). Found on the
   way: machines' model lists (the node's `Models`, the desktop picker) left `claude-code/*` out;
-  both use `serpis_ai::api::chat_api` now. Next there: plan approval (ExitPlanMode) with its
-  own words.
+  both use `serpis_ai::api::chat_api` now. Plan approval has its own words (`Decision::Plan
+  {mode}`, sent back as a `setMode`: approve, accepting edits, or any mode; keep planning with
+  what should change), on the desktop and the phone.
 - *Done*: AskUserQuestion answered by the person (proto `Decision::Answers`, sent back as
   `updatedInput.answers`): its card lists the questions, `chat-answer-questions` asks them in
   the minibuffer (options, your own words, picks until Done), the phone has a form, and
@@ -308,13 +309,15 @@ Next:
   run the chat shows, records and can stop. `chat-stop-task` (`StopTask`, the CLI's
   `stop_task`). Its process tree ends with it (SIGTERM, then SIGKILL by pid and start time:
   commands it runs may sit in groups of their own). Found by probing the CLI 2.1.311 on Haiku.
-  Not yet: tasks and steps aren't in the session file, so a restored chat shows the cards
-  without them.
+  Kept for resume as custom entries (`claude-code-tool`, `claude-code-note`).
 - *Done*: permission modes per chat (`ChatState::permission_mode`, `SetPermissionMode`, the CLI's
   `set_permission_mode`, its `system status` lines followed): the composer's TUI-like indicator,
-  `S-TAB`, `chat-select-permission-mode`, the phone's menu. Not yet: a chat's own mode isn't
-  kept across a restore (it starts in `claude-code-permission-mode` again).
-- Mid-turn steering: messages sent while it works wait for the turn's end today.
+  `S-TAB`, `chat-select-permission-mode`, the phone's menu; kept for resume
+  (`claude-code-mode`).
+- *Done*: mid-turn steering: a message sent while it works goes as `priority: next` with a uuid,
+  and is the chat's (history, transcript) when its `command_lifecycle` says started; one too
+  late for the turn is its next turn. Thinking: `--thinking-display summarized` by default, and
+  its `system thinking_tokens` estimate in `ChatState::thinking_tokens` (a Thinking… line).
 - Moving a chat carries serpis's session but not Claude Code's (`~/.claude/projects/...`); it is
   caught up with the conversation as text instead. Carry the session file along.
 - *Done*: `claude-code-usage` (and `serpis.agent.claude_code_usage`): the CLI's `get_usage`

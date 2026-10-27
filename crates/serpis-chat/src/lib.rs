@@ -233,6 +233,8 @@ pub struct Chat {
     /// Claude Code's permission mode for this chat, once chosen or reported (else its
     /// machine's `claude-code-permission-mode`).
     permission_mode: Option<String>,
+    /// How much the reply being written has thought (Claude Code's estimate).
+    thinking_tokens: Option<u64>,
     /// The machine's `claude-code-permission-mode`, as last read (what the chat shows until it
     /// has its own).
     default_mode: String,
@@ -298,6 +300,7 @@ impl Chat {
             claude: Default::default(),
             asks: HashMap::new(),
             permission_mode: None,
+            thinking_tokens: None,
             default_mode: "default".into(),
             tx,
             rx,
@@ -367,9 +370,12 @@ impl Chat {
 
     /// Switch this chat's Claude Code to permission mode `mode` (one of [`PERMISSION_MODES`]),
     /// at once if it is running, else from its next turn.
-    pub fn set_permission_mode(&mut self, mode: &str) -> Result<(), String> {
+    pub fn set_permission_mode(&mut self, host: &mut dyn Host, mode: &str) -> Result<(), String> {
         if !PERMISSION_MODES.contains(&mode) {
             return Err(format!("{mode} isn't a Claude Code permission mode (one of {})", PERMISSION_MODES.join(", ")));
+        }
+        if self.permission_mode.as_deref() != Some(mode) {
+            self.append_entry(host, CLAUDE_MODE, json!({"mode": mode}));
         }
         self.permission_mode = Some(mode.to_string());
         self.claude.set_permission_mode(mode);
@@ -585,6 +591,7 @@ impl Chat {
             model: model.id.clone(),
             effort,
             permission_mode: self.permission_mode.clone().or_else(|| host.var_str("claude-code-permission-mode")).unwrap_or_else(|| "default".into()),
+            thinking_display: Some(host.var_str("claude-code-thinking-display").unwrap_or_else(|| "summarized".into())).filter(|d| !d.is_empty()),
             args,
             env,
         };
@@ -1151,6 +1158,8 @@ impl Chat {
                     Value::String(s) if s == "always" => Some(serpis_agent::Answer::Always),
                     Value::String(s) if s == "deny" => Some(serpis_agent::Answer::Deny(None)),
                     Value::Object(o) if o.contains_key("deny") => Some(serpis_agent::Answer::Deny(o["deny"].as_str().map(str::to_string))),
+                    // A plan approved, going on in a mode: {plan = "acceptEdits"}.
+                    Value::Object(o) if o["plan"].is_string() => Some(serpis_agent::Answer::Plan(o["plan"].as_str().unwrap_or("default").to_string())),
                     // The questions it asks, answered: {answers = {["Which one?"] = "B"}}.
                     Value::Object(o) if o["answers"].is_object() => Some(serpis_agent::Answer::Answers(
                         o["answers"].as_object().into_iter().flatten().map(|(q, a)| (q.clone(), a.as_str().map(str::to_string).unwrap_or_else(|| a.to_string()))).collect(),
@@ -1188,16 +1197,28 @@ impl Chat {
             }
             AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
             AgentEvent::Task { tool, mut task } => {
-                if let Some(Entry::Tool { name, task: t, .. }) = self.tool_entry(&tool) {
+                let mut ended = None;
+                if let Some(Entry::Tool { name, task: t, steps, .. }) = self.tool_entry(&tool) {
                     // A shell task its Monitor tool started watches for events: a monitor.
                     if name == "Monitor" && task.kind == "bash" {
                         task.kind = "monitor".into();
                     }
+                    if !task.running() {
+                        ended = Some(json!({"id": tool, "task": task, "steps": steps}));
+                    }
                     *t = Some(Box::new(task));
+                }
+                // How it ended is kept: a resumed chat shows it.
+                if let Some(e) = ended {
+                    self.append_entry(host, CLAUDE_TOOL, e);
                 }
             }
             AgentEvent::Nested { parent, event } => self.apply_nested(&parent, *event),
-            AgentEvent::PermissionMode(m) => self.permission_mode = Some(m),
+            AgentEvent::PermissionMode(m) => {
+                self.append_entry(host, CLAUDE_MODE, json!({"mode": m}));
+                self.permission_mode = Some(m);
+            }
+            AgentEvent::ThinkingTokens(d) => *self.thinking_tokens.get_or_insert(0) += d,
             // Claude Code went on by itself (work it left running finished): a run of the
             // chat's, which it shows, records and can stop like any.
             AgentEvent::Adopted { handle, why } => {
@@ -1205,7 +1226,9 @@ impl Chat {
                     self.agent = Some(handle);
                     self.last_error = None;
                 }
-                self.entries.push(Entry::Info { text: why.unwrap_or_else(|| "Claude Code went on by itself".into()), tone: Tone::Meta });
+                let text = why.unwrap_or_else(|| "Claude Code went on by itself".into());
+                self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len()}));
+                self.entries.push(Entry::Info { text, tone: Tone::Meta });
             }
         }
     }
@@ -1231,6 +1254,8 @@ impl Chat {
     fn apply_nested(&mut self, parent: &str, ev: AgentEvent) {
         match ev {
             AgentEvent::MessageEnd(Message::Assistant(m)) => {
+                // The next reply's thinking is counted afresh.
+                self.thinking_tokens = None;
                 let blocks: Vec<AssistantContent> = m.content.into_iter().filter(|b| matches!(b, AssistantContent::Text { text, .. } if !text.trim().is_empty())).collect();
                 if blocks.is_empty() && m.error_message.is_none() {
                     return;
@@ -1264,6 +1289,7 @@ impl Chat {
             serpis_proto::Decision::Always => serpis_agent::Answer::Always,
             serpis_proto::Decision::Deny { message } => serpis_agent::Answer::Deny(message),
             serpis_proto::Decision::Answers { answers } => serpis_agent::Answer::Answers(answers),
+            serpis_proto::Decision::Plan { mode } => serpis_agent::Answer::Plan(mode),
         };
         let sent = reply.send(a);
         if let Some(Entry::Tool { ask, .. }) = self.tool_entry(tool) {
@@ -1337,7 +1363,17 @@ impl Chat {
             self.thinking = self.model.as_ref().map(|m| clamp_thinking_level(m, t)).unwrap_or(t);
         }
         let mut first_prompt = None;
-        for m in &l.messages {
+        let notes: Vec<(usize, String)> = l
+            .entries
+            .iter()
+            .filter(|(k, _)| k == CLAUDE_NOTE)
+            .filter_map(|(_, d)| Some((d["at"].as_u64()? as usize, d["text"].as_str()?.to_string())))
+            .collect();
+        for (i, m) in l.messages.iter().enumerate() {
+            // Why Claude Code went on by itself, where it did.
+            for (_, text) in notes.iter().filter(|(at, _)| *at == i) {
+                self.entries.push(Entry::Info { text: text.clone(), tone: Tone::Meta });
+            }
             match m {
                 Message::User { content, .. } => {
                     let (text, images) = user_parts(content);
@@ -1371,6 +1407,20 @@ impl Chat {
         let ago = std::fs::metadata(&l.path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(fmt_ago).unwrap_or_default();
         self.notice(format!("↺ Resumed session {} · {} messages · {ago}", &l.id[..l.id.len().min(8)], l.messages.len()), Tone::Meta);
         self.custom_entries = l.entries.clone();
+        // What Claude Code's messages don't say: how its work on the side ended, its
+        // subagents' steps, and the mode it was in.
+        for (k, d) in &l.entries {
+            if k == CLAUDE_TOOL
+                && let (Some(id), Ok(task)) = (d["id"].as_str(), serde_json::from_value::<serpis_proto::Task>(d["task"].clone()))
+            {
+                let saved: Vec<Entry> = serde_json::from_value(d["steps"].clone()).unwrap_or_default();
+                if let Some(Entry::Tool { task: t, steps, .. }) = self.tool_entry(id) {
+                    *t = Some(Box::new(task));
+                    *steps = saved;
+                }
+            }
+        }
+        self.permission_mode = l.entries.iter().rev().find(|(k, _)| k == CLAUDE_MODE).and_then(|(_, d)| d["mode"].as_str()).map(str::to_string);
         self.system_prompt = None;
         self.cache = cache_watch::CacheWatch::from_usages(l.messages.iter().filter_map(|m| match m {
             Message::Assistant(a) => Some(&a.usage),
@@ -1396,6 +1446,7 @@ impl Chat {
                 Entry::Tool { name, args, ask: Some(_), .. } if name == "AskUserQuestion" => {
                     return format!("waiting for your answer: {}", tool_summary(name, args));
                 }
+                Entry::Tool { name, ask: Some(_), .. } if name == "ExitPlanMode" => return "waiting for you to approve the plan".into(),
                 Entry::Tool { name, args, ask: Some(_), .. } => {
                     let s = tool_summary(name, args);
                     return if s.is_empty() { format!("waiting for you: {name}") } else { format!("waiting for you: {name} {s}") };
@@ -1447,6 +1498,7 @@ impl Chat {
             cache_info: self.cache_info(),
             keep_going: self.keep_going(),
             permission_mode: self.is_claude_code().then(|| self.permission_mode.clone().unwrap_or_else(|| self.default_mode.clone())),
+            thinking_tokens: self.thinking_tokens.filter(|_| self.running()),
         }
     }
 }
@@ -1456,6 +1508,13 @@ pub const PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "auto
 
 /// The custom entry a chat's own [`Chat::keep_going`] choice is kept in: `{on = bool}`.
 pub const KEEP_GOING: &str = "keep-going";
+
+/// The custom entries a Claude Code chat keeps what its messages don't say in: its permission
+/// mode (`{mode}`), how work a tool call started ended and a subagent's steps (`{id, task,
+/// steps}`), and why it took a turn of its own (`{text, at}`: before history message `at`).
+pub const CLAUDE_MODE: &str = "claude-code-mode";
+pub const CLAUDE_TOOL: &str = "claude-code-tool";
+pub const CLAUDE_NOTE: &str = "claude-code-note";
 
 /// What a tool call cut off by its node stopping gets as its result.
 pub const CUT_OFF_TOOL: &str = "Not run to the end: the machine's serpis-node stopped while this tool ran (a crash, a restart or a reboot), and it was not run again. It may have done some or all of its work: check before running it again.";

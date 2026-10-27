@@ -25,8 +25,8 @@ struct ChatView: View {
                         case .work(_, let entries): WorkView(entries: entries, live: chat.running && item.id == items.last?.id)
                         }
                     }
-                    if chat.running, case .some(.user) = chat.entries.last {
-                        Working()
+                    if chat.running, ChatView.waitingOnReply(chat.entries.last) {
+                        Working(thinking: chat.state?.thinkingTokens)
                     }
                 }
                 .padding(.horizontal, 18)
@@ -125,7 +125,15 @@ struct ChatView: View {
 
     /// A tool call waiting for you: what it wants, and the answers.
     @ViewBuilder private var approval: some View {
-        if let tool = chat.waiting, tool.name == "AskUserQuestion" {
+        if let tool = chat.waiting, tool.name == "ExitPlanMode" {
+            PlanApproval(plan: tool.arg("plan")) { decision in
+                switch decision {
+                case .approve(let mode): answer(tool, "plan", mode: mode)
+                case .keepPlanning(let what): answer(tool, "deny", message: what)
+                }
+            }
+            .id(tool.id)
+        } else if let tool = chat.waiting, tool.name == "AskUserQuestion" {
             QuestionsForm(tool: tool) { answers in
                 answer(tool, answers == nil ? "deny" : "answers", answers: answers)
             }
@@ -155,9 +163,9 @@ struct ChatView: View {
     }
 
     /// Answer what `tool` asks, and follow what it does next, as after sending.
-    private func answer(_ tool: Tool, _ kind: String, answers: [String: String]? = nil) {
+    private func answer(_ tool: Tool, _ kind: String, answers: [String: String]? = nil, mode: String? = nil, message: String? = nil) {
         withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
-        Task { await chat.answer(tool.id, kind, answers: answers) }
+        Task { await chat.answer(tool.id, kind, answers: answers, mode: mode, message: message) }
     }
 
     /// Claude Code's permission mode, as its prompt line shows it, and a menu to switch it.
@@ -215,6 +223,17 @@ struct ChatView: View {
             .padding(.horizontal, 6)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("background")
+        }
+    }
+
+    /// Whether the transcript's end shows nothing of the reply yet: your message, or a reply
+    /// that so far only thinks (its thinking not shown).
+    static func waitingOnReply(_ last: Entry?) -> Bool {
+        switch last {
+        case .user: true
+        case .assistant(let blocks, let streaming, _):
+            streaming && !blocks.contains { if case .text(let t) = $0 { !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } else { false } }
+        default: false
         }
     }
 
@@ -424,5 +443,50 @@ struct QuestionsForm: View {
         .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("questions")
+    }
+}
+
+/// A plan Claude Code asks to carry out: what it is, and approving it (on asking before edits,
+/// or accepting them) or planning on with what should change.
+struct PlanApproval: View {
+    enum Decision { case approve(String), keepPlanning(String?) }
+    let plan: String
+    let done: (Decision) -> Void
+    @State private var asking = false
+    @State private var change = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Approve the plan?", systemImage: "list.bullet.clipboard")
+                .font(.subheadline.weight(.medium))
+            ScrollView {
+                Text((try? AttributedString(markdown: plan, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(plan))
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 220)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Keep planning") { asking = true }
+                    .buttonStyle(.bordered)
+                Spacer(minLength: 4)
+                Button("Accept edits") { done(.approve("acceptEdits")) }
+                    .buttonStyle(.bordered)
+                Button("Approve") { done(.approve("default")) }
+                    .buttonStyle(.borderedProminent)
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .controlSize(.small)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plan")
+        .alert("What should change?", isPresented: $asking) {
+            TextField("Say what to change", text: $change)
+            Button("Cancel", role: .cancel) {}
+            Button("Plan on") { done(.keepPlanning(change.isEmpty ? nil : change)) }
+        }
     }
 }

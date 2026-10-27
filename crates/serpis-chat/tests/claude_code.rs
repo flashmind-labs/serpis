@@ -192,6 +192,15 @@ fn chats_run_on_claude_code() {
     let (starts, _) = w.log();
     assert_eq!(starts.len(), 1);
     assert!(w.log_lines().iter().any(|l| l["agent_env"] == "1"), "claude runs with SERPIS_AGENT, as its commands then do");
+    assert_eq!(after(&starts[0], "--thinking-display"), Some("summarized"), "its thinking is asked for");
+
+    // While it thinks, the chat says how much (its estimate), and forgets it after.
+    chat.submit(&mut w.host, "think it over".into(), vec![], false, None).unwrap();
+    w.until(&mut chat, |c| c.state().thinking_tokens.is_some_and(|n| n >= 300));
+    w.finish(&mut chat);
+    assert_eq!(last_text(chat.entries()), "Thought it through.");
+    assert!(chat.state().thinking_tokens.is_none());
+    assert!(matches!(chat.entries().iter().rev().find_map(|e| if let Entry::Assistant { blocks, .. } = e { blocks.first().cloned() } else { None }), Some(AssistantContent::Thinking { thinking, .. }) if thinking == "Weighing it up."));
     assert_eq!(after(&starts[0], "--session-id"), Some(chat.session_id.as_str()));
     assert_eq!(after(&starts[0], "--model"), Some("sonnet"));
     assert_eq!(after(&starts[0], "--effort"), Some("high"));
@@ -229,13 +238,13 @@ fn chats_run_on_claude_code() {
 
     // Its mode is switched at once, without starting it again.
     let starts = w.log().0.len();
-    chat.set_permission_mode("auto").unwrap();
+    chat.set_permission_mode(&mut w.host, "auto").unwrap();
     assert_eq!(chat.state().permission_mode.as_deref(), Some("auto"));
     w.send(&mut chat, "in auto mode");
     assert_eq!(w.log().0.len(), starts, "no restart for a new mode");
     assert!(w.log().1.iter().any(|g| g["request"]["subtype"] == "set_permission_mode" && g["request"]["mode"] == "auto"));
-    assert!(chat.set_permission_mode("yolo").is_err());
-    chat.set_permission_mode("default").unwrap();
+    assert!(chat.set_permission_mode(&mut w.host, "yolo").is_err());
+    chat.set_permission_mode(&mut w.host, "default").unwrap();
 
     // The person refuses one, saying why.
     chat.submit(&mut w.host, "edit no".into(), vec![], false, None).unwrap();
@@ -251,6 +260,31 @@ fn chats_run_on_claude_code() {
     chat.abort();
     w.finish(&mut chat);
     assert!(chat.asking().is_empty() && chat.entries().iter().all(|e| !matches!(e, Entry::Tool { ask: Some(_), .. })));
+
+    // A plan waits for approval, and goes on in the mode chosen; refused, it plans on with
+    // what should change.
+    chat.set_permission_mode(&mut w.host, "plan").unwrap();
+    chat.submit(&mut w.host, "make a plan".into(), vec![], false, None).unwrap();
+    let asked = w.ask(&mut chat);
+    assert_eq!(chat.state().step.as_deref(), Some("waiting for you to approve the plan"));
+    assert!(matches!(serpis_proto::find_tool(chat.entries(), &asked), Some(Entry::Tool { ask: Some(a), .. }) if a.always.as_deref() == Some("accepting edits from here")));
+    assert!(chat.answer(&asked, Decision::Always));
+    w.finish(&mut chat);
+    assert_eq!(last_text(chat.entries()), "Plan approved; on in acceptEdits.");
+    assert_eq!(chat.state().permission_mode.as_deref(), Some("acceptEdits"), "the mode it went on in shows");
+    chat.set_permission_mode(&mut w.host, "plan").unwrap();
+    chat.submit(&mut w.host, "make a plan again".into(), vec![], false, None).unwrap();
+    let asked = w.ask(&mut chat);
+    assert!(chat.answer(&asked, Decision::Plan { mode: "auto".into() }));
+    w.finish(&mut chat);
+    assert_eq!(last_text(chat.entries()), "Plan approved; on in auto.");
+    chat.set_permission_mode(&mut w.host, "plan").unwrap();
+    chat.submit(&mut w.host, "make a plan, third".into(), vec![], false, None).unwrap();
+    let asked = w.ask(&mut chat);
+    assert!(chat.answer(&asked, Decision::Deny { message: Some("use hello.md instead".into()) }));
+    w.finish(&mut chat);
+    assert!(last_text(chat.entries()).contains("keep planning. What should change: use hello.md instead"), "{}", last_text(chat.entries()));
+    chat.set_permission_mode(&mut w.host, "default").unwrap();
 
     // Its questions wait for answers, which go back with the questions.
     chat.submit(&mut w.host, "a question".into(), vec![], false, None).unwrap();
@@ -353,9 +387,8 @@ fn chats_run_on_claude_code() {
     assert_eq!(last_text(bg.entries()), "Started it in the background.");
     let Entry::Tool { task: Some(task), .. } = tool(&bg, "bash") else { panic!() };
     assert!(task.running() && task.background, "{task:?}");
-    w.until(&mut bg, |c| c.running());
-    w.finish(&mut bg);
-    assert_eq!(last_text(bg.entries()), "The background command finished: bg-done.");
+    // (Its turn may start and end between two polls: what it said is what to wait for.)
+    w.until(&mut bg, |c| last_text(c.entries()) == "The background command finished: bg-done." && !c.running());
     assert!(bg.entries().iter().any(|e| matches!(e, Entry::Info { text, .. } if text == "Background command finished: sleep then echo bg-done")), "{:#?}", bg.entries());
     let Entry::Tool { task: Some(task), .. } = tool(&bg, "bash") else { panic!() };
     assert_eq!(task.status, "completed");
@@ -364,9 +397,7 @@ fn chats_run_on_claude_code() {
     // An agent in the background: its steps come after the turn, then its own turn.
     w.send(&mut bg, "an agent in the background");
     assert_eq!(last_text(bg.entries()), "Launched it.");
-    w.until(&mut bg, |c| c.running());
-    w.finish(&mut bg);
-    assert_eq!(last_text(bg.entries()), "The agent reported: from-sub.");
+    w.until(&mut bg, |c| last_text(c.entries()) == "The agent reported: from-sub." && !c.running());
     let Entry::Tool { steps, task: Some(task), .. } = tool(&bg, "Agent") else { panic!() };
     assert_eq!((steps.len(), task.status.as_str(), task.background), (2, "completed", true), "{steps:#?}");
 
@@ -388,6 +419,34 @@ fn chats_run_on_claude_code() {
         assert!(bg.stop_task(t));
     }
     w.until(&mut bg, |c| c.entries().iter().all(|e| !matches!(e, Entry::Tool { task: Some(t), .. } if t.running())));
+
+    // A message sent while it works is taken in at its next step, in the same turn, and is
+    // the chat's from where it was read.
+    bg.submit(&mut w.host, "a long task".into(), vec![], false, None).unwrap();
+    w.until(&mut bg, |c| c.entries().iter().any(|e| matches!(e, Entry::Tool { args, result: None, .. } if args["command"] == "sleep 1; echo long-done")));
+    bg.submit(&mut w.host, "use tabs".into(), vec![], false, None).unwrap();
+    assert!(matches!(bg.entries().last(), Some(Entry::User { text, queued: true, .. }) if text == "use tabs"), "shown as queued at once");
+    w.finish(&mut bg);
+    assert_eq!(last_text(bg.entries()), "Done. You said: use tabs.");
+    let tail: Vec<&str> = bg.entries().iter().rev().take(3).map(|e| match e { Entry::User { queued: false, .. } => "user", Entry::User { .. } => "queued", Entry::Tool { .. } => "tool", Entry::Assistant { .. } => "assistant", Entry::Info { .. } => "info" }).collect();
+    assert_eq!(tail, ["assistant", "user", "tool"], "taken in after the command, before the answer: {:#?}", bg.entries());
+    let n = bg.history.len();
+    assert!(matches!(&bg.history[n - 2], serpis_ai::Message::User { .. }), "recorded where it was read");
+    let sent = w.log().1;
+    assert!(sent.iter().any(|g| g["type"] == "user" && g["priority"] == "next" && g["message"]["content"][0]["text"] == "use tabs"));
+
+    // Resumed, the chat shows what Claude Code's messages don't say: how its work on the side
+    // ended, its subagents' steps, why it went on by itself, and its mode.
+    bg.set_permission_mode(&mut w.host, "acceptEdits").unwrap();
+    let path = bg.session.as_ref().map(|s| s.path.clone()).expect("its session");
+    let mut back = w.chat();
+    back.restore(&mut w.host, &serpis_chat::session::load(&path).unwrap());
+    let agents: Vec<Entry> = back.entries().iter().filter(|e| matches!(e, Entry::Tool { name, .. } if name == "Agent")).cloned().collect();
+    assert!(agents.iter().all(|e| matches!(e, Entry::Tool { steps, task: Some(t), .. } if steps.len() == 2 && t.status == "completed")), "{agents:#?}");
+    assert!(back.entries().iter().any(|e| matches!(e, Entry::Tool { name, task: Some(t), .. } if name == "Monitor" && t.kind == "monitor" && t.status == "stopped")));
+    let note = back.entries().iter().position(|e| matches!(e, Entry::Info { text, .. } if text == "Background command finished: sleep then echo bg-done")).expect("the note");
+    assert!(matches!(&back.entries()[note + 1], Entry::Assistant { blocks, .. } if matches!(&blocks[0], AssistantContent::Text { text, .. } if text == "The background command finished: bg-done.")), "in its place");
+    assert_eq!(back.state().permission_mode.as_deref(), Some("acceptEdits"));
 
     // What it leaves running goes with it: closing the chat's Claude Code ends what it started.
     w.send(&mut bg, "background forever, again");

@@ -125,10 +125,13 @@ final class ChatModel: Identifiable {
         }
     }
 
-    /// Answer what `tool` asks: "allow", "always", "deny", or "answers" (its questions, to `answers`).
-    func answer(_ tool: String, _ kind: String, answers: [String: String]? = nil) async {
+    /// Answer what `tool` asks: "allow", "always", "deny" (with `message`), "answers" (its
+    /// questions, to `answers`) or "plan" (approved, going on in `mode`).
+    func answer(_ tool: String, _ kind: String, answers: [String: String]? = nil, mode: String? = nil, message: String? = nil) async {
         var decision: [String: Any] = ["kind": kind]
         if let answers { decision["answers"] = answers }
+        if let mode { decision["mode"] = mode }
+        if let message { decision["message"] = message }
         do {
             _ = try await app?.call(machine, ["op": "answer", "chat": chat, "tool": tool, "decision": decision])
         } catch {
