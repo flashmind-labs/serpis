@@ -95,7 +95,7 @@ pub fn ssh_config_hosts(path: &Path, ssh_dir: &Path, depth: usize) -> Vec<String
 }
 
 /// The files `pattern` names (`*` and `?` in its last part).
-fn glob(pattern: &Path) -> Vec<PathBuf> {
+pub(crate) fn glob(pattern: &Path) -> Vec<PathBuf> {
     let name = pattern.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if !name.contains(['*', '?']) {
         return vec![pattern.to_path_buf()];
@@ -225,13 +225,13 @@ async fn run_for(argv: &[&str], wait: Duration) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     nix::unistd::gethostname().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// The `tailscale` command: `remote-tailscale-command`, else `tailscale` on PATH, else (macOS)
 /// the one inside Tailscale.app.
-fn tailscale_command(ed: &Editor) -> String {
+pub(crate) fn tailscale_command(ed: &Editor) -> String {
     if let Some(c) = ed.var_str("remote-tailscale-command").filter(|c| !c.is_empty()) {
         return c;
     }

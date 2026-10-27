@@ -97,6 +97,9 @@ pub struct Remotes {
     pub adding: crate::machines::Adding,
     /// The phone being paired (`phone-pair`).
     pub pairing: Option<crate::pairing::Active>,
+    /// Addresses this machine might be reached at, as `phone-pair` finds them: (address, where
+    /// it comes from).
+    pub pair_addresses: Vec<(String, String)>,
     /// Each machine's connection and the buffers showing its terminals, for their bytes, which
     /// go between them without the window's thread.
     pub wires: crate::terminals::Wires,

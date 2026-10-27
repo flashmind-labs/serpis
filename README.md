@@ -263,6 +263,13 @@ window, which asks you (showing the key's fingerprint, as the phone does), and o
 the phone's key is added on every machine shared and the pairing key removed everywhere. The
 phone never adds or configures machines itself.
 
+"This machine" (`phone-pair local`) shares the desktop serpis runs on, so the phone drives the
+chats this window shows. It needs ssh on here (Remote Login on macOS: System Settings › General ›
+Sharing; the code says so when nothing answers) and an address the phone can use, which serpis
+asks for once, offering this machine's Tailscale name and its name and address on this network
+(`phone-pair-local-address` keeps it; set it to `""` to be asked again). Its host keys are read
+from `phone-pair-local-host-keys`, its port from `phone-pair-sshd-config`.
+
 Machines are ssh destinations: those added, `remote-hosts` (`serpis.var.set("remote-hosts", {"gpu-box",
 "me@lab"})`, or `{name, host, env = {...}}` tables), plus the peers of your
 [rayfish](https://github.com/rayfish/rayfish) networks (`remote-rayfish`), named

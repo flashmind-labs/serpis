@@ -463,8 +463,12 @@ Steps:
    `crates/serpis-node/tests/pairing.rs`, `crates/serpis-mobile/tests/pair.rs`,
    `tests/ui/phone_pair.lua` (the code also read back from a screenshot, by hand),
    `ios/SerpisUITests` (`testPairingWithYourComputer`, against `ios/test-machine.sh` and its
-   stand-in desktop, `examples/pair_desktop.rs`). Not done: this desktop itself as a machine to
-   share (the phone needs an address for it the desktop can't know); rayfish machines aren't
+   stand-in desktop, `examples/pair_desktop.rs`). This desktop is shared too ("this machine",
+   `phone-pair local`), so the phone drives the chats this window shows: its address is picked
+   once (Tailscale names from `tailscale status --json`, its `.local` name and LAN address, or
+   typed; kept in `phone-pair-local-address`), its host keys read from sshd's
+   `/etc/ssh/ssh_host_*_key.pub`, the port from `sshd_config`, and the code says so when nothing
+   answers ssh here (Remote Login off). Not done: rayfish machines aren't
    offered (the phone isn't on rayfish); ssh config the phone can't follow (ProxyJump, a
    ProxyCommand) isn't carried over. Not tried yet with a real phone camera.
 
