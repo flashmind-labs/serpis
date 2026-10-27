@@ -102,9 +102,12 @@ final class ChatModel: Identifiable {
     }
 
     /// Answer the tool call waiting for the person: "allow", "always" or "deny".
-    func answer(_ tool: String, _ kind: String) async {
+    /// Answer what `tool` asks: "allow", "always", "deny", or "answers" (its questions, to `answers`).
+    func answer(_ tool: String, _ kind: String, answers: [String: String]? = nil) async {
+        var decision: [String: Any] = ["kind": kind]
+        if let answers { decision["answers"] = answers }
         do {
-            _ = try await app?.call(machine, ["op": "answer", "chat": chat, "tool": tool, "decision": ["kind": kind]])
+            _ = try await app?.call(machine, ["op": "answer", "chat": chat, "tool": tool, "decision": decision])
         } catch {
             notice = AppModel.describe(error)
         }

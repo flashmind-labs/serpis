@@ -1116,6 +1116,10 @@ impl Chat {
                     Value::String(s) if s == "always" => Some(serpis_agent::Answer::Always),
                     Value::String(s) if s == "deny" => Some(serpis_agent::Answer::Deny(None)),
                     Value::Object(o) if o.contains_key("deny") => Some(serpis_agent::Answer::Deny(o["deny"].as_str().map(str::to_string))),
+                    // The questions it asks, answered: {answers = {["Which one?"] = "B"}}.
+                    Value::Object(o) if o["answers"].is_object() => Some(serpis_agent::Answer::Answers(
+                        o["answers"].as_object().into_iter().flatten().map(|(q, a)| (q.clone(), a.as_str().map(str::to_string).unwrap_or_else(|| a.to_string()))).collect(),
+                    )),
                     _ => None,
                 });
                 if let Some(a) = decided {
@@ -1158,6 +1162,7 @@ impl Chat {
             serpis_proto::Decision::Allow => serpis_agent::Answer::Allow,
             serpis_proto::Decision::Always => serpis_agent::Answer::Always,
             serpis_proto::Decision::Deny { message } => serpis_agent::Answer::Deny(message),
+            serpis_proto::Decision::Answers { answers } => serpis_agent::Answer::Answers(answers),
         };
         let sent = reply.send(a);
         if let Some(Entry::Tool { ask, .. }) = self.tool_entry(tool) {
@@ -1284,6 +1289,9 @@ impl Chat {
     pub fn current_step(&self) -> String {
         for e in self.entries.iter().rev() {
             match e {
+                Entry::Tool { name, args, ask: Some(_), .. } if name == "AskUserQuestion" => {
+                    return format!("waiting for your answer: {}", tool_summary(name, args));
+                }
                 Entry::Tool { name, args, ask: Some(_), .. } => {
                     let s = tool_summary(name, args);
                     return if s.is_empty() { format!("waiting for you: {name}") } else { format!("waiting for you: {name} {s}") };
@@ -1470,6 +1478,11 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
         "NotebookEdit" => arg(args, "notebook_path").to_string(),
         "Skill" => arg(args, "skill").to_string(),
         "ExitPlanMode" => "plan ready".into(),
+        "AskUserQuestion" => {
+            let qs = args["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let first = qs.first().and_then(|q| q["question"].as_str()).unwrap_or("");
+            if qs.len() > 1 { format!("{first} (+{} more)", qs.len() - 1) } else { first.to_string() }
+        }
         _ => {
             let s = args.to_string();
             if s == "{}" { String::new() } else { s }

@@ -292,8 +292,13 @@ Next:
   `tests/ui/claude_code.lua` with real keys and clicks; the phone's card above its composer,
   `testAllowingWhatClaudeCodeAsks` against the test machine's stand-in claude). Found on the
   way: machines' model lists (the node's `Models`, the desktop picker) left `claude-code/*` out;
-  both use `serpis_ai::api::chat_api` now. Next there: AskUserQuestion as a form, plan approval
-  (ExitPlanMode) with its own words.
+  both use `serpis_ai::api::chat_api` now. Next there: plan approval (ExitPlanMode) with its
+  own words.
+- *Done*: AskUserQuestion answered by the person (proto `Decision::Answers`, sent back as
+  `updatedInput.answers`): its card lists the questions, `chat-answer-questions` asks them in
+  the minibuffer (options, your own words, picks until Done), the phone has a form, and
+  `tool-ask` handlers can answer `{answers = ...}`. With prompts not asked it is still told to
+  ask in plain text.
 - The phone's own lines for Claude Code's tools (todo list, subagents); it shows mapped tools
   already.
 - Subagents: their steps (`parent_tool_use_id`) are skipped; show them inside their Task card.

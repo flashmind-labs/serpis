@@ -87,6 +87,10 @@ pub enum Decision {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// What the person chose for the questions a tool asks (Claude Code's `AskUserQuestion`):
+    /// each question's text to its answer (an option's label, several comma-separated, or
+    /// their own words).
+    Answers { answers: std::collections::BTreeMap<String, String> },
 }
 
 /// An image in a user message, as the model received it.

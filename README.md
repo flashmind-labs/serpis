@@ -348,6 +348,14 @@ it wants to do and waits, and a bar above the composer offers Allow (`C-c C-y`),
 answers, from any window. `before-tool-call` handlers can block it first, and `tool-ask` handlers
 can answer for you (return `"allow"`, `"always"`, `"deny"` or `{deny = "why"}`);
 `claude-code-permission-prompts` = `allow` or `deny` answers every prompt the same way.
+
+Its multiple-choice questions (AskUserQuestion) wait on their card too, listing each question's
+options. `C-c C-y` (or Answer) asks them one by one in the minibuffer: pick an option, or type
+an answer of your own; a question that takes several takes picks until Done. `C-c C-d` (Skip)
+lets it go on without. On the phone they are a form. Scripts answer with
+`chat-answer-questions` given `{["Which color?"] = "Blue"}`, or from a `tool-ask` handler
+returning `{answers = {...}}`. When prompts aren't asked (`allow`, `deny`), it is told to ask in
+its reply instead.
 `claude-code-permission-mode`, `claude-code-args` and `claude-code-path` set the rest.
 `cargo run -p serpis-chat --example claude_code_smoke -- <dir> <prompt>` tries it headless.
 

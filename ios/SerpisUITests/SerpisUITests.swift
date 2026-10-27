@@ -194,5 +194,26 @@ final class SerpisUITests: XCTestCase {
         XCTAssertFalse(approval.exists)
         XCTAssertFalse(app.buttons["Allow"].exists, "and asks no more")
         shot("12-allowed")
+
+        // Its questions come as a form: an option for one, several for the other.
+        composer.tap()
+        composer.typeText("a question")
+        app.buttons["Send"].tap()
+        let form = app.otherElements["questions"]
+        XCTAssertTrue(form.waitForExistence(timeout: 30), "the questions wait for you")
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        let send = form.buttons["Send answers"]
+        XCTAssertFalse(send.isEnabled, "not before each has an answer")
+        form.buttons["Blue"].tap()
+        form.buttons["S"].tap()
+        form.buttons["L"].tap()
+        shot("13-questions")
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+        let reached = app.staticTexts["You chose Blue in S, L."].waitForExistence(timeout: 30)
+        shot("14-answered")
+        if !reached, app.alerts.firstMatch.exists { XCTFail("refused: \(app.alerts.firstMatch.staticTexts.allElementsBoundByIndex.map(\.label))") }
+        XCTAssertTrue(reached, "the answers reached it")
+        XCTAssertFalse(form.exists)
     }
 }

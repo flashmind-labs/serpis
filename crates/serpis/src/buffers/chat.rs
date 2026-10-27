@@ -1213,7 +1213,7 @@ fn default_expanded(name: &str, result: Option<&ToolResultMessage>) -> bool {
         // Images are what you want to see.
         Some(r) if r.content.iter().any(|c| matches!(c, UserContent::Image { .. })) => true,
         // Claude Code's plan (its todo list, a plan to approve) is what you want to see.
-        _ => matches!(name, "edit" | "write" | "TodoWrite" | "ExitPlanMode"),
+        _ => matches!(name, "edit" | "write" | "TodoWrite" | "ExitPlanMode" | "AskUserQuestion"),
     }
 }
 
@@ -1331,6 +1331,22 @@ fn tool_lines(
             for l in arg(args, "plan").lines() {
                 body.push((StyledLine::new(l, Face::AssistantText), None));
             }
+        } else if name == "AskUserQuestion" {
+            // Claude Code's questions, with their options; then what was answered.
+            for q in args.get("questions").and_then(Value::as_array).into_iter().flatten() {
+                let header = q["header"].as_str().filter(|h| !h.is_empty()).map(|h| format!("{h} · ")).unwrap_or_default();
+                let multi = if q["multiSelect"].as_bool() == Some(true) { "  (any of)" } else { "" };
+                body.push((StyledLine::new(format!("{header}{}{multi}", q["question"].as_str().unwrap_or("")), Face::Bold), None));
+                for o in q["options"].as_array().into_iter().flatten() {
+                    let desc = o["description"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" — {d}")).unwrap_or_default();
+                    body.push((StyledLine::new(format!("  · {}{desc}", o["label"].as_str().unwrap_or("")), Face::ToolOutput), None));
+                }
+            }
+            if let Some(r) = result {
+                for l in tool_text(r).lines() {
+                    body.push((StyledLine::new(l, if r.is_error { Face::ToolError } else { Face::AssistantText }), None));
+                }
+            }
         } else if name == "bash" {
             let cmd = arg(args, "command");
             for l in cmd.lines().skip(1) {
@@ -1361,8 +1377,12 @@ fn tool_lines(
     }
 
     if let Some(a) = ask {
-        let always = a.always.as_ref().map(|w| format!(" · C-c C-a always ({w})")).unwrap_or_default();
-        body.push((StyledLine::new(format!("Allow it? C-c C-y yes{always} · C-c C-d no"), Face::Warning), None));
+        if name == "AskUserQuestion" {
+            body.push((StyledLine::new("Answer it? C-c C-y answer · C-c C-d skip", Face::Warning), None));
+        } else {
+            let always = a.always.as_ref().map(|w| format!(" · C-c C-a always ({w})")).unwrap_or_default();
+            body.push((StyledLine::new(format!("Allow it? C-c C-y yes{always} · C-c C-d no"), Face::Warning), None));
+        }
     }
     let total = body.len();
     let shown = if expanded {
@@ -1695,19 +1715,35 @@ impl Buffer for ChatBuffer {
                 hits.push((key, b));
                 resp.clicked()
             };
-            if button(ui, "allow", "Allow", "Allow it once (C-c C-y)", true) {
-                run = Some("chat-allow");
-            }
-            if let Some(a) = always {
-                if button(ui, "always", "Always", &format!("Allow it, and {a} from now on (C-c C-a)"), false) {
-                    run = Some("chat-allow-always");
+            let question = name == "AskUserQuestion";
+            if question {
+                if button(ui, "allow", "Answer", "Answer its questions in the minibuffer (C-c C-y)", true) {
+                    run = Some("chat-answer-questions");
+                }
+                if button(ui, "deny", "Skip", "Don't answer: it goes on without (C-c C-d)", false) {
+                    run = Some("chat-deny");
+                }
+            } else {
+                if button(ui, "allow", "Allow", "Allow it once (C-c C-y)", true) {
+                    run = Some("chat-allow");
+                }
+                if let Some(a) = always {
+                    if button(ui, "always", "Always", &format!("Allow it, and {a} from now on (C-c C-a)"), false) {
+                        run = Some("chat-allow-always");
+                    }
+                }
+                if button(ui, "deny", "Deny", "Refuse it (C-c C-d; chat-deny with a reason tells the agent why)", false) {
+                    run = Some("chat-deny");
                 }
             }
-            if button(ui, "deny", "Deny", "Refuse it (C-c C-d; chat-deny with a reason tells the agent why)", false) {
-                run = Some("chat-deny");
-            }
             let summary = serpis_chat::tool_summary(name, args);
-            let label = if summary.is_empty() { format!("Allow {name}?") } else { format!("Allow {name} {summary}?") };
+            let label = if question {
+                format!("Claude Code asks: {summary}")
+            } else if summary.is_empty() {
+                format!("Allow {name}?")
+            } else {
+                format!("Allow {name} {summary}?")
+            };
             let lx = r.left() + 14.0 * k;
             crate::chrome::text(&painter, egui::pos2(lx, cy), &label, small.clone(), theme.fg, (x - lx - 8.0 * k).max(0.0));
             hits.push(("ask", r));

@@ -125,21 +125,26 @@ struct ChatView: View {
 
     /// A tool call waiting for you: what it wants, and the answers.
     @ViewBuilder private var approval: some View {
-        if let tool = chat.waiting {
+        if let tool = chat.waiting, tool.name == "AskUserQuestion" {
+            QuestionsForm(tool: tool) { answers in
+                answer(tool, answers == nil ? "deny" : "answers", answers: answers)
+            }
+            .id(tool.id)
+        } else if let tool = chat.waiting {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Allow \(tool.doing.prefix(1).lowercased() + tool.doing.dropFirst())?", systemImage: "hand.raised")
                     .font(.subheadline.weight(.medium))
                     .lineLimit(2)
                 HStack(spacing: 8) {
-                    Button("Deny", role: .destructive) { Task { await chat.answer(tool.id, "deny") } }
+                    Button("Deny", role: .destructive) { answer(tool, "deny") }
                         .buttonStyle(.bordered)
                     if tool.ask?.always != nil {
-                        Button("Always") { Task { await chat.answer(tool.id, "always") } }
+                        Button("Always") { answer(tool, "always") }
                             .buttonStyle(.bordered)
                             .accessibilityHint(tool.ask?.always.map { "Also allows \($0) from now on" } ?? "")
                     }
                     Spacer()
-                    Button("Allow") { Task { await chat.answer(tool.id, "allow") } }
+                    Button("Allow") { answer(tool, "allow") }
                         .buttonStyle(.borderedProminent)
                 }
             }
@@ -147,6 +152,12 @@ struct ChatView: View {
             .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .accessibilityIdentifier("approval")
         }
+    }
+
+    /// Answer what `tool` asks, and follow what it does next, as after sending.
+    private func answer(_ tool: Tool, _ kind: String, answers: [String: String]? = nil) {
+        withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
+        Task { await chat.answer(tool.id, kind, answers: answers) }
     }
 
     private var composer: some View {
@@ -252,5 +263,83 @@ struct ChatView: View {
             }
         }
         images = out
+    }
+}
+
+/// The questions a tool asks (Claude Code's AskUserQuestion), as a form: an option for each
+/// (several where it takes several), or your own words; Send when each has an answer.
+struct QuestionsForm: View {
+    let tool: Tool
+    /// The answers (question to answer), or nil for Skip.
+    let done: ([String: String]?) -> Void
+    @State private var picked: [String: Set<String>] = [:]
+    @State private var own: [String: String] = [:]
+
+    private func answer(_ q: Question) -> String? {
+        let typed = (own[q.text] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { return typed }
+        let chosen = q.options.map(\.label).filter { picked[q.text]?.contains($0) == true }
+        return chosen.isEmpty ? nil : chosen.joined(separator: ", ")
+    }
+
+    var body: some View {
+        let questions = tool.questions
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(questions, id: \.text) { q in
+                        VStack(alignment: .leading, spacing: 6) {
+                            if !q.header.isEmpty {
+                                Text(q.header.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                            }
+                            Text(q.text).font(.subheadline.weight(.medium))
+                            ForEach(q.options, id: \.label) { o in
+                                let on = picked[q.text]?.contains(o.label) == true
+                                Button {
+                                    var set = q.multi ? (picked[q.text] ?? []) : []
+                                    if on { set.remove(o.label) } else { set.insert(o.label) }
+                                    picked[q.text] = set
+                                    own[q.text] = ""
+                                } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Image(systemName: on ? (q.multi ? "checkmark.square.fill" : "largecircle.fill.circle") : (q.multi ? "square" : "circle"))
+                                            .foregroundStyle(on ? Color.accentColor : .secondary)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(o.label).foregroundStyle(.primary)
+                                            if !o.detail.isEmpty {
+                                                Text(o.detail).font(.caption).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(o.label)
+                                .accessibilityAddTraits(on ? .isSelected : [])
+                            }
+                            TextField("Or your own answer", text: Binding(get: { own[q.text] ?? "" }, set: { own[q.text] = $0; if !$0.isEmpty { picked[q.text] = [] } }))
+                                .font(.subheadline)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Skip", role: .destructive) { done(nil) }
+                    .buttonStyle(.bordered)
+                Spacer()
+                let answers = Dictionary(uniqueKeysWithValues: questions.compactMap { q in answer(q).map { (q.text, $0) } })
+                Button("Send answers") { done(answers) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(answers.count < questions.count)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("questions")
     }
 }

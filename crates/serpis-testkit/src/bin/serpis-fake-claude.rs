@@ -117,7 +117,42 @@ fn main() {
         }
         let text = msg["message"]["content"].as_array().and_then(|b| b.iter().rev().find_map(|b| b["text"].as_str())).unwrap_or("").to_string();
         n += 1;
-        if text.contains("edit") {
+        if text.contains("question") {
+            // Two questions, the second multiple-choice; it says what it was told.
+            let input = json!({"questions": [
+                {"question": "Which color?", "header": "Color", "multiSelect": false, "options": [{"label": "Red", "description": "warm"}, {"label": "Blue", "description": "cool"}]},
+                {"question": "Which sizes?", "header": "Sizes", "multiSelect": true, "options": [{"label": "S", "description": "small"}, {"label": "M", "description": "medium"}, {"label": "L", "description": "large"}]},
+            ]});
+            start(&format!("m{n}a"));
+            ev(json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": format!("t{n}"), "name": "AskUserQuestion", "input": {}}}));
+            ev(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}));
+            ev(json!({"type": "content_block_stop", "index": 0}));
+            stop("tool_use");
+            out(json!({"type": "control_request", "request_id": format!("perm{n}"), "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": input, "tool_use_id": format!("t{n}")}}));
+            let answer = loop {
+                let Some(l) = lines.next() else { return };
+                let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                log(json!({"got": v}));
+                if v["type"] == "control_response" {
+                    break v;
+                }
+            };
+            let r = &answer["response"]["response"];
+            let reply = if r["behavior"] == "allow" {
+                let a = &r["updatedInput"]["answers"];
+                let said = format!("\"Which color?\"=\"{}\". \"Which sizes?\"=\"{}\"", a["Which color?"].as_str().unwrap_or(""), a["Which sizes?"].as_str().unwrap_or(""));
+                out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": format!("User has answered your questions: {said}.")}]}, "parent_tool_use_id": null}));
+                format!("You chose {} in {}.", a["Which color?"].as_str().unwrap_or("?"), a["Which sizes?"].as_str().unwrap_or("?"))
+            } else {
+                let why = r["message"].as_str().unwrap_or("denied").to_string();
+                out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": why, "is_error": true}]}, "parent_tool_use_id": null}));
+                "No answers.".to_string()
+            };
+            start(&format!("m{n}b"));
+            text_block(0, &reply);
+            stop("end_turn");
+            result(&session, None);
+        } else if text.contains("edit") {
             start(&format!("m{n}a"));
             ev(json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": format!("t{n}"), "name": "Edit", "input": {}}}));
             ev(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"file_path\": \"notes.txt\", "}}));

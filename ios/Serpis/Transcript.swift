@@ -281,6 +281,20 @@ struct WorkView: View {
 }
 
 /// A tool call, as the views read it.
+/// A question a tool asks, with the options it offers (several may be picked when `multi`).
+struct Question: Hashable {
+    var text: String
+    var header: String
+    var multi: Bool
+    var options: [(label: String, detail: String)]
+
+    static func == (a: Question, b: Question) -> Bool {
+        a.text == b.text && a.header == b.header && a.multi == b.multi && a.options.map(\.label) == b.options.map(\.label)
+    }
+
+    func hash(into h: inout Hasher) { h.combine(text) }
+}
+
 struct Tool: Hashable {
     var id: String
     var name: String
@@ -303,6 +317,19 @@ struct Tool: Hashable {
 
     func arg(_ k: String) -> String { args[k]?.string ?? "" }
 
+    /// The questions it asks the person (Claude Code's AskUserQuestion).
+    var questions: [Question] {
+        guard case .array(let qs)? = args["questions"] else { return [] }
+        return qs.map { q in
+            var options: [(label: String, detail: String)] = []
+            if case .array(let os)? = q["options"] {
+                options = os.map { ($0["label"]?.string ?? "", $0["description"]?.string ?? "") }
+            }
+            let multi = if case .bool(true)? = q["multiSelect"] { true } else { false }
+            return Question(text: q["question"]?.string ?? "", header: q["header"]?.string ?? "", multi: multi, options: options)
+        }
+    }
+
     var path: String { arg("path") }
     var file: String { (path as NSString).lastPathComponent }
     var folder: String {
@@ -321,6 +348,7 @@ struct Tool: Hashable {
         case "grep", "find": "Searching for \(arg("pattern"))"
         case "ls": "Listing \(file.isEmpty ? "files" : file)"
         case "web_search": "Searching the web"
+        case "AskUserQuestion": "Asking you"
         default: "Running \(name)"
         }
     }

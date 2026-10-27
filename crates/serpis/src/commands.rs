@@ -101,6 +101,48 @@ fn answer(ed: &mut Editor, d: serpis_proto::Decision) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Ask `questions[i]` in the minibuffer (`picked` so far, for a multiple-choice one), then the
+/// next; the answers go to chat `id` after the last.
+fn ask_question(ed: &mut Editor, id: BufferId, questions: Vec<Value>, i: usize, mut answers: std::collections::BTreeMap<String, String>, picked: Vec<String>) {
+    let Some(q) = questions.get(i).cloned() else {
+        let sent = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.answer(serpis_proto::Decision::Answers { answers })).unwrap_or(false);
+        if !sent {
+            ed.message("Nothing is waiting for an answer");
+        }
+        return;
+    };
+    let text = q["question"].as_str().unwrap_or("").to_string();
+    let multi = q["multiSelect"].as_bool().unwrap_or(false);
+    let header = q["header"].as_str().filter(|h| !h.is_empty()).map(|h| format!("{h} · ")).unwrap_or_default();
+    let count = if questions.len() > 1 { format!("({}/{}) ", i + 1, questions.len()) } else { String::new() };
+    let so_far = if picked.is_empty() { String::new() } else { format!(" [{}]", picked.join(", ")) };
+    let prompt = format!("{count}{header}{text}{so_far}{} ", if multi { " (pick each, then Done)" } else { "" });
+    const DONE: &str = "Done";
+    let mut cands: Vec<Candidate> = Vec::new();
+    if multi && !picked.is_empty() {
+        cands.push(Candidate::new(DONE).detail(format!("answer {}", picked.join(", "))));
+    }
+    for o in q["options"].as_array().into_iter().flatten() {
+        let label = o["label"].as_str().unwrap_or("").to_string();
+        if !picked.contains(&label) {
+            cands.push(Candidate::new(label).detail(o["description"].as_str().unwrap_or("").to_string()));
+        }
+    }
+    ed.completing_read(&prompt, cands, false, move |ed, c, input| {
+        // An option, or the person's own words (matching none).
+        let choice = c.map(|c| c.value).unwrap_or_else(|| input.trim().to_string());
+        let mut picked = picked;
+        if multi && choice != DONE {
+            if !choice.is_empty() {
+                picked.push(choice);
+            }
+            return ask_question(ed, id, questions, i, answers, picked);
+        }
+        answers.insert(text, if multi { picked.join(", ") } else { choice });
+        ask_question(ed, id, questions, i + 1, answers, vec![])
+    });
+}
+
 pub fn with_chat<R>(ed: &mut Editor, f: impl FnOnce(&mut ChatBuffer, &mut Editor) -> R) -> anyhow::Result<R> {
     let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
     ed.with_buffer_as::<ChatBuffer, R>(id, f).ok_or_else(|| anyhow::anyhow!("Not a chat buffer"))
@@ -780,7 +822,35 @@ pub fn install(ed: &mut Editor) {
             }
         })
     });
-    ed.define_command("chat-allow", "Allow the tool call waiting for you (Claude Code's permission prompts), once.", o, |ed, _| answer(ed, serpis_proto::Decision::Allow));
+    ed.define_command("chat-allow", "Allow the tool call waiting for you (Claude Code's permission prompts), once; questions it asks are answered (chat-answer-questions).", o, |ed, a| {
+        if with_chat(ed, |c, _| c.waiting().is_some_and(|w| w.1 == "AskUserQuestion"))? {
+            return ed.run_command("chat-answer-questions", a);
+        }
+        answer(ed, serpis_proto::Decision::Allow)
+    });
+    ed.define_command(
+        "chat-answer-questions",
+        "Answer the questions waiting for you (Claude Code's AskUserQuestion), one by one: pick an option or type your own answer; multiple-choice ones take picks until Done. Param: the answers, {question = answer}.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            let Some((_, name, args, _)) = with_chat(ed, |c, _| c.waiting())? else {
+                ed.message("Nothing is waiting for an answer");
+                return Ok(());
+            };
+            if name != "AskUserQuestion" {
+                ed.message("What waits isn't a question: chat-allow or chat-deny");
+                return Ok(());
+            }
+            if let Some(given) = a.params.first().and_then(Value::as_object) {
+                let answers = given.iter().map(|(q, v)| (q.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect();
+                return answer(ed, serpis_proto::Decision::Answers { answers });
+            }
+            let questions = args["questions"].as_array().cloned().unwrap_or_default();
+            ask_question(ed, id, questions, 0, Default::default(), vec![]);
+            Ok(())
+        },
+    );
     ed.define_command("chat-allow-always", "Allow the tool call waiting for you, and what its prompt offers from now on (\"edits in this session\", a rule for this project).", o, |ed, _| {
         answer(ed, serpis_proto::Decision::Always)
     });

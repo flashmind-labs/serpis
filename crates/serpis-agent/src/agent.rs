@@ -42,6 +42,8 @@ pub enum Answer {
     Always,
     /// Refuse it, telling the agent why (else that the person said no).
     Deny(Option<String>),
+    /// The person's answers to the questions it asks: question to answer.
+    Answers(std::collections::BTreeMap<String, String>),
 }
 
 /// Where the answer to a [`AgentEvent::ToolAsk`] goes; the first answer counts. Dropping

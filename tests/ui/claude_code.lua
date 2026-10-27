@@ -96,6 +96,104 @@ local steps = {
     when(function() return idle_with("Edited.")() and select(2, (serpis.chat.transcript() or ""):gsub("Edited%.", "")) >= 2 end, go)
     return false
   end,
+  function(go) return ask("a question", go) end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      serpis.defer(1500, function() d.screenshot(shots .. "/claude-code-question.png"); serpis.defer(500, go) end)
+      return false
+    end
+  end,
+  function(go)
+    -- Its questions wait on their card; C-c C-y asks them one by one in the minibuffer.
+    T.check("the questions show on their card", has("Color · Which color?") and has("· Red — warm") and has("Sizes · Which sizes?  (any of)"), true)
+    T.check("which says how to answer", has("Answer it? C-c C-y answer"), true)
+    T.check("no always for questions", d.composer()["always"], nil)
+    T.press("C-c C-y")
+    when(function() return (d.minibuffer() or ""):find("Which color?", 1, true) ~= nil end, go)
+    return false
+  end,
+  function(go)
+    T.check("the first question is asked", (d.minibuffer() or ""):find("(1/2) Color · Which color?", 1, true) ~= nil, true)
+    d.text("Blue")
+    serpis.defer(200, function()
+      T.press("RET")
+      when(function() return (d.minibuffer() or ""):find("Which sizes?", 1, true) ~= nil end, go)
+    end)
+    return false
+  end,
+  function(go)
+    -- Multiple choice: picks until Done.
+    d.text("S")
+    serpis.defer(200, function()
+      T.press("RET")
+      when(function() return (d.minibuffer() or ""):find("[S]", 1, true) ~= nil end, function()
+        d.text("L")
+        serpis.defer(200, function()
+          T.press("RET")
+          when(function() return (d.minibuffer() or ""):find("[S, L]", 1, true) ~= nil end, function()
+            d.text("Done")
+            serpis.defer(200, function()
+              T.press("RET")
+              when(idle_with("You chose Blue in S, L."), go)
+            end)
+          end)
+        end)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("the answers reached it", has("You chose Blue in S, L."), true)
+    T.check("and its card shows them", has('"Which color?"="Blue"'), true)
+    return ask("another question", go)
+  end,
+  function(go)
+    -- An answer of your own: words that match no option.
+    T.press("C-c C-y")
+    when(function() return (d.minibuffer() or ""):find("Which color?", 1, true) ~= nil end, function()
+      d.text("Green please")
+      serpis.defer(200, function()
+        T.press("RET")
+        when(function() return (d.minibuffer() or ""):find("Which sizes?", 1, true) ~= nil end, function()
+          d.text("M")
+          serpis.defer(200, function()
+            T.press("RET")
+            when(function() return (d.minibuffer() or ""):find("[M]", 1, true) ~= nil end, function()
+              d.text("Done")
+              serpis.defer(200, function()
+                T.press("RET")
+                when(idle_with("You chose Green please in M."), go)
+              end)
+            end)
+          end)
+        end)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("your own words are an answer", has("You chose Green please in M."), true)
+    return ask("question to skip", go)
+  end,
+  function(go)
+    click("deny")
+    when(idle_with("No answers."), go)
+    return false
+  end,
+  function(go)
+    T.check("Skip declines them", has("No answers."), true)
+    return ask("question for a script", go)
+  end,
+  function(go)
+    -- Scripts answer with the answers as the param.
+    serpis.command.run("chat-answer-questions", { ["Which color?"] = "Red", ["Which sizes?"] = "L" })
+    when(idle_with("You chose Red in L."), go)
+    return false
+  end,
+  function()
+    T.check("chat-answer-questions takes answers from a script", has("You chose Red in L."), true)
+  end,
   function()
     local log = sh("cat '" .. os.getenv("FAKE_CLAUDE_LOG") .. "'")
     T.check("Always passed Claude Code's suggestion back", log:find('"updatedPermissions":%[{"destination":"session","mode":"acceptEdits"') ~= nil, true)

@@ -221,6 +221,18 @@ fn chats_run_on_claude_code() {
     w.finish(&mut chat);
     assert!(chat.asking().is_empty() && chat.entries().iter().all(|e| !matches!(e, Entry::Tool { ask: Some(_), .. })));
 
+    // Its questions wait for answers, which go back with the questions.
+    chat.submit(&mut w.host, "a question".into(), vec![], false, None).unwrap();
+    let asked = w.ask(&mut chat);
+    assert_eq!(chat.state().step.as_deref(), Some("waiting for your answer: Which color? (+1 more)"));
+    let answers = [("Which color?", "Blue"), ("Which sizes?", "S, L")].into_iter().map(|(q, a)| (q.to_string(), a.to_string())).collect();
+    assert!(chat.answer(&asked, Decision::Answers { answers }));
+    w.finish(&mut chat);
+    assert_eq!(last_text(chat.entries()), "You chose Blue in S, L.");
+    let (_, got) = w.log();
+    let answer = &got.iter().rev().find(|g| g["type"] == "control_response").unwrap()["response"]["response"];
+    assert_eq!((&answer["behavior"], &answer["updatedInput"]["questions"][1]["header"]), (&json!("allow"), &json!("Sizes")), "{answer}");
+
     // A before-tool-call handler refuses it; so does claude-code-permission-prompts = deny.
     w.host.hooks = Some(Arc::new(NoNotes));
     w.send(&mut chat, "edit again");
@@ -232,6 +244,9 @@ fn chats_run_on_claude_code() {
     w.host.vars.insert("claude-code-permission-prompts".into(), json!("deny"));
     w.send(&mut chat, "edit once more");
     assert!(matches!(refused(&chat), (true, t) if t.contains("claude-code-permission-prompts")));
+    // With nobody asked, questions are put in the reply instead.
+    w.send(&mut chat, "one question more");
+    assert!(matches!(refused(&chat), (true, t) if t.contains("plain text")));
     w.host.vars.remove("claude-code-permission-prompts");
 
     // Stopping interrupts it; the reply cut short says so, and the process carries on.

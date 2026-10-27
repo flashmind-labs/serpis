@@ -466,9 +466,11 @@ impl Process {
                 if interrupted {
                     return Ok(json!({"behavior": "deny", "message": "Stopped by the user", "interrupt": true}));
                 }
-                // Its multiple-choice questions need a form serpis doesn't show yet.
-                if tool == "AskUserQuestion" {
-                    return Ok(json!({"behavior": "deny", "message": "serpis can't show multiple-choice questions: ask them in your reply as plain text instead, and wait for the answer."}));
+                // Its multiple-choice questions are for the person: with nobody asked, it asks in
+                // its reply instead.
+                let question = tool == "AskUserQuestion";
+                if question && !matches!(cfg.prompts, Prompts::Ask) {
+                    return Ok(json!({"behavior": "deny", "message": PLAIN_QUESTIONS}));
                 }
                 let gate = match &cfg.hooks {
                     Some(hooks) => hooks.before_tool_call(&name, args).await,
@@ -495,6 +497,14 @@ impl Process {
                     }
                 };
                 Ok(match answer {
+                    Answer::Answers(answers) => {
+                        let mut input = claude_input(tool, args);
+                        input["answers"] = json!(answers);
+                        json!({"behavior": "allow", "updatedInput": input})
+                    }
+                    // Questions are answered, not allowed.
+                    Answer::Allow | Answer::Always if question => json!({"behavior": "deny", "message": PLAIN_QUESTIONS}),
+                    Answer::Deny(None) if question => json!({"behavior": "deny", "message": "The user chose not to answer these questions. Go on without them, or ask in plain text."}),
                     Answer::Allow => json!({"behavior": "allow", "updatedInput": claude_input(tool, args)}),
                     Answer::Always => match suggestions {
                         Some(s) => json!({"behavior": "allow", "updatedInput": claude_input(tool, args), "updatedPermissions": s}),
@@ -507,6 +517,8 @@ impl Process {
         }
     }
 }
+
+const PLAIN_QUESTIONS: &str = "Nobody can answer a form right now: ask these questions in your reply as plain text instead, and wait for the answer.";
 
 /// What Claude Code's `permission_suggestions` would allow, in words: "edits in this
 /// session", "Bash(git status:*) in this project".
