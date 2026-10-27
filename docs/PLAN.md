@@ -453,7 +453,22 @@ Terminals (step 4):
 Phone app:
 - serpis-proto pulls in serpis-ai (and its HTTP client) for a few types; the phone carries it.
   Moving those types to a small crate would trim the app.
-- Not tried on a real phone or against a real machine yet.
+- Not tried on a real phone or against a real machine yet. `scripts/install-ios.sh` installs it
+  (signed with your own team) but has only run `--build-only`.
+- Pairing shares what the desktop's `ssh -G` says, which the phone can't always use:
+  - A rayfish peer added with `machine-add` is saved as an ordinary machine (`box.net.ray`), so
+    `phone-pair` offers it (it only skips peers still listed as rayfish's). Only rayfish on the
+    desktop resolves that name, and its keyless mesh SSH likely ignores `authorized_keys`.
+    Fix: leave out `.ray` names and say why in the picker. Sharing them for real means going
+    through a machine the phone can reach, a jump host (needs ProxyJump in the phone's ssh).
+  - Tailscale works if Tailscale is on on the phone (iOS apps go through its VPN). A short
+    MagicDNS name (`box`) should be carried as the full name (`box.tailXXXX.ts.net`), with a
+    note that the phone needs Tailscale. A machine behind Tailscale SSH doesn't check the
+    phone's key in `authorized_keys`; Tailscale's rules decide, and the phone would have to try
+    the "none" login method (it doesn't yet). Untested.
+  - Plain ssh breaks where the config does something the phone can't: ProxyJump/ProxyCommand
+    (`ssh -G` shows both: leave those out, with the reason), names only the desktop resolves
+    (`/etc/hosts`, a VPN's DNS), LAN-only addresses once the phone leaves home.
 
 Tests:
 - The first desktop UI run after a rebuild sometimes fails a few checks that pass on the next
