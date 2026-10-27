@@ -212,6 +212,14 @@ local steps = {
     return false
   end,
   function(go)
+    when(function() return (serpis.buffer.text(serpis.buffer.current()) or ""):find("Max plan", 1, true) ~= nil end, function()
+      local shots = os.getenv("SERPIS_TEST_SHOTS")
+      if not shots then return go() end
+      serpis.defer(1000, function() d.screenshot(shots .. "/claude-code-usage.png"); serpis.defer(500, go) end)
+    end)
+    return false
+  end,
+  function(go)
     local cur = serpis.buffer.current()
     local page = serpis.buffer.text(cur) or ""
     T.check("claude-code-usage shows the usage page", serpis.buffer.name(cur), "*claude-code-usage*")
@@ -220,6 +228,22 @@ local steps = {
     T.check("a model's week", page:find("This week, Fake", 1, true) ~= nil, true)
     T.check("extra usage", page:find("Extra usage: on, 25% of its monthly limit used.", 1, true) ~= nil, true)
     T.check("and the advice", page:find("Start fresh when you switch tasks (90% of it): run /clear", 1, true) ~= nil, true)
+    local function asked() return select(2, sh("cat '" .. os.getenv("FAKE_CLAUDE_LOG") .. "'"):gsub('"subtype":"get_usage"', "")) end
+    local before = asked()
+    -- g asks again, in place.
+    T.press("g")
+    when(function() return asked() > before and (serpis.buffer.text(cur) or ""):find("Max plan", 1, true) ~= nil end, function()
+      T.check("g asks Claude Code again", asked(), before + 1)
+      T.check("in the same page", serpis.buffer.name(serpis.buffer.current()), "*claude-code-usage*")
+      T.press("q")
+      serpis.defer(300, function()
+        T.check("q closes it", serpis.buffer.name(serpis.buffer.current()) ~= "*claude-code-usage*", true)
+        go()
+      end)
+    end)
+    return false
+  end,
+  function(go)
     -- Scripts get the same answer.
     serpis.agent.claude_code_usage(function(u, err)
       T.check("serpis.agent.claude_code_usage answers", u and u.rate_limits.five_hour.utilization, 42)

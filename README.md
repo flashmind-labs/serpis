@@ -359,10 +359,11 @@ its reply instead.
 `claude-code-permission-mode`, `claude-code-args` and `claude-code-path` set the rest.
 `cargo run -p serpis-chat --example claude_code_smoke -- <dir> <prompt>` tries it headless.
 
-`claude-code-usage` shows your subscription's usage as Claude Code's `/usage` reports it: the
-current five-hour session and the week (and any per-model weeks), how full each is and when it
-resets, extra usage, where the week went, and Claude Code's advice from the machine's last week
-of transcripts (`claude-code-usage-advice` = `false` skips that scan). It asks the current chat's
+`claude-code-usage` shows your subscription's usage as Claude Code's `/usage` reports it, in a
+page of its own: the current five-hour session and the week (and any per-model weeks), each with
+a bar that turns yellow and then red as it fills and when it resets, extra usage, where the week
+went, and Claude Code's advice from the machine's last week of transcripts
+(`claude-code-usage-advice` = `false` skips that scan). `g` asks again, `q` closes it. It asks the current chat's
 machine, else this one (or the machine you name), and nothing reaches a model. Scripts get the
 same answer from `serpis.agent.claude_code_usage(function(usage, err) ... end, {machine = ...})`.
 
