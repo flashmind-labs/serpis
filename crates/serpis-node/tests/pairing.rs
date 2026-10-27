@@ -56,21 +56,21 @@ fn a_phone_pairs_once_the_desktop_says_so() {
         assert!(text.starts_with("ssh-rsa AAAAB3Nza me@laptop\n"), "what was there stays: {text}");
 
         // The phone offers its key; the desktop hears of it, and says yes.
-        let phone = pair("code1", &serde_json::json!({"key": format!("{PHONE_KEY} phone"), "label": "Ivan’s iPhone\n"}).to_string());
+        let phone = pair("code1", &serde_json::json!({"key": format!("{PHONE_KEY} phone"), "label": "Alice’s iPhone\n"}).to_string());
         let asked = loop {
             match tokio::time::timeout(Duration::from_secs(10), events.recv()).await.expect("asked").expect("open") {
                 Event::PairRequested { pairing, key, label } => break (pairing, key, label),
                 _ => continue,
             }
         };
-        assert_eq!(asked, ("code1".to_string(), PHONE_KEY.to_string(), "Ivan’s iPhone".to_string()));
-        desktop.call(Request::AuthorizeKey { key: PHONE_KEY.into(), comment: "serpis phone Ivan’s iPhone".into() }).await.unwrap();
+        assert_eq!(asked, ("code1".to_string(), PHONE_KEY.to_string(), "Alice’s iPhone".to_string()));
+        desktop.call(Request::AuthorizeKey { key: PHONE_KEY.into(), comment: "serpis phone Alice’s iPhone".into() }).await.unwrap();
         desktop.call(Request::PairAnswer { pairing: "code1".into(), approved: true }).await.unwrap();
         desktop.call(Request::EndPairing { pairing: "code1".into() }).await.unwrap();
         let said = tokio::task::spawn_blocking(move || phone.join().unwrap()).await.unwrap();
         assert_eq!(said, serde_json::json!({"approved": true}));
         let text = std::fs::read_to_string(&keys).unwrap();
-        assert_eq!(text, format!("ssh-rsa AAAAB3Nza me@laptop\n{PHONE_KEY} serpis phone Ivan’s iPhone\n"));
+        assert_eq!(text, format!("ssh-rsa AAAAB3Nza me@laptop\n{PHONE_KEY} serpis phone Alice’s iPhone\n"));
 
         // Ended, the code is no use; a pairing the desktop declines says no.
         let again = pair("code1", &serde_json::json!({"key": PHONE_KEY}).to_string());

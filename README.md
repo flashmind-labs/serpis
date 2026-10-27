@@ -23,6 +23,21 @@ login shell's environment once (PATH, exported API keys), like VS Code; from a t
 the terminal's (`SERPIS_NO_SHELL_ENV=1` turns the import off). Rust plugins must be rebuilt
 against the installed version. The icon is drawn by `scripts/make-icon.py`.
 
+## Install (iPhone)
+
+```sh
+scripts/install-ios.sh [iPhone]   # builds the app and installs it on your iPhone (by cable, or paired over the network)
+```
+
+It needs Xcode, `xcodegen` (`brew install xcodegen`) and Rust (the iOS targets are added with
+rustup). It signs with your own Apple developer team, found from the Apple Development
+certificate in your keychain (`SERPIS_IOS_TEAM` chooses one), and keeps it in the untracked
+`ios/Local.xcconfig`. A free Apple ID works (Xcode > Settings > Accounts); its apps run for 7
+days, then run the script again. `--build-only` builds without a phone. The first time, the
+phone needs Developer Mode (Settings > Privacy & Security) and to trust your developer profile
+(Settings > General > VPN & Device Management). Then run `phone-pair` in serpis on the desktop
+and scan its code with the Camera.
+
 ## Run
 
 ```sh

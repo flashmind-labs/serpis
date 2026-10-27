@@ -11,7 +11,8 @@ set -euo pipefail
 # which ring's C half picks up and builds against the wrong SDK with: it starts again clean.
 if [ -n "${XCODE_PRODUCT_BUILD_VERSION:-}" ] && [ -z "${SERPIS_CLEAN_ENV:-}" ]; then
     exec env -i SERPIS_CLEAN_ENV=1 HOME="$HOME" USER="${USER:-}" TMPDIR="${TMPDIR:-/tmp}" \
-        PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" "$0" "$@"
+        CARGO_HOME="${CARGO_HOME:-}" RUSTUP_HOME="${RUSTUP_HOME:-}" SERPIS_CARGO_BIN="$(dirname "$(command -v cargo 2>/dev/null || echo "${CARGO_HOME:-$HOME/.cargo}/bin/cargo")")" \
+        PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin" "$0" "$@"
 fi
 
 out="${1:?where to put the framework and bindings}"
@@ -19,7 +20,12 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Xcode runs this with a PATH of its own that has no cargo on it, and with the SDK of whatever
 # it builds set, which ring's C half would compile against instead of the target's.
-export PATH="$HOME/.cargo/bin:$PATH"
+# (Wherever rustup or another install put it: CARGO_HOME, the usual places, or where the shell
+# that started Xcode's build found it.)
+export PATH="${SERPIS_CARGO_BIN:+$SERPIS_CARGO_BIN:}${CARGO_HOME:-$HOME/.cargo}/bin:$PATH:/opt/homebrew/bin:/usr/local/bin"
+[ -n "${CARGO_HOME:-}" ] || unset CARGO_HOME
+[ -n "${RUSTUP_HOME:-}" ] || unset RUSTUP_HOME
+command -v cargo >/dev/null || { echo "error: cargo isn't found (install Rust from https://rustup.rs)" >&2; exit 1; }
 unset SDKROOT IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET
 export IPHONEOS_DEPLOYMENT_TARGET=18.0
 # The workspace links std dynamically for the desktop's plugins (.cargo/config.toml); the app

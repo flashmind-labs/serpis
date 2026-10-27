@@ -5,7 +5,12 @@
 #   ios/ui-test.sh [shots-dir]
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-device="${SERPIS_TEST_DEVICE:-iPhone 18 Pro}"
+# The simulator: SERPIS_TEST_DEVICE, else an iPhone one that is running, else a Pro, else any.
+sims="$(xcrun simctl list devices available | grep -E '^ +iPhone')"
+pick() { sed -n 's/^ *\(iPhone[^(]*\) (.*/\1/p' | sed 's/ *$//' | head -1; }
+device="${SERPIS_TEST_DEVICE:-$( { grep Booted <<<"$sims"; grep ' Pro (' <<<"$sims"; echo "$sims"; } | pick)}"
+[ -n "$device" ] || { echo "no iPhone simulator: add one in Xcode (Window > Devices and Simulators)"; exit 1; }
+command -v xcodegen >/dev/null || { echo "xcodegen is needed: brew install xcodegen"; exit 1; }
 machine="$(mktemp -d /tmp/sim.XXXXXX)"
 "$here/test-machine.sh" "$machine" > "$machine/env" 2> "$machine/log" &
 pid=$!
@@ -18,6 +23,6 @@ args=()
 while IFS='=' read -r k v; do args+=("TEST_RUNNER_$k=$v"); done < "$machine/env"
 if [ -n "${1:-}" ]; then mkdir -p "$1"; args+=("TEST_RUNNER_SERPIS_SHOTS=$(cd "$1" && pwd)"); fi
 cd "$here"
-/opt/homebrew/bin/xcodegen -q
+xcodegen -q
 env "${args[@]}" xcodebuild -project Serpis.xcodeproj -scheme Serpis -destination "platform=iOS Simulator,name=$device" \
   -derivedDataPath build/dd -collect-test-diagnostics never test 2>&1 | grep -E "error:|Test Case .*(passed|failed)|XCTAssert|\*\* TEST|Skipped" || true

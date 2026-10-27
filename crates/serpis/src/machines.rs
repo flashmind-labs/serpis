@@ -582,7 +582,7 @@ pub fn tick(ed: &mut Editor) {
     }
 }
 
-/// Its name here (from the host: `slimbook` for `me@slimbook.tail1234.ts.net`).
+/// Its name here (from the host: `box` for `me@box.tail1234.ts.net`).
 pub fn default_name(dest: &str) -> String {
     let host = dest.trim_start_matches("ssh://");
     let host = host.rsplit('@').next().unwrap_or(host);
@@ -767,10 +767,10 @@ mod tests {
 
     #[test]
     fn bonjour_output() {
-        let browse = "Browsing for _ssh._tcp.local.\nDATE: ---Mon 26 Oct 2026---\n12:00:00.000  ...STARTING...\nTimestamp     A/R    Flags  if Domain               Service Type         Instance Name\n12:00:00.100  Add        3  14 local.               _ssh._tcp.           slimbook\n12:00:00.100  Add        2  14 local.               _ssh._tcp.           Ivan’s Mac mini\n";
-        assert_eq!(dns_sd_instances(browse), ["slimbook", "Ivan’s Mac mini"]);
-        let look = "Lookup slimbook._ssh._tcp.local.\n12:00:00.200  slimbook._ssh._tcp.local. can be reached at slimbook.local.:22 (interface 14)\n";
-        assert_eq!(dns_sd_resolved(look), Some(("slimbook.local".into(), 22)));
+        let browse = "Browsing for _ssh._tcp.local.\nDATE: ---Mon 26 Oct 2026---\n12:00:00.000  ...STARTING...\nTimestamp     A/R    Flags  if Domain               Service Type         Instance Name\n12:00:00.100  Add        3  14 local.               _ssh._tcp.           box\n12:00:00.100  Add        2  14 local.               _ssh._tcp.           Alice’s Mac mini\n";
+        assert_eq!(dns_sd_instances(browse), ["box", "Alice’s Mac mini"]);
+        let look = "Lookup box._ssh._tcp.local.\n12:00:00.200  box._ssh._tcp.local. can be reached at box.local.:22 (interface 14)\n";
+        assert_eq!(dns_sd_resolved(look), Some(("box.local".into(), 22)));
         // (As avahi-browse prints them: escaped names, the service type in words.)
         let avahi = "+;wlan0;IPv4;my\\032Mac;SSH Remote Terminal;local\n=;wlan0;IPv4;my\\032Mac;SSH Remote Terminal;local;my-Mac.local;192.168.1.128;22;\n=;wlan0;IPv4;box;SSH Remote Terminal;local;box.local;192.168.1.9;2222;\n";
         assert_eq!(avahi_resolved(avahi), [("my-Mac.local".to_string(), 22), ("box.local".to_string(), 2222)]);
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn names_from_destinations() {
-        assert_eq!(default_name("me@slimbook.tail1.ts.net"), "slimbook");
+        assert_eq!(default_name("me@lab.tail1.ts.net"), "lab");
         assert_eq!(default_name("ssh://me@box.local:2222"), "box");
         assert_eq!(default_name("10.0.0.5"), "10.0.0.5");
         assert_eq!(default_name("gpu-box"), "gpu-box");
