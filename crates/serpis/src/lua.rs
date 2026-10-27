@@ -151,8 +151,13 @@ pub fn json_of(lua: &Lua, v: LuaValue) -> mlua::Result<Value> {
 /// Call a Lua function with the editor published, converting JSON args and result.
 /// `lua` must be the state that owns `f`.
 pub fn call(ed: &mut Editor, lua: &Lua, f: &Function, arg: &Value) -> Option<Value> {
+    call_with(ed, lua, f, std::slice::from_ref(arg))
+}
+
+/// [`call`] with several arguments.
+pub fn call_with(ed: &mut Editor, lua: &Lua, f: &Function, args: &[Value]) -> Option<Value> {
     let result = with_editor_ptr(ed, || -> mlua::Result<Value> {
-        let a = lua_of(lua, arg)?;
+        let a = args.iter().map(|v| lua_of(lua, v)).collect::<mlua::Result<mlua::MultiValue>>()?;
         let r: LuaValue = f.call(a)?;
         Ok(match r {
             LuaValue::Nil => Value::Null,
@@ -1096,6 +1101,22 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     agent.set("find_model", lua.create_function(|lua, spec: String| {
         let v = ed(|e| e.find_model(&spec).map(|m| json!({"spec": spec, "provider": m.provider, "id": m.id, "name": m.name, "reasoning": m.reasoning, "configured": e.provider_configured(&m.provider)})))?;
         lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
+    // serpis.agent.claude_code_usage(function(usage, err) ... end, {machine = "box", advice = false}?):
+    // Claude Code's /usage on that machine (this one by default), as its CLI answers.
+    agent.set("claude_code_usage", lua.create_function(|lua, (f, opts): (Function, Option<Table>)| {
+        let machine: Option<String> = opts.as_ref().and_then(|o| o.get("machine").ok());
+        let advice: Option<bool> = opts.as_ref().and_then(|o| o.get("advice").ok());
+        let l = lua.clone();
+        ed(|e| {
+            let advice = advice.unwrap_or_else(|| e.var_bool("claude-code-usage-advice"));
+            crate::claude_usage::fetch(e, machine, advice, move |e, r| {
+                let _ = match r {
+                    Ok(u) => call(e, &l, &f, &u),
+                    Err(err) => call_with(e, &l, &f, &[Value::Null, json!(err)]),
+                };
+            })
+        })
     })?)?;
     s.set("agent", agent)?;
 

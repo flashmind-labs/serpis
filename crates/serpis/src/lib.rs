@@ -12,6 +12,7 @@ pub mod buffer;
 pub mod buffers;
 pub use serpis_chat::cache_watch;
 pub mod chat_api;
+pub mod claude_usage;
 pub mod extend;
 pub mod frecency;
 pub mod highlight;
@@ -155,6 +156,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("claude-code-permission-mode", json!("default"), "Claude Code's permission mode for its chats: \"default\", \"acceptEdits\", \"plan\", \"auto\", \"dontAsk\" or \"bypassPermissions\". Its own settings' allow and deny rules apply in every mode.");
     ed.defvar("claude-code-permission-prompts", json!("ask"), "Who answers Claude Code's permission prompts that before-tool-call handlers (and tool-ask handlers) let through: \"ask\" (you: the tool's card and a bar above the composer wait for Allow, Always or Deny, from any window or the phone; C-c C-y, C-c C-a, C-c C-d), \"allow\" (like serpis's own agent, which never asks) or \"deny\". Tools its rules allow, such as Read, never prompt.");
     ed.defvar("claude-code-args", json!([]), "More arguments for the claude CLI of Claude Code chats, e.g. [\"--append-system-prompt\", \"Be brief.\"] or [\"--mcp-config\", \"~/mcp.json\"].");
+    ed.defvar("claude-code-usage-advice", json!(true), "claude-code-usage also shows Claude Code's advice on what spends the subscription, from a scan of the machine's last week of Claude Code transcripts (a moment longer).");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
     ed.defvar("extensions-disabled", json!([]), "Lua extensions in <config>/extensions not to load, by name (\"max-money\" for max-money.lua).");
     ed.defvar("terminal-image-storage-mb", json!(320), "Memory for images programs show in a terminal (Kitty graphics protocol: yazi previews, kitten icat...), per terminal; 0 turns terminal images off.");

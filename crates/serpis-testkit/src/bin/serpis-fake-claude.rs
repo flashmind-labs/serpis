@@ -90,6 +90,28 @@ fn main() {
             out(json!({"type": "system", "subtype": "init", "session_id": session}));
             continue;
         }
+        if msg["type"] == "control_request" && msg["request"]["subtype"] == "get_usage" {
+            let window = |pct: u32, at: &str| json!({"utilization": pct, "resets_at": at});
+            let behaviors = (msg["request"]["skip_behaviors"] != true).then(|| {
+                let tip = json!({"key": "long_context", "pct": 90, "title": "Start fresh when you switch tasks", "detail": "run /clear"});
+                json!({"day": {"request_count": 12, "session_count": 2, "recommendations": [tip]}, "week": {"request_count": 80, "session_count": 5, "recommendations": [tip]}})
+            });
+            let usage = json!({
+                "subscription_type": "max",
+                "rate_limits_available": true,
+                "rate_limits": {
+                    "five_hour": window(42, "2030-01-01T05:00:00Z"),
+                    "seven_day": window(7, "2030-01-04T00:00:00Z"),
+                    "seven_day_opus": null,
+                    "model_scoped": [{"display_name": "Fake", "utilization": 61, "resets_at": "2030-01-04T00:00:00Z"}],
+                    "extra_usage": {"is_enabled": true, "monthly_limit": 5000, "used_credits": 1250, "utilization": 25, "currency": "USD"},
+                    "seven_day_breakdown": {"rows": [{"display_name": "Claude Code", "percent": 80}, {"display_name": "Chats", "percent": 20}]},
+                },
+                "behaviors": behaviors,
+            });
+            out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": usage}}));
+            continue;
+        }
         if msg["type"] != "user" {
             continue;
         }

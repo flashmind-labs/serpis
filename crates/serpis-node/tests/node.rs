@@ -93,7 +93,9 @@ fn a_node_runs_chats_for_clients_anywhere() {
     unsafe { std::env::set_var("HOME", root.join("home")) };
     let node_dir = root.join("node");
     std::fs::create_dir_all(&node_dir).unwrap();
-    std::fs::write(node_dir.join("settings.json"), json!({"session-directory": root.join("sessions")}).to_string()).unwrap();
+    // Claude Code there is the stand-in (its usage is made up).
+    let settings = json!({"session-directory": root.join("sessions"), "claude-code-path": serpis_testkit::fake_claude()});
+    std::fs::write(node_dir.join("settings.json"), settings.to_string()).unwrap();
     let socket = node_dir.join("node.sock");
     let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(agent.clone()), config_dir: Some(node_dir.join("config")) }, rt.handle().clone()).unwrap();
     rt.block_on(async {
@@ -104,6 +106,10 @@ fn a_node_runs_chats_for_clients_anywhere() {
         assert!(!a.hello.serpis.is_empty());
         let Response::Models { models } = a.call(Request::Models).await.unwrap() else { panic!() };
         assert!(models.iter().any(|m| m.model == "mock/anthropic/claude-sonnet-4.5"), "{models:?}");
+        // Its Claude Code's /usage, as the CLI there answers.
+        let Response::ClaudeCodeUsage { usage } = a.call(Request::ClaudeCodeUsage { advice: false }).await.unwrap() else { panic!() };
+        assert_eq!(usage["rate_limits"]["five_hour"]["utilization"], 42, "{usage}");
+        assert!(usage["behaviors"].is_null(), "no advice asked for: {usage}");
 
         // Mistakes are answered, not fatal.
         let err = a.call(Request::New { cwd: "/nowhere/at/all".into(), model: None, thinking: None, chat: None }).await.unwrap_err();

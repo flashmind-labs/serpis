@@ -95,6 +95,24 @@ pub struct Discovered {
 /// Start `claude`, ask it for its models and account (the `initialize` handshake, no prompt:
 /// nothing is sent to a model), and stop it.
 pub async fn discover(binary: &Path) -> Result<Discovered> {
+    let r = control(binary, None).await?;
+    let models = r["models"].as_array().map(|a| a.iter().filter_map(model_from_init).collect()).unwrap_or_default();
+    let account = r["account"].as_object().cloned().unwrap_or_default();
+    Ok(Discovered { models, account })
+}
+
+/// Start `claude`, ask it for its `/usage` (the `get_usage` request: the subscription, its
+/// rate-limit windows, what extra usage it has, and, with `advice`, what the last week's
+/// transcripts say spends it), and stop it. Nothing is sent to a model. The answer is the
+/// CLI's own (`{subscription_type, rate_limits_available, rate_limits: {five_hour,
+/// seven_day, ...}, behaviors}`); its shape is experimental there and may change.
+pub async fn usage(binary: &Path, advice: bool) -> Result<Value> {
+    control(binary, Some(json!({"subtype": "get_usage", "skip_behaviors": !advice}))).await
+}
+
+/// The `initialize` handshake with a fresh `claude`, then `request` if any: the answer to the
+/// last one sent.
+async fn control(binary: &Path, request: Option<Value>) -> Result<Value> {
     let mut child = tokio::process::Command::new(binary)
         .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence"])
         .stdin(Stdio::piped())
@@ -105,27 +123,29 @@ pub async fn discover(binary: &Path) -> Result<Discovered> {
         .with_context(|| format!("starting {}", binary.display()))?;
     let mut stdin = child.stdin.take().context("no stdin")?;
     let mut lines = BufReader::new(child.stdout.take().context("no stdout")?).lines();
-    let hello = json!({"type": "control_request", "request_id": "serpis-discover", "request": {"subtype": "initialize"}});
-    stdin.write_all(format!("{hello}\n").as_bytes()).await?;
-    let answer = tokio::time::timeout(Duration::from_secs(30), async {
+    let mut sent = vec![json!({"subtype": "initialize"})];
+    sent.extend(request);
+    let last = format!("serpis-{}", sent.len());
+    for (i, r) in sent.iter().enumerate() {
+        let line = json!({"type": "control_request", "request_id": format!("serpis-{}", i + 1), "request": r});
+        stdin.write_all(format!("{line}\n").as_bytes()).await?;
+    }
+    let answer = tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(line) = lines.next_line().await? {
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            if v["type"] == "control_response" && v.pointer("/response/request_id") == Some(&json!("serpis-discover")) {
+            if v["type"] == "control_response" && v.pointer("/response/request_id").and_then(Value::as_str) == Some(last.as_str()) {
                 return Ok(v);
             }
         }
         bail!("claude exited before answering")
     })
     .await
-    .context("claude didn't answer in 30s")??;
+    .context("claude didn't answer in a minute")??;
     let _ = child.kill().await;
-    let r = answer.pointer("/response/response").cloned().unwrap_or_default();
     if answer.pointer("/response/subtype").and_then(Value::as_str) == Some("error") {
-        bail!("{}", answer.pointer("/response/error").and_then(Value::as_str).unwrap_or("claude refused the handshake"));
+        bail!("{}", answer.pointer("/response/error").and_then(Value::as_str).unwrap_or("claude refused"));
     }
-    let models = r["models"].as_array().map(|a| a.iter().filter_map(model_from_init).collect()).unwrap_or_default();
-    let account = r["account"].as_object().cloned().unwrap_or_default();
-    Ok(Discovered { models, account })
+    Ok(answer.pointer("/response/response").cloned().unwrap_or_default())
 }
 
 #[cfg(test)]

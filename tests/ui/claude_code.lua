@@ -101,6 +101,40 @@ local steps = {
     T.check("Always passed Claude Code's suggestion back", log:find('"updatedPermissions":%[{"destination":"session","mode":"acceptEdits"') ~= nil, true)
     T.check("the chat's session is Claude Code's", log:find('"--session-id"', 1, true) ~= nil, true)
   end,
+  function(go)
+    -- Its /usage: the stand-in's made-up plan, asked through M-x.
+    T.press("M-x")
+    when(function() return d.minibuffer() ~= nil end, function()
+      d.text("claude-code-usage")
+      serpis.defer(300, function()
+        T.press("RET")
+        when(function() return serpis.buffer.name(serpis.buffer.current()) == "*claude-code-usage*" end, go)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    local cur = serpis.buffer.current()
+    local page = serpis.buffer.text(cur) or ""
+    T.check("claude-code-usage shows the usage page", serpis.buffer.name(cur), "*claude-code-usage*")
+    T.check("with the plan", page:find("Claude Code usage · Max plan", 1, true) ~= nil, true)
+    T.check("the session window", page:find("Current session", 1, true) ~= nil and page:find("42%", 1, true) ~= nil, true)
+    T.check("a model's week", page:find("This week, Fake", 1, true) ~= nil, true)
+    T.check("extra usage", page:find("Extra usage: on, 25% of its monthly limit used.", 1, true) ~= nil, true)
+    T.check("and the advice", page:find("Start fresh when you switch tasks (90% of it): run /clear", 1, true) ~= nil, true)
+    -- Scripts get the same answer.
+    serpis.agent.claude_code_usage(function(u, err)
+      T.check("serpis.agent.claude_code_usage answers", u and u.rate_limits.five_hour.utilization, 42)
+      T.check("without the advice when asked so", u and u.behaviors, nil)
+      T.check("and no error", err, nil)
+      go()
+    end, { advice = false })
+    return false
+  end,
+  function()
+    local log = sh("cat '" .. os.getenv("FAKE_CLAUDE_LOG") .. "'")
+    T.check("advice = false skipped the transcript scan", log:find('"skip_behaviors":true', 1, true) ~= nil, true)
+  end,
 }
 local i = 0
 local function go()

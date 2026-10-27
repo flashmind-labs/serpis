@@ -300,7 +300,12 @@ Next:
 - Mid-turn steering: messages sent while it works wait for the turn's end today.
 - Moving a chat carries serpis's session but not Claude Code's (`~/.claude/projects/...`); it is
   caught up with the conversation as text instead. Carry the session file along.
-- The account (`initialize`'s `account`, rate limit events) in the model picker and header.
+- *Done*: `claude-code-usage` (and `serpis.agent.claude_code_usage`): the CLI's `get_usage`
+  control request (its `/usage`, experimental there: plan windows, extra usage, advice), asked
+  of the chat's machine (proto `ClaudeCodeUsage`) or this one; the stand-in answers made-up
+  numbers. Next there: the session's share in the header from `rate_limit_event`s, and the
+  phone (a usage sheet from the model menu).
+- The account (`initialize`'s `account`) in the model picker and header.
 - Claude Code's `system/compact_boundary` and its context use in the header.
 
 ## Chats and terminals on other machines, and the iOS app

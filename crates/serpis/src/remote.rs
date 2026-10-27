@@ -819,23 +819,28 @@ pub fn request(ed: &mut Editor, machine: &str, request: Request, done: impl FnOn
     with_client(ed, machine, move |ed, c| match c {
         Err(e) => done(ed, Err(e)),
         Ok(c) => {
-            let token = ed.remote.next_answer;
-            ed.remote.next_answer += 1;
-            ed.remote.answers.insert(token, Box::new(done));
-            let main = ed.main_sender();
             let older = c.hello.host.clone();
             // Sent now: requests reach the node in the order they are made.
             let answer = c.call(request);
-            ed.rt.spawn(async move {
-                let r = answer.await.map_err(|e| older_node(&older, format!("{e:#}")));
-                tracing::debug!("answer {token}: {r:?}");
-                main.send(move |ed| {
-                    if let Some(done) = ed.remote.answers.remove(&token) {
-                        done(ed, r);
-                    }
-                });
-            });
+            answer_with(ed, async move { answer.await.map_err(|e| older_node(&older, format!("{e:#}"))) }, done);
         }
+    });
+}
+
+/// Await `answer` off the UI thread and give it to `done` on it (`done` needn't be Send).
+pub fn answer_with(ed: &mut Editor, answer: impl Future<Output = Result<Response, String>> + Send + 'static, done: impl FnOnce(&mut Editor, Result<Response, String>) + 'static) {
+    let token = ed.remote.next_answer;
+    ed.remote.next_answer += 1;
+    ed.remote.answers.insert(token, Box::new(done));
+    let main = ed.main_sender();
+    ed.rt.spawn(async move {
+        let r = answer.await;
+        tracing::debug!("answer {token}: {r:?}");
+        main.send(move |ed| {
+            if let Some(done) = ed.remote.answers.remove(&token) {
+                done(ed, r);
+            }
+        });
     });
 }
 

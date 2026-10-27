@@ -912,6 +912,11 @@ impl Node {
             self.answer_service(client, call.id, call.request);
             return false;
         }
+        // Claude Code's usage: its CLI is asked, which takes a moment.
+        if let Request::ClaudeCodeUsage { advice } = call.request {
+            self.answer_usage(client, call.id, advice);
+            return false;
+        }
         // A phone proposing its key: answered once the desktop says.
         if let Request::Pair { pairing, key, label } = call.request {
             if let Err(message) = self.pair(client, call.id, pairing, key, label) {
@@ -1147,6 +1152,7 @@ impl Node {
                 Response::Ok
             }
             Request::Pack { .. }
+            | Request::ClaudeCodeUsage { .. }
             | Request::Unpack { .. }
             | Request::Terminals
             | Request::NewTerminal { .. }
@@ -1263,6 +1269,22 @@ impl Node {
             }
             .await
             .unwrap_or_else(|e| Response::Error { message: format!("{e:#}") });
+            let _ = msgs.send(Msg::Reply { client, id, response });
+        });
+    }
+
+    /// Ask this machine's `claude` for its usage, and answer when it does.
+    fn answer_usage(&mut self, client: u64, id: u64, advice: bool) {
+        let set = self.lua.var("claude-code-path").and_then(|v| v.as_str().filter(|p| !p.is_empty()).map(from_home));
+        let (msgs, binary) = (self.msgs.clone(), set.or_else(|| self.registry.claude_code_binary()));
+        self.rt.spawn(async move {
+            let response = match binary {
+                None => Response::Error { message: "Claude Code isn't installed on this machine (claude not found; set claude-code-path)".into() },
+                Some(b) => match serpis_ai::claude_code::usage(&b, advice).await {
+                    Ok(usage) => Response::ClaudeCodeUsage { usage },
+                    Err(e) => Response::Error { message: format!("{e:#}") },
+                },
+            };
             let _ = msgs.send(Msg::Reply { client, id, response });
         });
     }

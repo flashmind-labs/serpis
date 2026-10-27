@@ -124,6 +124,12 @@ pub enum Request {
     Close { chat: String },
     /// The models the node can use (its own keys and models.json).
     Models,
+    /// What the machine's Claude Code says of its subscription's usage (`/usage` there), with
+    /// its advice from the last week's transcripts when `advice`. Answered with `ClaudeCodeUsage`.
+    ClaudeCodeUsage {
+        #[serde(default)]
+        advice: bool,
+    },
     /// Saved sessions on the node, newest first.
     Sessions {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +285,8 @@ pub enum Response {
     /// The chat a `New` or `Resume` made.
     Chat { chat: String },
     Models { models: Vec<ModelInfo> },
+    /// The machine's `claude` answer to `get_usage`, as it gave it.
+    ClaudeCodeUsage { usage: serde_json::Value },
     Sessions { sessions: Vec<SessionInfo> },
     Dirs { path: String, dirs: Vec<String> },
     /// A session file's text (`Export`).
