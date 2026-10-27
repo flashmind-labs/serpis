@@ -103,6 +103,8 @@ pub enum Request {
         request_id: Option<String>,
     },
     Abort { chat: String },
+    /// Answer a tool call waiting for the person (its entry's `ask`).
+    Answer { chat: String, tool: String, decision: crate::Decision },
     Compact {
         chat: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

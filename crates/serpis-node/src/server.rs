@@ -1002,6 +1002,12 @@ impl Node {
                 self.with_chat(&chat, |c, _| c.abort())?;
                 Response::Ok
             }
+            Request::Answer { chat, tool, decision } => {
+                if !self.with_chat(&chat, |c, _| c.answer(&tool, decision))? {
+                    return Err("That tool call isn't waiting for an answer (any more)".into());
+                }
+                Response::Ok
+            }
             Request::Compact { chat, instructions } => {
                 self.with_chat(&chat, |c, h| c.compact(h, serpis_chat::CompactReason::Manual, instructions))?;
                 Response::Ok
@@ -1049,7 +1055,7 @@ impl Node {
                     .models()
                     .into_iter()
                     .filter(|m| configured.contains(&m.provider))
-                    .filter(|m| serpis_ai::api::SUPPORTED_APIS.contains(&m.api.as_str()) || m.api == "azure-openai-responses")
+                    .filter(|m| serpis_ai::api::chat_api(&m.api))
                     .map(|m| ModelInfo {
                         model: format!("{}/{}", m.provider, m.id),
                         name: m.display_name().to_string(),

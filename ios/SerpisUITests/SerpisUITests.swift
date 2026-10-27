@@ -145,4 +145,54 @@ final class SerpisUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["the second one"].waitForExistence(timeout: 20), "it opens, with what was said")
         shot("10-reopened")
     }
+
+    /// A chat on Claude Code (the test machine's stand-in claude): an edit it asks to make waits
+    /// for you, and Allow lets it go on.
+    func testAllowingWhatClaudeCodeAsks() throws {
+        guard let address = env["SERPIS_TEST_ADDRESS"], let key = env["SERPIS_TEST_KEY"] else {
+            throw XCTSkip("no test machine: run ios/test-machine.sh and pass its environment as TEST_RUNNER_*")
+        }
+        let app = XCUIApplication()
+        let data = NSTemporaryDirectory() + "serpis-ui-\(UUID().uuidString)"
+        app.launchArguments = ["-SerpisMachines", #"[{"id":"box","name":"box","address":"\#(address)"}]"#, "-SerpisDeviceKey", key, "-SerpisData", data]
+        app.launch()
+        let confirm = app.buttons["Confirm box's key to reach it"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 20))
+        confirm.tap()
+        let trust = app.buttons["Trust it"]
+        XCTAssertTrue(trust.waitForExistence(timeout: 5))
+        trust.tap()
+        XCTAssertTrue(trust.waitForNonExistence(timeout: 20))
+        app.buttons["Done"].tap()
+
+        app.buttons["new-chat"].tap()
+        XCTAssertTrue(app.buttons["project"].waitForExistence(timeout: 20))
+        app.buttons["project"].tap()
+        app.buttons["Start a chat here"].tap()
+        let composer = app.textFields["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 20))
+
+        // Its models are the machine's claude's.
+        let model = app.buttons["Model"]
+        XCTAssertTrue(model.waitForExistence(timeout: 10))
+        model.tap()
+        let fake = app.buttons["Claude Code · Fake 5"]
+        XCTAssertTrue(fake.waitForExistence(timeout: 10), "the machine offers Claude Code")
+        fake.tap()
+
+        composer.tap()
+        composer.typeText("please edit")
+        app.buttons["Send"].tap()
+        let approval = app.otherElements["approval"]
+        XCTAssertTrue(app.buttons["Allow"].waitForExistence(timeout: 30), "the edit waits for you")
+        XCTAssertTrue(app.buttons["Always"].exists, "always is offered")
+        // The keyboard away, for the screen.
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        shot("11-approval")
+        app.buttons["Allow"].tap()
+        XCTAssertTrue(app.staticTexts["Edited."].waitForExistence(timeout: 30), "allowed, it goes on")
+        XCTAssertFalse(approval.exists)
+        XCTAssertFalse(app.buttons["Allow"].exists, "and asks no more")
+        shot("12-allowed")
+    }
 }

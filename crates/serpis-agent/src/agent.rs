@@ -25,11 +25,46 @@ pub enum AgentEvent {
     ToolStart { id: String, name: String, args: Value },
     ToolUpdate { id: String, partial: ToolResult },
     ToolEnd { id: String, name: String, result: ToolResultMessage },
+    /// Tool call `id` waits for the person to allow it; `always` says what allowing it from
+    /// now on would cover, when that's offered.
+    ToolAsk { id: String, always: Option<String>, reply: AskReply },
     TurnEnd,
     AgentEnd { error: Option<String> },
 }
 
 pub type EmitFn = Arc<dyn Fn(AgentEvent) + Send + Sync>;
+
+/// The person's answer to a [`AgentEvent::ToolAsk`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Answer {
+    Allow,
+    /// Allow it, and what the ask's `always` covers from now on.
+    Always,
+    /// Refuse it, telling the agent why (else that the person said no).
+    Deny(Option<String>),
+}
+
+/// Where the answer to a [`AgentEvent::ToolAsk`] goes; the first answer counts. Dropping
+/// every copy unanswered refuses it.
+#[derive(Clone)]
+pub struct AskReply(Arc<Mutex<Option<tokio::sync::oneshot::Sender<Answer>>>>);
+
+impl AskReply {
+    pub fn new() -> (AskReply, tokio::sync::oneshot::Receiver<Answer>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (AskReply(Arc::new(Mutex::new(Some(tx)))), rx)
+    }
+    /// False when it was already answered (or nobody waits any more).
+    pub fn send(&self, a: Answer) -> bool {
+        self.0.lock().unwrap().take().is_some_and(|tx| tx.send(a).is_ok())
+    }
+}
+
+impl std::fmt::Debug for AskReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AskReply")
+    }
+}
 
 /// Decision of a `before_tool_call` hook.
 pub enum ToolGate {

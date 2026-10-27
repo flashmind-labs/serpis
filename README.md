@@ -341,9 +341,14 @@ shown under serpis's names where they match (`Bash` is `bash`, `Edit` is `edit` 
 its todo list and plans get cards of their own. Thinking levels are its `--effort` levels, and
 `chat-compact` sends `/compact`.
 
-Permission prompts go to `before-tool-call` handlers first, then `claude-code-permission-prompts`
-answers them (`allow`, like serpis's own agent, or `deny`). `claude-code-permission-mode`,
-`claude-code-args` and `claude-code-path` set the rest.
+When it asks permission (an edit, a command its rules don't allow), the tool's card shows what
+it wants to do and waits, and a bar above the composer offers Allow (`C-c C-y`), Always
+(`C-c C-a`: what Claude Code suggests, such as "edits in this session") and Deny (`C-c C-d`;
+`chat-deny` with a reason tells it why). The chat keeps waiting on its machine until someone
+answers, from any window. `before-tool-call` handlers can block it first, and `tool-ask` handlers
+can answer for you (return `"allow"`, `"always"`, `"deny"` or `{deny = "why"}`);
+`claude-code-permission-prompts` = `allow` or `deny` answers every prompt the same way.
+`claude-code-permission-mode`, `claude-code-args` and `claude-code-path` set the rest.
 `cargo run -p serpis-chat --example claude_code_smoke -- <dir> <prompt>` tries it headless.
 
 ## Terminals on any machine

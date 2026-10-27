@@ -226,6 +226,8 @@ pub struct Chat {
     agent: Option<AgentHandle>,
     /// The `claude` process of a chat on a Claude Code model, kept between turns.
     claude: serpis_agent::claude_code::ClaudeCode,
+    /// Tool calls waiting for the person to allow them, by id: where the answer goes.
+    asks: HashMap<String, serpis_agent::AskReply>,
     tx: mpsc::Sender<Done>,
     rx: mpsc::Receiver<Done>,
     wake: Wake,
@@ -286,6 +288,7 @@ impl Chat {
             history: Vec::new(),
             agent: None,
             claude: Default::default(),
+            asks: HashMap::new(),
             tx,
             rx,
             wake,
@@ -559,7 +562,7 @@ impl Chat {
             session_id: self.session_id.clone(),
             model,
             hooks: host.tool_hooks(),
-            allow_prompts: host.var_str("claude-code-permission-prompts").as_deref() != Some("deny"),
+            prompts: host.var_str("claude-code-permission-prompts").and_then(|p| serpis_agent::claude_code::Prompts::parse(&p)).unwrap_or_default(),
         };
         // Prompt cache bookkeeping is Claude Code's own: what it sends isn't serpis's to know.
         self.sent = None;
@@ -1019,7 +1022,7 @@ impl Chat {
                     }
                 }
                 StreamEvent::ToolCallStart { id, name, .. } => {
-                    self.entries.push(Entry::Tool { id, name, args: Value::Object(Default::default()), partial: None, result: None, running_ms: None, elapsed_ms: None })
+                    self.entries.push(Entry::Tool { id, name, args: Value::Object(Default::default()), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None })
                 }
                 StreamEvent::ToolCallDelta { arguments, .. } => {
                     let started = &self.entries.started;
@@ -1080,7 +1083,7 @@ impl Chat {
             }
             AgentEvent::ToolStart { id, name, args } => {
                 if self.tool_entry(&id).is_none() {
-                    self.entries.push(Entry::Tool { id: id.clone(), name, args: args.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None });
+                    self.entries.push(Entry::Tool { id: id.clone(), name, args: args.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None });
                 }
                 self.entries.started.insert(id.clone(), Instant::now());
                 if let Some(Entry::Tool { args: a, .. }) = self.tool_entry(&id) {
@@ -1101,8 +1104,34 @@ impl Chat {
                 }
                 host.hook(self, "tool-finished", &payload);
             }
+            AgentEvent::ToolAsk { id, always, reply } => {
+                let (name, args) = match self.entries.iter().rev().find(|e| matches!(e, Entry::Tool { id: i, .. } if *i == id)) {
+                    Some(Entry::Tool { name, args, .. }) => (name.clone(), args.clone()),
+                    _ => (String::new(), Value::Null),
+                };
+                // A handler can answer for the person (an allow list, a policy).
+                let payload = json!({"buffer": host.chat_ref(), "id": id, "name": name, "args": args, "always": always});
+                let decided = host.hook(self, "tool-ask", &payload).into_iter().find_map(|r| match r {
+                    Value::String(s) if s == "allow" => Some(serpis_agent::Answer::Allow),
+                    Value::String(s) if s == "always" => Some(serpis_agent::Answer::Always),
+                    Value::String(s) if s == "deny" => Some(serpis_agent::Answer::Deny(None)),
+                    Value::Object(o) if o.contains_key("deny") => Some(serpis_agent::Answer::Deny(o["deny"].as_str().map(str::to_string))),
+                    _ => None,
+                });
+                if let Some(a) = decided {
+                    reply.send(a);
+                    return;
+                }
+                // Not running while it waits: its clock starts when it's allowed.
+                self.entries.started.remove(&id);
+                if let Some(Entry::Tool { ask, .. }) = self.tool_entry(&id) {
+                    *ask = Some(serpis_proto::Ask { always });
+                }
+                self.asks.insert(id, reply);
+            }
             AgentEvent::AgentEnd { error } => {
                 self.agent = None;
+                self.drop_asks();
                 if let Some(e) = error {
                     self.last_error = Some(e.clone());
                     self.notice(e, Tone::Error);
@@ -1120,6 +1149,43 @@ impl Chat {
             }
             AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
         }
+    }
+
+    /// Answer tool call `tool`, waiting for the person. False when it isn't waiting.
+    pub fn answer(&mut self, tool: &str, decision: serpis_proto::Decision) -> bool {
+        let Some(reply) = self.asks.remove(tool) else { return false };
+        let a = match decision {
+            serpis_proto::Decision::Allow => serpis_agent::Answer::Allow,
+            serpis_proto::Decision::Always => serpis_agent::Answer::Always,
+            serpis_proto::Decision::Deny { message } => serpis_agent::Answer::Deny(message),
+        };
+        let sent = reply.send(a);
+        if let Some(Entry::Tool { ask, .. }) = self.tool_entry(tool) {
+            *ask = None;
+        }
+        if sent {
+            self.entries.started.insert(tool.to_string(), Instant::now());
+        }
+        (self.wake)();
+        sent
+    }
+
+    /// Tool calls waiting for the person, oldest first.
+    pub fn asking(&self) -> Vec<String> {
+        self.entries.iter().filter_map(|e| if let Entry::Tool { id, ask: Some(_), .. } = e { Some(id.clone()) } else { None }).collect()
+    }
+
+    /// The run ended: nothing waits for an answer any more.
+    fn drop_asks(&mut self) {
+        self.asks.clear();
+        self.entries.update_all(
+            |e| matches!(e, Entry::Tool { ask: Some(_), .. }),
+            |e| {
+                if let Entry::Tool { ask, .. } = e {
+                    *ask = None;
+                }
+            },
+        );
     }
 
     /// Write to the session file; the first failure is reported, later ones are silent.
@@ -1188,7 +1254,7 @@ impl Chat {
                         cache: None,
                     });
                     for tc in a.tool_calls() {
-                        self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None });
+                        self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None });
                     }
                 }
                 Message::ToolResult(r) => {
@@ -1218,6 +1284,10 @@ impl Chat {
     pub fn current_step(&self) -> String {
         for e in self.entries.iter().rev() {
             match e {
+                Entry::Tool { name, args, ask: Some(_), .. } => {
+                    let s = tool_summary(name, args);
+                    return if s.is_empty() { format!("waiting for you: {name}") } else { format!("waiting for you: {name} {s}") };
+                }
                 Entry::Tool { name, args, result: None, .. } => {
                     let s = tool_summary(name, args);
                     return if s.is_empty() { name.clone() } else { format!("{name} {s}") };

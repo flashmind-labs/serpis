@@ -96,6 +96,20 @@ final class ChatModel: Identifiable {
         _ = try? await app?.call(machine, ["op": "abort", "chat": chat])
     }
 
+    /// The first tool call waiting for the person to allow it.
+    var waiting: Tool? {
+        entries.lazy.compactMap(Tool.init).first { $0.ask != nil }
+    }
+
+    /// Answer the tool call waiting for the person: "allow", "always" or "deny".
+    func answer(_ tool: String, _ kind: String) async {
+        do {
+            _ = try await app?.call(machine, ["op": "answer", "chat": chat, "tool": tool, "decision": ["kind": kind]])
+        } catch {
+            notice = AppModel.describe(error)
+        }
+    }
+
     func setModel(_ model: String) async {
         do {
             _ = try await app?.call(machine, ["op": "set_model", "chat": chat, "model": model])

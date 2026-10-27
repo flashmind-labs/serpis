@@ -33,6 +33,8 @@ printf '{"session-directory":"%s/sessions","agent-model":"mock/m"}' "$dir" > "$d
 # What the server runs commands with: the machine's environment.
 export HOME="$dir/home" SERPIS_NODE_DIR="$dir/node" SERPIS_NODE_SOCKET="$dir/node/node.sock" SERPIS_AGENT_DIR="$dir/agent" \
   SERPIS_CONFIG_DIR="$dir/config" SERPIS_TERMINAL_SOCKET="$dir/t.sock"
+# Claude Code there is the stand-in (serpis-fake-claude), never a real claude.
+export SERPIS_CLAUDE_CODE_PATH="$root/target/debug/serpis-fake-claude" FAKE_CLAUDE_LOG="$dir/claude.log" FAKE_CLAUDE_DIR="$dir/home"
 "$root/target/debug/serpis-test-sshd" "$dir/home/.ssh/authorized_keys" "$dir/sshd.port" &
 sshd=$!
 for _ in $(seq 50); do [ -s "$dir/sshd.port" ] && break; sleep 0.1; done

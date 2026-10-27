@@ -103,7 +103,7 @@ fn main() {
             ev(json!({"type": "content_block_stop", "index": 0}));
             stop("tool_use");
             let input = json!({"file_path": "notes.txt", "old_string": "two", "new_string": "TWO"});
-            out(json!({"type": "control_request", "request_id": format!("perm{n}"), "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": input, "tool_use_id": format!("t{n}")}}));
+            out(json!({"type": "control_request", "request_id": format!("perm{n}"), "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": input, "tool_use_id": format!("t{n}"), "permission_suggestions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}}));
             let answer = loop {
                 let Some(l) = lines.next() else { return };
                 let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };

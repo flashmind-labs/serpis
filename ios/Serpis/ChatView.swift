@@ -123,8 +123,35 @@ struct ChatView: View {
         .accessibilityLabel("Model")
     }
 
+    /// A tool call waiting for you: what it wants, and the answers.
+    @ViewBuilder private var approval: some View {
+        if let tool = chat.waiting {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Allow \(tool.doing.prefix(1).lowercased() + tool.doing.dropFirst())?", systemImage: "hand.raised")
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(2)
+                HStack(spacing: 8) {
+                    Button("Deny", role: .destructive) { Task { await chat.answer(tool.id, "deny") } }
+                        .buttonStyle(.bordered)
+                    if tool.ask?.always != nil {
+                        Button("Always") { Task { await chat.answer(tool.id, "always") } }
+                            .buttonStyle(.bordered)
+                            .accessibilityHint(tool.ask?.always.map { "Also allows \($0) from now on" } ?? "")
+                    }
+                    Spacer()
+                    Button("Allow") { Task { await chat.answer(tool.id, "allow") } }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityIdentifier("approval")
+        }
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
+            approval
             if !images.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack {

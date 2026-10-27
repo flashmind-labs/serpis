@@ -24,7 +24,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentEvent, AgentHandle, EmitFn, ToolGate, ToolHooks};
+use crate::agent::{AgentEvent, AgentHandle, Answer, AskReply, EmitFn, ToolGate, ToolHooks};
 
 /// How the `claude` process is started. A run with a different launch restarts it (resuming
 /// its session), e.g. after the chat's model or thinking level changed.
@@ -51,8 +51,29 @@ pub struct RunConfig {
     pub model: Model,
     /// Asked first about each permission prompt (`before-tool-call`).
     pub hooks: Option<Arc<dyn ToolHooks>>,
-    /// What a permission prompt nobody blocked gets: allowed, or refused.
-    pub allow_prompts: bool,
+    /// Who answers a permission prompt no hook blocked.
+    pub prompts: Prompts,
+}
+
+/// Who answers Claude Code's permission prompts (`claude-code-permission-prompts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Prompts {
+    /// The person, from any client showing the chat (a [`AgentEvent::ToolAsk`]).
+    #[default]
+    Ask,
+    Allow,
+    Deny,
+}
+
+impl Prompts {
+    pub fn parse(s: &str) -> Option<Prompts> {
+        match s {
+            "ask" => Some(Prompts::Ask),
+            "allow" => Some(Prompts::Allow),
+            "deny" => Some(Prompts::Deny),
+            _ => None,
+        }
+    }
 }
 
 /// A chat's Claude Code: the process, started with the first run and kept between runs.
@@ -406,7 +427,7 @@ impl Process {
                 "assistant" => t.whole(&v),
                 "user" => t.results(&v),
                 "control_request" => {
-                    let answer = self.answer(&v["request"], cfg, interrupted).await;
+                    let answer = self.answer(&v["request"], cfg, h, emit, interrupted).await;
                     let id = v["request_id"].clone();
                     let response = match answer {
                         Ok(r) => json!({"subtype": "success", "request_id": id, "response": r}),
@@ -437,7 +458,7 @@ impl Process {
     }
 
     /// Answer a request from `claude`: permission prompts; anything else isn't served.
-    async fn answer(&self, req: &Value, cfg: &RunConfig, interrupted: bool) -> Result<Value> {
+    async fn answer(&self, req: &Value, cfg: &RunConfig, h: &AgentHandle, emit: &EmitFn, interrupted: bool) -> Result<Value> {
         match req["subtype"].as_str() {
             Some("can_use_tool") => {
                 let tool = req["tool_name"].as_str().unwrap_or("");
@@ -453,15 +474,73 @@ impl Process {
                     Some(hooks) => hooks.before_tool_call(&name, args).await,
                     None => ToolGate::Allow(args),
                 };
-                Ok(match gate {
-                    ToolGate::Allow(args) if cfg.allow_prompts => json!({"behavior": "allow", "updatedInput": claude_input(tool, args)}),
-                    ToolGate::Allow(_) => json!({"behavior": "deny", "message": "Refused: serpis answers Claude Code's permission prompts with no (claude-code-permission-prompts). Ask the user to allow it."}),
-                    ToolGate::Block(reason) => json!({"behavior": "deny", "message": reason}),
+                let args = match gate {
+                    ToolGate::Block(reason) => return Ok(json!({"behavior": "deny", "message": reason})),
+                    ToolGate::Allow(args) => args,
+                };
+                let suggestions = req.get("permission_suggestions").filter(|s| s.as_array().is_some_and(|a| !a.is_empty()));
+                let answer = match cfg.prompts {
+                    Prompts::Allow => Answer::Allow,
+                    Prompts::Deny => Answer::Deny(Some(
+                        "Refused: serpis answers Claude Code's permission prompts with no (claude-code-permission-prompts). Ask the user to allow it.".into(),
+                    )),
+                    Prompts::Ask => {
+                        let (reply, rx) = AskReply::new();
+                        let id = req["tool_use_id"].as_str().unwrap_or("").to_string();
+                        emit(AgentEvent::ToolAsk { id, always: suggestions.and_then(always_label), reply });
+                        tokio::select! {
+                            a = rx => a.unwrap_or(Answer::Deny(None)),
+                            _ = h.cancel.cancelled() => return Ok(json!({"behavior": "deny", "message": "Stopped by the user", "interrupt": true})),
+                        }
+                    }
+                };
+                Ok(match answer {
+                    Answer::Allow => json!({"behavior": "allow", "updatedInput": claude_input(tool, args)}),
+                    Answer::Always => match suggestions {
+                        Some(s) => json!({"behavior": "allow", "updatedInput": claude_input(tool, args), "updatedPermissions": s}),
+                        None => json!({"behavior": "allow", "updatedInput": claude_input(tool, args)}),
+                    },
+                    Answer::Deny(why) => json!({"behavior": "deny", "message": why.unwrap_or_else(|| "The user refused this. Ask them how they want to go on.".into())}),
                 })
             }
             other => bail!("serpis doesn't handle {}", other.unwrap_or("this request")),
         }
     }
+}
+
+/// What Claude Code's `permission_suggestions` would allow, in words: "edits in this
+/// session", "Bash(git status:*) in this project".
+fn always_label(suggestions: &Value) -> Option<String> {
+    let place = |d: &Value| match d.as_str() {
+        Some("session") => " in this session",
+        Some("localSettings" | "projectSettings") => " in this project",
+        Some("userSettings") => " everywhere",
+        _ => "",
+    };
+    let parts: Vec<String> = suggestions
+        .as_array()?
+        .iter()
+        .filter_map(|s| match s["type"].as_str()? {
+            "setMode" => Some(match s["mode"].as_str()? {
+                "acceptEdits" => format!("edits{}", place(&s["destination"])),
+                m => format!("{m} mode{}", place(&s["destination"])),
+            }),
+            "addRules" => {
+                let rules: Vec<String> = s["rules"]
+                    .as_array()?
+                    .iter()
+                    .map(|r| match r["ruleContent"].as_str() {
+                        Some(c) => format!("{}({c})", r["toolName"].as_str().unwrap_or("")),
+                        None => r["toolName"].as_str().unwrap_or("").to_string(),
+                    })
+                    .collect();
+                Some(format!("{}{}", rules.join(", "), place(&s["destination"])))
+            }
+            "addDirectories" => Some(format!("access to {}{}", s["directories"].as_array()?.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), place(&s["destination"]))),
+            _ => None,
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// What a failed `result` says.
@@ -646,6 +725,14 @@ mod tests {
         assert_eq!(claude_input("Edit", args), json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"}));
         assert_eq!(serpis_tool("Bash", &json!({"command": "ls"})), ("bash".into(), json!({"command": "ls"})));
         assert_eq!(serpis_tool("TodoWrite", &json!({})).0, "TodoWrite");
+    }
+
+    #[test]
+    fn always_says_what_it_allows() {
+        assert_eq!(always_label(&json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}])).as_deref(), Some("edits in this session"));
+        let rules = json!([{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "git status:*"}], "behavior": "allow", "destination": "localSettings"}]);
+        assert_eq!(always_label(&rules).as_deref(), Some("Bash(git status:*) in this project"));
+        assert_eq!(always_label(&json!([])), None);
     }
 
     #[test]

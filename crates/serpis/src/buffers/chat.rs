@@ -341,6 +341,26 @@ impl ChatBuffer {
         self.node.post(Request::Abort { chat: self.node.chat.clone() });
     }
 
+    /// The first tool call waiting for the person: (id, name, args, what "always" allows).
+    pub fn waiting(&self) -> Option<(String, String, Value, Option<String>)> {
+        self.entries.iter().find_map(|e| match e {
+            Entry::Tool { id, name, args, ask: Some(a), .. } => Some((id.clone(), name.clone(), args.clone(), a.always.clone())),
+            _ => None,
+        })
+    }
+
+    /// Answer the first tool call waiting for the person; false when none waits.
+    pub fn answer(&mut self, decision: serpis_proto::Decision) -> bool {
+        let Some((tool, ..)) = self.waiting() else { return false };
+        self.node.post(Request::Answer { chat: self.node.chat.clone(), tool: tool.clone(), decision });
+        // Shown at once; the node's splice confirms it.
+        if let Some(Entry::Tool { ask, .. }) = self.entries.iter_mut().find(|e| matches!(e, Entry::Tool { id, .. } if *id == tool)) {
+            *ask = None;
+        }
+        self.dirty = true;
+        true
+    }
+
     pub fn set_model(&mut self, m: Model) {
         self.set_model_spec(&format!("{}/{}", m.provider, m.id));
     }
@@ -675,9 +695,9 @@ impl ChatBuffer {
                         }
                     }
                 }
-                Entry::Tool { name, args, partial, result, elapsed_ms, .. } => {
+                Entry::Tool { name, args, partial, result, elapsed_ms, ask, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
-                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
+                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), ask.as_ref(), v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
@@ -1209,6 +1229,7 @@ fn tool_lines(
     args: &Value,
     partial: Option<&str>,
     result: Option<&ToolResultMessage>,
+    ask: Option<&serpis_proto::Ask>,
     expanded: Option<bool>,
     started: Option<Instant>,
     elapsed: Option<Duration>,
@@ -1217,13 +1238,15 @@ fn tool_lines(
 ) -> Vec<StyledLine> {
     let k = t.ui_scale();
     let (icon, icon_face) = match result {
+        None if ask.is_some() => ("?", Face::Warning),
         None if started.is_some() => ("●", Face::Warning),
         None => ("○", Face::Meta),
         Some(r) if r.is_error => ("✗", Face::Error),
         Some(_) => ("✓", Face::ToolOk),
     };
     let card = Block::new(t.tool_bg).border(t.border);
-    let expanded = expanded.unwrap_or_else(|| default_expanded(name, result));
+    // What it would do is what you need to see to allow it.
+    let expanded = expanded.unwrap_or_else(|| ask.is_some() || default_expanded(name, result));
     let mut header = format!("{icon}  ");
     let mut spans = vec![(0..icon.len(), icon_face)];
     let s0 = header.len();
@@ -1237,6 +1260,7 @@ fn tool_lines(
         spans.push((s1..header.len(), Face::ToolArgs));
     }
     let time = match (elapsed, started) {
+        _ if ask.is_some() => "waiting for you".to_string(),
         (Some(e), _) if e.as_millis() >= 100 => fmt_duration(e, true),
         (None, Some(s)) => fmt_duration(s.elapsed(), false),
         _ => String::new(),
@@ -1279,6 +1303,18 @@ fn tool_lines(
                 for (i, l) in lines.iter().enumerate() {
                     let spans = shift(hl.get(i), 2);
                     body.push((StyledLine::new(format!("+ {l}"), Face::DiffAdd).spans(spans), Some(t.diff_add_bg)));
+                }
+            }
+        } else if name == "edit" && result.is_none() {
+            // Not run yet (waiting to be allowed): the change it asks to make.
+            let one = [args.clone()];
+            let edits = args.get("edits").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&one);
+            for e in edits {
+                for l in arg(e, "old_string").lines() {
+                    body.push((StyledLine::new(format!("- {l}"), Face::DiffDel), Some(t.diff_del_bg)));
+                }
+                for l in arg(e, "new_string").lines() {
+                    body.push((StyledLine::new(format!("+ {l}"), Face::DiffAdd), Some(t.diff_add_bg)));
                 }
             }
         } else if name == "TodoWrite" {
@@ -1324,6 +1360,10 @@ fn tool_lines(
         }
     }
 
+    if let Some(a) = ask {
+        let always = a.always.as_ref().map(|w| format!(" · C-c C-a always ({w})")).unwrap_or_default();
+        body.push((StyledLine::new(format!("Allow it? C-c C-y yes{always} · C-c C-d no"), Face::Warning), None));
+    }
     let total = body.len();
     let shown = if expanded {
         total
@@ -1498,7 +1538,11 @@ impl Buffer for ChatBuffer {
         let att_h = if self.attachments.is_empty() { 0.0 } else { thumb_h + 14.0 * k };
         let left = rect.center().x - col_w / 2.0;
         let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
-        let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k));
+        // A tool call waiting for the person: a bar above the composer to answer it.
+        let waiting = self.waiting();
+        let ask_h = if waiting.is_some() { (40.0 * k).round() } else { 0.0 };
+        let ask_bar = Rect::from_min_max(egui::pos2(left, card.top() - 8.0 * k - ask_h), egui::pos2(left + col_w, card.top() - 8.0 * k));
+        let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k - if waiting.is_some() { ask_h + 8.0 * k } else { 0.0 }));
 
         // Transcript.
         let t_focus = focused && self.focus == Focus::Transcript;
@@ -1632,6 +1676,41 @@ impl Buffer for ChatBuffer {
         let (kr, clicked) = pill(ui, wr.right() + 2.0 * k, "keep-going", label, tip, None);
         if clicked {
             run = Some("chat-toggle-keep-going");
+        }
+        if let Some((_, name, args, always)) = &waiting {
+            let r = ask_bar;
+            painter.rect_filled(r, 10.0 * k, theme.bg_elevated);
+            painter.rect_stroke(r, 10.0 * k, Stroke::new(1.0, crate::chrome::tint(theme.yellow, 0.7)), egui::StrokeKind::Inside);
+            let cy = r.center().y;
+            // Right to left: allow (the main one), always, deny.
+            let mut x = r.right() - 8.0 * k;
+            let mut button = |ui: &mut egui::Ui, key: &'static str, label: &str, tip: &str, main: bool| -> bool {
+                let w = crate::chrome::text_width(&painter, label, small.clone()) + 22.0 * k;
+                let b = Rect::from_min_size(egui::pos2(x - w, cy - 13.0 * k), egui::vec2(w, 26.0 * k));
+                x = b.left() - 6.0 * k;
+                let resp = ui.interact(b, id.with(key), egui::Sense::click()).on_hover_text(tip);
+                let (bg, fg) = if main { (theme.accent, crate::chrome::on(theme.accent, &theme)) } else { (if resp.hovered() { crate::chrome::hover_bg(&theme) } else { theme.chip() }, theme.fg) };
+                painter.rect_filled(b, 8.0 * k, if main && resp.hovered() { theme.accent.gamma_multiply(1.15) } else { bg });
+                crate::chrome::text(&painter, egui::pos2(b.left() + 11.0 * k, cy), label, small.clone(), fg, w);
+                hits.push((key, b));
+                resp.clicked()
+            };
+            if button(ui, "allow", "Allow", "Allow it once (C-c C-y)", true) {
+                run = Some("chat-allow");
+            }
+            if let Some(a) = always {
+                if button(ui, "always", "Always", &format!("Allow it, and {a} from now on (C-c C-a)"), false) {
+                    run = Some("chat-allow-always");
+                }
+            }
+            if button(ui, "deny", "Deny", "Refuse it (C-c C-d; chat-deny with a reason tells the agent why)", false) {
+                run = Some("chat-deny");
+            }
+            let summary = serpis_chat::tool_summary(name, args);
+            let label = if summary.is_empty() { format!("Allow {name}?") } else { format!("Allow {name} {summary}?") };
+            let lx = r.left() + 14.0 * k;
+            crate::chrome::text(&painter, egui::pos2(lx, cy), &label, small.clone(), theme.fg, (x - lx - 8.0 * k).max(0.0));
+            hits.push(("ask", r));
         }
         // The activity and usage labels fit between these pills and the send button.
         let (think_r, tr) = (tr, kr);

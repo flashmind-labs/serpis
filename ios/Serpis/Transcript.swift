@@ -208,7 +208,7 @@ struct WorkView: View {
     @State private var open: Bool?
 
     private var tools: [Tool] {
-        entries.compactMap { if case .tool(let id, let name, let args, let partial, let result, let elapsed) = $0 { Tool(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed) } else { nil } }
+        entries.compactMap(Tool.init)
     }
 
     var body: some View {
@@ -258,8 +258,8 @@ struct WorkView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(entries.enumerated()), id: \.offset) { _, e in
                         switch e {
-                        case .tool(let id, let name, let args, let partial, let result, let elapsed):
-                            ToolStep(tool: Tool(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed))
+                        case .tool(let id, let name, let args, let partial, let result, let elapsed, let ask):
+                            ToolStep(tool: Tool(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed, ask: ask))
                         case .assistant(let blocks, let streaming, _):
                             ForEach(Array(blocks.enumerated()), id: \.offset) { _, b in
                                 if case .thinking(let t) = b, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -288,6 +288,18 @@ struct Tool: Hashable {
     var partial: String?
     var result: ToolResult?
     var elapsedMs: Int?
+    /// Waiting for the person to allow it.
+    var ask: Ask? = nil
+
+    init(id: String, name: String, args: JSON, partial: String?, result: ToolResult?, elapsedMs: Int?, ask: Ask? = nil) {
+        (self.id, self.name, self.args, self.partial, self.result, self.elapsedMs, self.ask) = (id, name, args, partial, result, elapsedMs, ask)
+    }
+
+    /// The tool call an entry is, if it is one.
+    init?(_ entry: Entry) {
+        guard case .tool(let id, let name, let args, let partial, let result, let elapsed, let ask) = entry else { return nil }
+        self.init(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed, ask: ask)
+    }
 
     func arg(_ k: String) -> String { args[k]?.string ?? "" }
 

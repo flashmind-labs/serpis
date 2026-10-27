@@ -93,6 +93,14 @@ pub fn current_chat(ed: &mut Editor) -> Option<BufferId> {
 }
 
 /// Run `f` on the focused chat buffer.
+/// Answer the tool call waiting for the person in the current chat.
+fn answer(ed: &mut Editor, d: serpis_proto::Decision) -> anyhow::Result<()> {
+    if !with_chat(ed, |c, _| c.answer(d))? {
+        ed.message("Nothing is waiting for an answer");
+    }
+    Ok(())
+}
+
 pub fn with_chat<R>(ed: &mut Editor, f: impl FnOnce(&mut ChatBuffer, &mut Editor) -> R) -> anyhow::Result<R> {
     let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
     ed.with_buffer_as::<ChatBuffer, R>(id, f).ok_or_else(|| anyhow::anyhow!("Not a chat buffer"))
@@ -772,6 +780,14 @@ pub fn install(ed: &mut Editor) {
             }
         })
     });
+    ed.define_command("chat-allow", "Allow the tool call waiting for you (Claude Code's permission prompts), once.", o, |ed, _| answer(ed, serpis_proto::Decision::Allow));
+    ed.define_command("chat-allow-always", "Allow the tool call waiting for you, and what its prompt offers from now on (\"edits in this session\", a rule for this project).", o, |ed, _| {
+        answer(ed, serpis_proto::Decision::Always)
+    });
+    ed.define_command("chat-deny", "Refuse the tool call waiting for you. Param: what to tell the agent instead.", o, |ed, a| {
+        let message = a.str(0).filter(|m| !m.trim().is_empty()).map(str::to_string);
+        answer(ed, serpis_proto::Decision::Deny { message })
+    });
     ed.define_command("chat-abort-or-quit", "Abort the agent if running, else keyboard-quit.", o, |ed, _| {
         let running = with_chat(ed, |c, _| c.running()).unwrap_or(false);
         if running {
@@ -965,7 +981,7 @@ pub fn install(ed: &mut Editor) {
             .models()
             .into_iter()
             .filter(|m| configured.contains(&m.provider))
-            .filter(|m| serpis_ai::api::SUPPORTED_APIS.contains(&m.api.as_str()))
+            .filter(|m| serpis_ai::api::chat_api(&m.api))
             .collect();
         models.sort_by(|a, b| (a.provider.as_str(), a.id.as_str()).cmp(&(b.provider.as_str(), b.id.as_str())));
         let cands = models

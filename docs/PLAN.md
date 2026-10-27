@@ -273,7 +273,7 @@ wraps it. Started 2026-10-27.
 | Process | One per chat, kept between turns; restarted (with `--resume`) when the model, effort, permission mode or arguments change, or after it dies. Session id = the chat's id. |
 | Context | Claude Code's session holds it. Turns another model answered (a chat switched to Claude Code, or one whose session isn't on this machine) go with the next prompt as text. |
 | Tools | Shown under serpis's names and argument names where serpis has the tool; its other tools keep their names and get their own cards (TodoWrite, ExitPlanMode) and summaries (Task, WebFetch, Skill). |
-| Permissions | `can_use_tool` → `before-tool-call` → `claude-code-permission-prompts`. Its own allow/deny rules and `claude-code-permission-mode` apply first. AskUserQuestion is refused with a request to ask in plain text. |
+| Permissions | `can_use_tool` → `before-tool-call` (can block) → `tool-ask` hooks (can answer) → `claude-code-permission-prompts`: `ask` (default) puts an `Ask` on the tool's entry and waits for an `Answer` request from any client (Allow, Always = Claude Code's `permission_suggestions` passed back, Deny with a reason); stopping refuses it. Its own allow/deny rules and `claude-code-permission-mode` apply first. AskUserQuestion is refused with a request to ask in plain text. |
 | Models | Discovered from `initialize` (no prompt) with the other catalogs, every 6h; aliases until then. Offered only where `claude` is installed and set up (`~/.claude` exists), so throwaway homes in tests never start it. |
 | Cost | Each turn's `total_cost_usd` goes on its last reply. serpis's prompt cache bookkeeping is off for these chats (what Claude Code sends isn't serpis's to know). |
 
@@ -287,9 +287,13 @@ prompt and diff, refusal by a hook and by the setting, interrupt, effort change,
 Edit with its diff, cost, resume remembering the conversation.
 
 Next:
-- Permission prompts answered by the person: a pending-approval entry in the transcript (proto,
-  desktop, phone) with allow once / always (Claude Code's `permission_suggestions`) / deny.
-  Then AskUserQuestion as a form, and plan approval.
+- *Done*: permission prompts answered by the person (proto `Ask`/`Decision`/`Answer`, the
+  node, the desktop's card and bar with `chat-allow`, `chat-allow-always`, `chat-deny`;
+  `tests/ui/claude_code.lua` with real keys and clicks; the phone's card above its composer,
+  `testAllowingWhatClaudeCodeAsks` against the test machine's stand-in claude). Found on the
+  way: machines' model lists (the node's `Models`, the desktop picker) left `claude-code/*` out;
+  both use `serpis_ai::api::chat_api` now. Next there: AskUserQuestion as a form, plan approval
+  (ExitPlanMode) with its own words.
 - The phone's own lines for Claude Code's tools (todo list, subagents); it shows mapped tools
   already.
 - Subagents: their steps (`parent_tool_use_id`) are skipped; show them inside their Task card.

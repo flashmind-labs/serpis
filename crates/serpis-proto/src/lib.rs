@@ -56,10 +56,36 @@ pub enum Entry {
         /// How long it took, once done.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         elapsed_ms: Option<u64>,
+        /// Waiting for the person to allow it (a [`wire::Request::Answer`] decides).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<Ask>,
     },
     Info {
         text: String,
         tone: Tone,
+    },
+}
+
+/// A tool call waiting for the person's go-ahead (Claude Code's permission prompts).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ask {
+    /// What allowing it "always" would allow, when the agent offers that: "edits in this
+    /// session", "Bash(git status:*) in this project".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always: Option<String>,
+}
+
+/// The answer to an [`Ask`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Decision {
+    Allow,
+    /// Allow it, and what [`Ask::always`] says from now on.
+    Always,
+    /// Refuse it, telling the agent `message` (else that the person said no).
+    Deny {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
 }
 
@@ -207,7 +233,7 @@ mod tests {
                 error: None,
                 cache: Some(CacheHit::Hit(0.94)),
             },
-            Entry::Tool { id: "1".into(), name: "bash".into(), args: serde_json::json!({"command": "ls"}), partial: Some("a\n".into()), result: None, running_ms: Some(1200), elapsed_ms: None },
+            Entry::Tool { id: "1".into(), name: "bash".into(), args: serde_json::json!({"command": "ls"}), partial: Some("a\n".into()), result: None, running_ms: Some(1200), elapsed_ms: None, ask: None },
             Entry::Info { text: "Compacted".into(), tone: Tone::MetaWarn },
         ];
         let s = Splice { from: 3, entries };

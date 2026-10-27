@@ -64,6 +64,9 @@ pub fn install_base(ed: &mut Editor) {
         ("C-c C-o", "chat-toggle-focus"),
         ("C-c C-p", "chat-history-previous"),
         ("C-c C-n", "chat-history-next"),
+        ("C-c C-y", "chat-allow"),
+        ("C-c C-a", "chat-allow-always"),
+        ("C-c C-d", "chat-deny"),
     ] {
         ed.bind("chat", k, c, o);
     }

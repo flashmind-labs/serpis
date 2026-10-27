@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use serpis_agent::ToolGate;
 use serpis_ai::{AssistantContent, ThinkingLevel};
 use serpis_chat::{Chat, ChatInit, Host, Level};
-use serpis_proto::Entry;
+use serpis_proto::{Decision, Entry};
 
 struct TestHost {
     vars: HashMap<String, Value>,
@@ -88,6 +88,18 @@ impl World {
             }
         }
         panic!("the turn didn't end: {:#?}", chat.entries());
+    }
+
+    /// Poll until a tool call waits for the person; its id.
+    fn ask(&mut self, chat: &mut Chat) -> String {
+        for _ in 0..400 {
+            let _ = self.woken.recv_timeout(Duration::from_millis(25));
+            chat.poll(&mut self.host);
+            if let Some(id) = chat.asking().first() {
+                return id.clone();
+            }
+        }
+        panic!("nothing asked: {:#?}", chat.entries());
     }
 
     /// What the stand-in logged: its starts' arguments, and the lines it was sent.
@@ -171,8 +183,16 @@ fn chats_run_on_claude_code() {
     assert_eq!(last_text(chat.entries()), "echo: again");
     assert_eq!(w.log().0.len(), 1, "one claude process per chat");
 
-    // An edit: asked permission for (allowed by default), shown as serpis's edit with its diff.
-    w.send(&mut chat, "please edit");
+    // An edit asks the person: its card says so (not running meanwhile), and so does the
+    // chat's step. Allowing it always passes Claude Code's suggestion back.
+    chat.submit(&mut w.host, "please edit".into(), vec![], false, None).unwrap();
+    let asked = w.ask(&mut chat);
+    assert!(matches!(chat.entries().iter().find(|e| matches!(e, Entry::Tool { id, .. } if *id == asked)), Some(Entry::Tool { ask: Some(a), running_ms: None, .. }) if a.always.as_deref() == Some("edits in this session")));
+    assert_eq!(chat.state().step.as_deref(), Some("waiting for you: edit notes.txt"));
+    assert!(!chat.answer("nope", Decision::Allow), "only a waiting call can be answered");
+    assert!(chat.answer(&asked, Decision::Always));
+    assert!(!chat.answer(&asked, Decision::Allow), "answered once");
+    w.finish(&mut chat);
     let tool = chat.entries().iter().find_map(|e| if let Entry::Tool { name, args, result, .. } = e { Some((name.clone(), args.clone(), result.clone())) } else { None }).expect("a tool entry");
     assert_eq!(tool.0, "edit");
     assert_eq!(tool.1["path"], "notes.txt");
@@ -183,6 +203,23 @@ fn chats_run_on_claude_code() {
     let (_, got) = w.log();
     let answer = got.iter().rev().find(|g| g["type"] == "control_response").unwrap();
     assert_eq!(answer["response"]["response"]["updatedInput"]["file_path"], "notes.txt", "arguments go back under Claude Code's names");
+    assert_eq!(answer["response"]["response"]["updatedPermissions"][0]["mode"], "acceptEdits");
+    assert!(chat.entries().iter().all(|e| !matches!(e, Entry::Tool { ask: Some(_), .. })));
+
+    // The person refuses one, saying why.
+    chat.submit(&mut w.host, "edit no".into(), vec![], false, None).unwrap();
+    let asked = w.ask(&mut chat);
+    chat.answer(&asked, Decision::Deny { message: Some("not that file".into()) });
+    w.finish(&mut chat);
+    let refusal = chat.entries().iter().rev().find_map(|e| if let Entry::Tool { result: Some(r), .. } = e { Some(serde_json::to_string(&r.content).unwrap()) } else { None }).unwrap();
+    assert!(refusal.contains("not that file"), "{refusal}");
+
+    // Stopping while it waits ends the turn and the question.
+    chat.submit(&mut w.host, "edit, then stop".into(), vec![], false, None).unwrap();
+    w.ask(&mut chat);
+    chat.abort();
+    w.finish(&mut chat);
+    assert!(chat.asking().is_empty() && chat.entries().iter().all(|e| !matches!(e, Entry::Tool { ask: Some(_), .. })));
 
     // A before-tool-call handler refuses it; so does claude-code-permission-prompts = deny.
     w.host.hooks = Some(Arc::new(NoNotes));
