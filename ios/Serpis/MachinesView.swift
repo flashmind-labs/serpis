@@ -6,10 +6,20 @@ struct MachinesView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var adding = false
     @State private var copied = false
+    @State private var scanning = false
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    if CodeScanner.available {
+                        Button { scanning = true } label: { Label("Scan your computer's code", systemImage: "qrcode.viewfinder") }
+                    }
+                } header: {
+                    Text("Pair with your computer")
+                } footer: {
+                    Text("In serpis on your computer, run phone-pair, then scan the code it shows (the Camera app works too). This phone gets the machines you share there, and is let in once you say yes.")
+                }
                 Section {
                     ForEach(app.machines) { m in
                         MachineRow(machine: m, link: app.link(m.id))
@@ -41,6 +51,17 @@ struct MachinesView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $adding) { AddMachineView() }
+            .fullScreenCover(isPresented: $scanning) {
+                NavigationStack {
+                    CodeScanner { link in
+                        scanning = false
+                        dismiss()
+                        app.pair(link, label: UIDevice.current.name)
+                    }
+                    .ignoresSafeArea()
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { scanning = false } } }
+                }
+            }
         }
     }
 }

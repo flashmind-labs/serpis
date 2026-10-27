@@ -7,6 +7,7 @@
 //! and a [`Listener`] it implements to hear their events. Requests, answers and events cross as
 //! the protocol's own JSON, which the app decodes into its types.
 
+pub mod pair;
 pub mod ssh;
 
 use std::collections::HashMap;
@@ -102,6 +103,11 @@ impl Core {
         self.key.public_key().to_openssh().unwrap_or_default()
     }
 
+    /// This device's key as ssh shows it (`SHA256:…`): what the desktop asks about when pairing.
+    pub fn fingerprint(&self) -> String {
+        ssh::fingerprint(self.key.public_key())
+    }
+
     /// Accept `fingerprint` as `address`'s host key (after [`MobileError::NewHost`] or
     /// [`MobileError::HostKeyChanged`], when the person says so).
     pub fn accept_host(&self, address: String, fingerprint: String) -> Result<(), MobileError> {
@@ -188,6 +194,68 @@ impl Core {
     /// Whether `machine` is connected now.
     pub fn is_connected(&self, machine: String) -> bool {
         self.machines.lock().unwrap().get(&machine).is_some_and(|m| m.client.is_open())
+    }
+
+    /// Pair with the desktop that showed `link` (a `serpis://pair#…` code): trust the host keys
+    /// it trusts for the machines it shares, offer this device's key (called `label`) through
+    /// one of them, and wait for the desktop's yes. The machines, once let in: JSON
+    /// `[{name, address}]` (`address` as [`Core::connect`] takes it).
+    pub async fn pair(&self, link: String, label: String) -> Result<String, MobileError> {
+        let link = pair::parse(&link).map_err(|e| failed(format!("{e:#}")))?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        if link.until <= now {
+            return Err(failed("this code has expired: show a new one on the desktop (phone-pair)"));
+        }
+        // The desktop's word for which host keys are right: trusted as they are, no question.
+        for m in &link.machines {
+            if let Some(f) = m.fingerprint() {
+                self.known.accept(&format!("{}:{}", m.host, m.port), &f).map_err(failed)?;
+            }
+        }
+        let offer = serde_json::json!({"key": self.public_key(), "label": label}).to_string();
+        let (known, pairing_key) = (self.known.clone(), Arc::new(link.key));
+        let (id, machines) = (link.id, link.machines);
+        self.rt
+            .spawn(async move {
+                // The first machine reached takes the offer (the desktop lets it in on all).
+                let mut why = Vec::new();
+                for m in &machines {
+                    let conn = match ssh::Connection::open(&m.host, m.port, &m.user, pairing_key.clone(), known.clone()).await {
+                        Ok(c) => c,
+                        Err(ssh::Refused::Key) => {
+                            why.push(format!("{}: the code isn't let in any more", m.name));
+                            continue;
+                        }
+                        Err(ssh::Refused::HostKey(_)) => {
+                            why.push(format!("{}: its host key isn't the one the desktop trusts", m.name));
+                            continue;
+                        }
+                        Err(ssh::Refused::Other(e)) => {
+                            why.push(format!("{}: {e:#}", m.name));
+                            continue;
+                        }
+                    };
+                    // (A real machine runs the pairing key's own command, whatever is asked.)
+                    let command = format!("sh -c 'exec \"$HOME/.serpis/bin/serpis-node-current\" pair {id}'");
+                    let ssh::Exec { read, mut write, ended, tasks: _tasks } = conn.exec(&command).await.map_err(|e| failed(format!("{e:#}")))?;
+                    tokio::io::AsyncWriteExt::write_all(&mut write, format!("{offer}\n").as_bytes()).await.map_err(failed)?;
+                    let mut line = String::new();
+                    let mut read = tokio::io::BufReader::new(read);
+                    let got = tokio::time::timeout(Duration::from_secs(600), tokio::io::AsyncBufReadExt::read_line(&mut read, &mut line)).await;
+                    if !matches!(got, Ok(Ok(n)) if n > 0) {
+                        let said = ended.lock().unwrap().stderr.trim().to_string();
+                        return Err(failed(if said.is_empty() { format!("{} didn't answer", m.name) } else { said }));
+                    }
+                    return match pair::answer(&line) {
+                        Ok(true) => Ok(serde_json::to_string(&machines.iter().map(|m| serde_json::json!({"name": m.name, "address": m.address()})).collect::<Vec<_>>()).map_err(failed)?),
+                        Ok(false) => Err(failed("the desktop said no")),
+                        Err(e) => Err(failed(format!("{e:#}"))),
+                    };
+                }
+                Err(failed(format!("no machine could be reached: {}", why.join("; "))))
+            })
+            .await
+            .map_err(failed)?
     }
 
     /// Stop talking to `machine` (its chats keep running there).

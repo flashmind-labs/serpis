@@ -54,6 +54,7 @@ pub fn parse_terminal(body: &[u8]) -> Option<(String, &[u8])> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Call {
     pub id: u64,
+    /// (Flattened beside `id`: no request may have a field called `id`.)
     #[serde(flatten)]
     pub request: Request,
 }
@@ -226,6 +227,22 @@ pub enum Request {
     InstallService,
     /// Stop doing that. Answered with `Service` (`installed` false).
     UninstallService,
+    /// Pairing a phone (the desktop asks every machine it shares): let `key` (a public key,
+    /// `ssh-ed25519 AAAA…`) log in for `minutes`, only to propose the phone's key
+    /// (`serpis-node pair <pairing>`, forced). Answered with `Ok`. (Not `id`: that is the
+    /// call's.)
+    StartPairing { pairing: String, key: String, minutes: u32 },
+    /// Pairing `pairing` is over: its key can't log in any more, and a phone waiting is told no.
+    EndPairing { pairing: String },
+    /// From `serpis-node pair`: a phone proposes `key`, called `label`, for `pairing`.
+    /// Every other client hears `PairRequested`; answered with `Paired` once one answers
+    /// (`PairAnswer`), or the pairing ends.
+    Pair { pairing: String, key: String, label: String },
+    /// The answer to `PairRequested` (the desktop asked you).
+    PairAnswer { pairing: String, approved: bool },
+    /// Let `key` log in to this machine's account (it is added to `~/.ssh/authorized_keys`,
+    /// once, with `comment`). Answered with `Ok`.
+    AuthorizeKey { key: String, comment: String },
 }
 
 /// The answer to the [`Call`] with the same id.
@@ -287,6 +304,8 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// How a pairing went: the phone's key was let in, or not.
+    Paired { approved: bool },
 }
 
 /// A terminal on a machine, as its terminal node tells it.
@@ -341,6 +360,8 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<i32>,
     },
+    /// A phone asks to be let in for `pairing`, with `key`: answer with `PairAnswer`.
+    PairRequested { pairing: String, key: String, label: String },
     /// What an attached terminal printed: a [`tag::TERMINAL`] frame, as the client hands it on
     /// (never sent as an event).
     #[serde(skip)]

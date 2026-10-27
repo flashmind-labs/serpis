@@ -71,6 +71,31 @@ fn main() -> anyhow::Result<()> {
                 Err(_) => Ok(()),
             }
         }),
+        // A phone pairing (the only thing its pairing key may run): its key and name, one JSON
+        // line on stdin, go to the node here, which asks the desktop; the answer is one JSON line.
+        Some("pair") => rt.block_on(async {
+            let id = std::env::args().nth(2).unwrap_or_default();
+            let mut line = String::new();
+            let mut stdin = tokio::io::BufReader::new(tokio::io::AsyncReadExt::take(tokio::io::stdin(), 8192));
+            tokio::io::AsyncBufReadExt::read_line(&mut stdin, &mut line).await?;
+            let offer: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+            let (key, label) = (offer["key"].as_str().unwrap_or("").to_string(), offer["label"].as_str().unwrap_or("").to_string());
+            let target = serpis_node::client::Target::Local(serpis_node::socket_path());
+            let answer = match serpis_node::client::Client::connect(&target, "serpis-node pair").await {
+                Ok((c, _)) => {
+                    let request = serpis_proto::wire::Request::Pair { pairing: id, key, label };
+                    match tokio::time::timeout(std::time::Duration::from_secs(600), c.call(request)).await {
+                        Ok(Ok(serpis_proto::wire::Response::Paired { approved })) => serde_json::json!({ "approved": approved }),
+                        Ok(Ok(other)) => serde_json::json!({ "error": format!("unexpected answer {other:?}") }),
+                        Ok(Err(e)) => serde_json::json!({ "error": e.to_string() }),
+                        Err(_) => serde_json::json!({ "error": "nobody answered in 10 minutes" }),
+                    }
+                }
+                Err(_) => serde_json::json!({ "error": "serpis isn't running there: open serpis on the desktop that showed the code" }),
+            };
+            println!("{answer}");
+            Ok(())
+        }),
         // What node builds of these sources are kept under (scripts/build-node.sh --store).
         Some("stamp") => {
             println!("{}", serpis_node::STAMP);

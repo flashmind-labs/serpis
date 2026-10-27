@@ -669,11 +669,15 @@ pub fn install(ed: &mut Editor) {
         add(ed, a.str(0).map(str::to_string), a.str(1).map(str::to_string), None);
         Ok(())
     });
-    ed.define_command("machine-remove", "Forget a machine added with machine-add (param: its name). Its host key stays trusted (machine-forget-host-key).", o, |ed, a| {
+    ed.define_command("machine-remove", "Forget a machine added with machine-add (param: its name): it leaves this desktop's list, and this window's connection to it closes. Nothing on the machine changes: its node keeps running, with its chats, terminals and files, for anyone else using it. Its host key stays trusted (machine-forget-host-key).", o, |ed, a| {
         let remove = |ed: &mut Editor, name: String| {
             let list: Vec<_> = added(ed).into_iter().filter(|(n, _)| *n != name).collect();
             set_added(ed, list);
-            ed.message(format!("Removed {name}"));
+            if crate::remote::disconnect(ed, &name) {
+                ed.message(format!("Removed {name} (it keeps running there; nothing on it changed)"));
+            } else {
+                ed.message(format!("Removed {name}: its chats and terminals shown here stay connected until you close them (nothing on it changed)"));
+            }
         };
         match a.str(0) {
             Some(n) => remove(ed, n.to_string()),

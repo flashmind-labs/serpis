@@ -1,5 +1,6 @@
 //! A small ssh server for tests of what reaches machines over ssh in-process (the phone app's
-//! core): it lets in one key and runs each command it is asked to as a process on this machine,
+//! core): it lets in one key (or those in an authorized_keys file, read at every login, as sshd
+//! does; their options aren't applied) and runs each command it is asked to as a process on this machine,
 //! in the environment the server has (a test's throwaway home), the way sshd runs one with a
 //! login shell. Listens on 127.0.0.1 only.
 
@@ -20,8 +21,33 @@ pub struct Sshd {
     pub host_key: PublicKey,
 }
 
+/// Who gets in.
+#[derive(Clone)]
+pub enum Authorized {
+    Key(PublicKey),
+    /// The keys in this authorized_keys file when they log in.
+    File(std::path::PathBuf),
+}
+
+impl Authorized {
+    fn lets_in(&self, key: &PublicKey) -> bool {
+        match self {
+            Authorized::Key(k) => k.key_data() == key.key_data(),
+            Authorized::File(f) => std::fs::read_to_string(f).unwrap_or_default().lines().any(|l| {
+                let fields: Vec<&str> = l.split_whitespace().collect();
+                fields.windows(2).any(|w| PublicKey::from_openssh(&format!("{} {}", w[0], w[1])).is_ok_and(|k| k.key_data() == key.key_data()))
+            }),
+        }
+    }
+}
+
 /// Serve on a free port of 127.0.0.1, letting in `authorized` alone, until the runtime ends.
 pub async fn start(authorized: PublicKey) -> Result<Sshd> {
+    start_for(Authorized::Key(authorized)).await
+}
+
+/// Serve on a free port of 127.0.0.1, letting in whom `authorized` says, until the runtime ends.
+pub async fn start_for(authorized: Authorized) -> Result<Sshd> {
     let key = PrivateKey::random(&mut UnwrapErr(getrandom::SysRng), Algorithm::Ed25519).context("a host key")?;
     let host_key = key.public_key().clone();
     let config = Arc::new(russh::server::Config { keys: vec![key], auth_rejection_time: std::time::Duration::from_millis(10), auth_rejection_time_initial: Some(std::time::Duration::ZERO), ..Default::default() });
@@ -36,7 +62,7 @@ pub async fn start(authorized: PublicKey) -> Result<Sshd> {
 
 #[derive(Clone)]
 struct Server {
-    authorized: PublicKey,
+    authorized: Authorized,
     /// Sessions opened and not yet given a command.
     channels: Arc<Mutex<Vec<Channel<Msg>>>>,
 }
@@ -52,11 +78,11 @@ impl russh::server::Handler for Server {
     type Error = russh::Error;
 
     async fn auth_publickey(&mut self, _user: &str, key: VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
-        Ok(if key.public_key.key_data() == self.authorized.key_data() { Auth::Accept } else { Auth::reject() })
+        Ok(if self.authorized.lets_in(key.public_key) { Auth::Accept } else { Auth::reject() })
     }
 
     async fn auth_publickey_offered(&mut self, _user: &str, offer: PublicKeyOffer<'_>) -> Result<Auth, Self::Error> {
-        Ok(if offer.public_key.key_data() == self.authorized.key_data() { Auth::Accept } else { Auth::reject() })
+        Ok(if self.authorized.lets_in(offer.public_key) { Auth::Accept } else { Auth::reject() })
     }
 
     async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: russh::server::ChannelOpenHandle, _: &mut Session) -> Result<(), Self::Error> {

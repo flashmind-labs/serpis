@@ -95,6 +95,8 @@ pub struct Remotes {
     pub terminals: crate::terminals::Polls,
     /// What machine-add is doing.
     pub adding: crate::machines::Adding,
+    /// The phone being paired (`phone-pair`).
+    pub pairing: Option<crate::pairing::Active>,
     /// Each machine's connection and the buffers showing its terminals, for their bytes, which
     /// go between them without the window's thread.
     pub wires: crate::terminals::Wires,
@@ -697,6 +699,18 @@ fn copy_setup(ed: &mut Editor, machine: &str, setup: Setup) {
     });
 }
 
+/// Close this window's connection to `machine` (its node keeps running, and anyone else's
+/// connection with it), unless chats or terminals of it are shown here: false then.
+pub fn disconnect(ed: &mut Editor, machine: &str) -> bool {
+    if !chats_on(ed, machine).is_empty() || crate::terminals::shown_on(ed, machine) {
+        return false;
+    }
+    ed.remote.wires.dropped(machine);
+    ed.remote.conns.remove(machine);
+    ed.remote.targets.remove(machine);
+    true
+}
+
 /// The stream to `machine` ended: its chats show it, and it is retried while any is shown.
 fn dropped(ed: &mut Editor, machine: &str) {
     let failures = match ed.remote.conns.remove(machine) {
@@ -868,6 +882,7 @@ fn route(ed: &mut Editor, machine: &str, ev: Event) {
         Event::ToolCall { chat, call, name, args } => return run_lent(ed, machine, chat.clone(), *call, name.clone(), args.clone()),
         // (Delivered on the way in: see `with_client`.)
         Event::TerminalOutput { .. } | Event::TerminalExited { .. } => return,
+        Event::PairRequested { pairing, key, label } => return crate::pairing::requested(ed, machine, pairing.clone(), key.clone(), label.clone()),
     };
     let Some(id) = chat_buffer(ed, machine, &chat) else { return };
     let ev = Some(ev);
@@ -1450,6 +1465,7 @@ fn run_lent(ed: &mut Editor, machine: &str, chat: String, call: u64, name: Strin
 /// Once a frame: what changed for the nodes goes to them (tools lent, this machine's settings).
 pub fn tick(ed: &mut Editor) {
     crate::machines::tick(ed);
+    crate::pairing::tick(ed);
     let up = |ed: &Editor, m: &str| match ed.remote.conns.get(m) {
         Some(Conn::Up(c)) if c.is_open() => Some(c.clone()),
         _ => None,

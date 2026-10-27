@@ -27,6 +27,7 @@ pub mod jump;
 pub mod keymap;
 pub mod layout;
 pub mod machines;
+pub mod pairing;
 pub mod workspace;
 pub mod wm;
 pub mod keys;
@@ -166,6 +167,7 @@ pub fn bootstrap(ed: &mut Editor) {
     remote::install(ed);
     terminals::install(ed);
     machines::install(ed);
+    pairing::install(ed);
     pickers::install(ed);
     jump::install(ed);
     extend::install(ed);

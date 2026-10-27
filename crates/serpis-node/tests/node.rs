@@ -26,7 +26,7 @@ impl View {
             Event::State { state, .. } => self.state = Some(state),
             Event::Notice { text, .. } => self.notices.push(text),
             Event::Message { text, .. } => self.notices.push(text),
-            Event::Closed { .. } | Event::ToolCall { .. } | Event::TerminalOutput { .. } | Event::TerminalExited { .. } => {}
+            Event::Closed { .. } | Event::ToolCall { .. } | Event::TerminalOutput { .. } | Event::TerminalExited { .. } | Event::PairRequested { .. } => {}
         }
     }
 

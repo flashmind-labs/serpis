@@ -20,6 +20,17 @@ enum Link: Equatable {
     var isOnline: Bool { if case .online = self { true } else { false } }
 }
 
+/// How pairing with a desktop (its `phone-pair` code) is going.
+enum Pairing: Equatable {
+    /// Waiting for the desktop's yes; it asks about this key.
+    case waiting(fingerprint: String)
+    /// Let in on these machines.
+    case paired([String])
+    case failed(String)
+
+    var isWaiting: Bool { if case .waiting = self { true } else { false } }
+}
+
 /// A row of the chats list: a chat open on a machine, or one saved there.
 struct ChatRow: Identifiable, Hashable {
     var machine: String
@@ -49,6 +60,10 @@ final class AppModel {
     private(set) var loading = false
     /// Why the core couldn't start, when it couldn't.
     private(set) var broken: String?
+    /// Pairing with a desktop, while it goes on and once it is done.
+    private(set) var pairing: Pairing?
+    /// Whether how pairing goes is on screen (hidden while it waits, it shows again when done).
+    var pairingShown = false
 
     @ObservationIgnored private var core: Core?
     @ObservationIgnored private var chats: [String: ChatModel] = [:]
@@ -102,6 +117,34 @@ final class AppModel {
         listed[m.id] = nil
         rebuildRows()
         save()
+    }
+
+    /// Pair with the desktop that showed `link`: this phone is called `label` there. Its
+    /// machines are added, trusted as the desktop trusts them, and connected once it says yes.
+    func pair(_ link: String, label: String) {
+        guard let core, pairing?.isWaiting != true else { return }
+        pairing = .waiting(fingerprint: core.fingerprint())
+        pairingShown = true
+        Task {
+            do {
+                struct Shared: Decodable { let name: String; let address: String }
+                let shared = try JSONDecoder().decode([Shared].self, from: Data(try await core.pair(link: link, label: label).utf8))
+                let added = shared.map { s in machines.first { $0.address == s.address } ?? add(name: s.name, address: s.address) }
+                pairing = .paired(added.map(\.name))
+                pairingShown = true
+                for m in added { await connect(m) }
+                await refresh()
+            } catch {
+                pairing = .failed(Self.describe(error))
+                pairingShown = true
+            }
+        }
+    }
+
+    /// Done looking at how pairing went (or hidden while it waits: it shows again when done).
+    func dismissPairing() {
+        pairingShown = false
+        if pairing?.isWaiting == false { pairing = nil }
     }
 
     private func save() {

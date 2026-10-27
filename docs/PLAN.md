@@ -399,13 +399,22 @@ Steps:
    account), a changed host key (refused; `machine-forget-host-key`). Kept in `remote-machines`;
    `machine-rename`, `machine-remove`. Tests: unit tests of the parsers in `machines.rs`,
    `tests/ui/machine_add.lua` (stand-in ssh, ssh-copy-id and tailscale).
-   Next, the phone: it gets machines from the desktop, not by adding them itself. The desktop
-   shows a QR code with the machines (name, ssh destination, port) and their trusted host keys,
-   public data only; the phone scans it and trusts exactly those keys (pinned, no first-use
-   guess). The phone's own key still has to reach each machine's authorized_keys: the phone
-   shows its public key, the desktop takes it (paste, e.g. through Universal Clipboard, or a
-   second QR read by the Mac's camera) and adds it there over its own logins. Open: whether the
-   QR should carry a one-time way back to the desktop so the key goes over by itself.
+   Pairing the phone (*done*, same branch): `phone-pair` (`crates/serpis/src/pairing.rs`)
+   shows a QR code, a `serpis://pair#…` link: the machines shared (from `ssh -G`), their host
+   keys trusted here (`ssh-keygen -F`), and a one-time pairing key every machine lets in for a
+   few minutes only to run `serpis-node pair` (`crates/serpis-node/src/keys.rs`: `restrict`,
+   forced command, `expiry-time`). The phone (`crates/serpis-mobile/src/pair.rs`, `Core::pair`;
+   the app opens the link from the Camera, or scans it itself with VisionKit) pins those host
+   keys, logs in to the first machine it reaches with the pairing key and offers its key; the
+   node asks the desktop (`PairRequested`), which asks you, adds the phone's key on every machine
+   shared (`AuthorizeKey`), answers (`PairAnswer`) and ends the pairing (`EndPairing`). Tests:
+   `crates/serpis-node/tests/pairing.rs`, `crates/serpis-mobile/tests/pair.rs`,
+   `tests/ui/phone_pair.lua` (the code also read back from a screenshot, by hand),
+   `ios/SerpisUITests` (`testPairingWithYourComputer`, against `ios/test-machine.sh` and its
+   stand-in desktop, `examples/pair_desktop.rs`). Not done: this desktop itself as a machine to
+   share (the phone needs an address for it the desktop can't know); rayfish machines aren't
+   offered (the phone isn't on rayfish); ssh config the phone can't follow (ProxyJump, a
+   ProxyCommand) isn't carried over. Not tried yet with a real phone camera.
 
 ### Later (left open on the way; pick up when they matter)
 

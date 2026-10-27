@@ -15,6 +15,36 @@ final class SerpisUITests: XCTestCase {
         try? XCUIScreen.main.screenshot().pngRepresentation.write(to: url)
     }
 
+    /// Pairing with a computer: its code's link (the Camera app hands it over) brings the
+    /// machine, trusted as the computer trusts it; the computer says yes (the test machine's
+    /// stand-in desktop does at once), and this phone, let in with its own key, reaches it.
+    func testPairingWithYourComputer() throws {
+        guard let link = env["SERPIS_TEST_PAIR_LINK"], let key = env["SERPIS_TEST_PAIR_KEY"], let url = URL(string: link) else {
+            throw XCTSkip("no test machine: run ios/test-machine.sh and pass its environment as TEST_RUNNER_*")
+        }
+        let app = XCUIApplication()
+        let data = NSTemporaryDirectory() + "serpis-ui-\(UUID().uuidString)"
+        app.launchArguments = ["-SerpisMachines", "[]", "-SerpisDeviceKey", key, "-SerpisData", data]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["No machines yet"].waitForExistence(timeout: 20))
+        shot("p1-no-machines")
+
+        XCUIDevice.shared.system.open(url)
+        // (iOS may ask before opening the app from a link.)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if springboard.buttons["Open"].waitForExistence(timeout: 3) { springboard.buttons["Open"].tap() }
+        XCTAssertTrue(app.staticTexts["Paired"].waitForExistence(timeout: 30), "the computer said yes")
+        XCTAssertTrue(app.staticTexts["This phone can reach box."].exists)
+        shot("p2-paired")
+        app.buttons["Done"].tap()
+
+        // Its host key came with the code (nothing to confirm), and this phone's key gets in.
+        let reached = app.descendants(matching: .any)["chat-row"].waitForExistence(timeout: 30) || app.staticTexts["No chats yet"].exists
+        XCTAssertTrue(reached, "the machine's chats show")
+        XCTAssertFalse(app.buttons["Confirm box's key to reach it"].exists, "no host key to confirm")
+        shot("p3-reached")
+    }
+
     func testAChatOnAMachine() throws {
         guard let address = env["SERPIS_TEST_ADDRESS"], let key = env["SERPIS_TEST_KEY"] else {
             throw XCTSkip("no test machine: run ios/test-machine.sh and pass its environment as TEST_RUNNER_*")

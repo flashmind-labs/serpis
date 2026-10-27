@@ -235,7 +235,18 @@ and every login checks host keys strictly); a machine that doesn't take your key
 or you log in as another account). Named, it is kept (`remote-machines`) and serpis installs its
 node there. `machine-rename`, `machine-remove` and `machine-forget-host-key` (after a machine
 was reinstalled) do the rest; each source of suggestions can be turned off (`machine-suggest-*`),
-and the `machine-added` hook runs once one is added.
+and the `machine-added` hook runs once one is added. `machine-remove` only takes a machine off
+this desktop's list: nothing on the machine changes, and its node keeps running for anyone
+else using it.
+
+`phone-pair` pairs the iPhone app: it shows a code the phone's camera scans (the app opens). The
+code carries the machines you share (as ssh reaches them) with the host keys trusted here, so the
+phone trusts exactly those, and a pairing key each machine lets in for `phone-pair-minutes`, only
+to run `serpis-node pair` (`restrict`, a forced command and an `expiry-time` in its
+`authorized_keys` line). With it the phone offers its own key; the machine's node tells this
+window, which asks you (showing the key's fingerprint, as the phone does), and once you say yes
+the phone's key is added on every machine shared and the pairing key removed everywhere. The
+phone never adds or configures machines itself.
 
 Machines are ssh destinations: those added, `remote-hosts` (`serpis.var.set("remote-hosts", {"gpu-box",
 "me@lab"})`, or `{name, host, env = {...}}` tables), plus the peers of your

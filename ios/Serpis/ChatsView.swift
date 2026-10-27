@@ -103,7 +103,7 @@ struct ChatsView: View {
             ContentUnavailableView {
                 Label("No machines yet", systemImage: "desktopcomputer")
             } description: {
-                Text("Add a machine you reach over SSH, and its chats show here.")
+                Text("Run phone-pair in serpis on your computer and scan its code with the Camera, or add a machine you reach over SSH. Its chats show here.")
             } actions: {
                 Button("Add a machine") { machines = true }.buttonStyle(.borderedProminent)
             }

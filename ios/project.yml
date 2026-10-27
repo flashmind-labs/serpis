@@ -53,6 +53,11 @@ targets:
         # Asked the first time the app reaches a machine on the same network.
         NSLocalNetworkUsageDescription: Serpis reaches your machines over SSH.
         NSPhotoLibraryUsageDescription: Photos you pick go to the chat.
+        NSCameraUsageDescription: Serpis scans the code your computer shows to pair this phone.
+        # serpis://pair#… : the code phone-pair shows on the desktop (the Camera app opens it here).
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.serpis.phone
+            CFBundleURLSchemes: [serpis]
         ITSAppUsesNonExemptEncryption: false
     settings:
       base:

@@ -136,6 +136,7 @@ pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
             config_dir,
             tool_calls: HashMap::new(),
             next_call: 0,
+            pairings: HashMap::new(),
         };
         // Who holds the socket (for whoever has to stop a node that no longer answers).
         let pid_file = node.open_file.with_file_name("node.pid");
@@ -461,6 +462,15 @@ struct Node {
     /// Calls of lent tools waiting for their client: by call id, (client, where the answer goes).
     tool_calls: HashMap<u64, (u64, tokio::sync::oneshot::Sender<serpis_agent::ToolResult>)>,
     next_call: u64,
+    /// Phones being paired here, by pairing id.
+    pairings: HashMap<String, Pairing>,
+}
+
+/// A phone being paired: until when its pairing key works, and the `serpis-node pair` waiting
+/// for the desktop's answer (client, call id).
+struct Pairing {
+    until: Instant,
+    waiting: Option<(u64, u64)>,
 }
 
 /// What a chat on the node gets from it.
@@ -750,6 +760,12 @@ impl Node {
     /// A client left: its lent tools' calls fail, and the chats it alone showed may close.
     fn gone(&mut self, client: u64) {
         let shown = self.clients.remove(&client).map(|c| c.attached).unwrap_or_default();
+        // A phone that gave up pairing: the code can be tried again while it lasts.
+        for p in self.pairings.values_mut() {
+            if p.waiting.is_some_and(|(c, _)| c == client) {
+                p.waiting = None;
+            }
+        }
         // A chat it showed that never got a message (its session isn't written) and nobody else
         // shows is gone with it.
         for chat in shown {
@@ -894,6 +910,13 @@ impl Node {
         // Installing the service runs commands: done elsewhere too.
         if let Request::InstallService | Request::UninstallService = &call.request {
             self.answer_service(client, call.id, call.request);
+            return false;
+        }
+        // A phone proposing its key: answered once the desktop says.
+        if let Request::Pair { pairing, key, label } = call.request {
+            if let Err(message) = self.pair(client, call.id, pairing, key, label) {
+                self.reply(client, call.id, Response::Error { message });
+            }
             return false;
         }
         let response = match self.answer(client, call.request) {
@@ -1127,7 +1150,31 @@ impl Node {
             | Request::ResizeTerminal { .. }
             | Request::RepaintTerminal { .. }
             | Request::InstallService
-            | Request::UninstallService => unreachable!("answered elsewhere"),
+            | Request::UninstallService
+            | Request::Pair { .. } => unreachable!("answered elsewhere"),
+            Request::StartPairing { pairing: id, key, minutes } => {
+                let file = crate::keys::authorized_keys();
+                crate::keys::start_pairing(&file, &crate::keys::node_exe(), &id, &key, minutes).map_err(|e| format!("{e:#}"))?;
+                self.pairings.insert(id, Pairing { until: Instant::now() + Duration::from_secs(60 * minutes.clamp(1, 60) as u64), waiting: None });
+                Response::Ok
+            }
+            Request::EndPairing { pairing: id } => {
+                crate::keys::remove_pairing(&crate::keys::authorized_keys(), Some(&id)).map_err(|e| format!("{e:#}"))?;
+                if let Some((c, call)) = self.pairings.remove(&id).and_then(|p| p.waiting) {
+                    self.reply(c, call, Response::Paired { approved: false });
+                }
+                Response::Ok
+            }
+            Request::PairAnswer { pairing: id, approved } => {
+                let waiting = self.pairings.get_mut(&id).and_then(|p| p.waiting.take());
+                let Some((c, call)) = waiting else { return Err("no phone is waiting to pair".into()) };
+                self.reply(c, call, Response::Paired { approved });
+                Response::Ok
+            }
+            Request::AuthorizeKey { key, comment } => {
+                crate::keys::add(&crate::keys::authorized_keys(), "", &key, &comment).map_err(|e| format!("{e:#}"))?;
+                Response::Ok
+            }
             Request::Stop => Response::Ok,
             Request::Restart => {
                 let busy: Vec<String> = self.chats.values().filter(|s| s.chat.running() || s.chat.compacting()).map(|s| s.chat.title.clone()).collect();
@@ -1212,6 +1259,28 @@ impl Node {
             .unwrap_or_else(|e| Response::Error { message: format!("{e:#}") });
             let _ = msgs.send(Msg::Reply { client, id, response });
         });
+    }
+
+    /// A phone proposes `key` for pairing `id` (through `serpis-node pair`): every other client
+    /// is asked; the answer comes with `PairAnswer`.
+    fn pair(&mut self, client: u64, call: u64, id: String, key: String, label: String) -> Result<(), String> {
+        let key = crate::keys::public_key(&key).map_err(|e| e.to_string())?;
+        let label: String = label.chars().filter(|c| c.is_alphanumeric() || " -_.'’".contains(*c)).take(40).collect();
+        let label = if label.trim().is_empty() { "a phone".to_string() } else { label.trim().to_string() };
+        let Some(p) = self.pairings.get_mut(&id).filter(|p| p.until > Instant::now()) else { return Err("this pairing is over: scan a new code".into()) };
+        if p.waiting.is_some() {
+            return Err("a phone is already pairing with this code".into());
+        }
+        p.waiting = Some((client, call));
+        let frame = wire::encode(tag::EVENT, &Event::PairRequested { pairing: id, key, label });
+        let others: Vec<u64> = self.clients.keys().copied().filter(|c| *c != client).collect();
+        if others.is_empty() {
+            return Err("nobody is there to let the phone in: open serpis on the desktop that showed the code".into());
+        }
+        for c in others {
+            self.send_event(c, frame.clone());
+        }
+        Ok(())
     }
 
     /// Pack or unpack on another thread, and answer when done.

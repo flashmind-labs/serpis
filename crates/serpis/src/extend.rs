@@ -193,6 +193,7 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("agent-finished", "In the chat's node: {buffer, total}: a chat's agent stopped (done, failed or aborted)."),
     ("turn-cut-off", "In the chat's node: {buffer, continued, parked, times, text}: the node stopped mid-turn (a crash, a reboot) and started again; the turn was continued, or parked, or waits (chat-keep-going)."),
     ("remote-connected", "{machine, host, serpis}: serpis reached the node on another machine (host: what it calls itself; serpis: its version)."),
+    ("phone-paired", "{label, machines, failed}: phone-pair let a phone's key in on those machines (failed: where it couldn't)."),
     ("machine-added", "{name, host}: machine-add added a machine (host: how ssh reaches it); serpis connects to it next."),
     ("remote-disconnected", "{machine, error}: the node on another machine couldn't be reached, or its connection closed; it is retried while one of its chats is shown."),
     ("session-resumed", "{buffer, path, id, messages}: a saved session was loaded into a chat."),

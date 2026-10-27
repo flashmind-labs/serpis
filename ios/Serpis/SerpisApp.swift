@@ -15,6 +15,13 @@ struct SerpisApp: App {
                 }
             }
             .environment(app)
+            // A desktop's pairing code (the Camera app opens it here).
+            .onOpenURL { url in
+                if url.scheme == "serpis", url.host() == "pair" { app.pair(url.absoluteString, label: UIDevice.current.name) }
+            }
+            .sheet(isPresented: Binding(get: { app.pairingShown && app.pairing != nil }, set: { if !$0 { app.dismissPairing() } })) {
+                PairingView().environment(app)
+            }
             // Back in front: machines dropped meanwhile are reached again.
             .onChange(of: phase) { _, now in
                 if now == .active { Task { await app.refresh() } }
