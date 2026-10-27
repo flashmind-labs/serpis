@@ -105,6 +105,10 @@ pub enum Request {
     Abort { chat: String },
     /// Answer a tool call waiting for the person (its entry's `ask`).
     Answer { chat: String, tool: String, decision: crate::Decision },
+    /// Switch a Claude Code chat's permission mode (`ChatState::permission_mode`), at once.
+    SetPermissionMode { chat: String, mode: String },
+    /// Stop work the chat's agent runs on the side (a tool entry's `task`, by its id).
+    StopTask { chat: String, task: String },
     Compact {
         chat: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

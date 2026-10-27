@@ -160,8 +160,91 @@ struct ChatView: View {
         Task { await chat.answer(tool.id, kind, answers: answers) }
     }
 
+    /// Claude Code's permission mode, as its prompt line shows it, and a menu to switch it.
+    @ViewBuilder private var permissionMode: some View {
+        if let mode = chat.state?.permissionMode {
+            let label = permissionModes.first { $0.mode == mode }?.label ?? mode
+            Menu {
+                ForEach(permissionModes, id: \.mode) { m in
+                    Button {
+                        Task { await chat.setPermissionMode(m.mode) }
+                    } label: {
+                        if m.mode == mode { Label(m.label, systemImage: "checkmark") } else { Text(m.label) }
+                        Text(m.about)
+                    }
+                }
+            } label: {
+                Text(label)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(modeColor(mode))
+            }
+            .accessibilityLabel("Permission mode: \(label)")
+            .accessibilityIdentifier("permission-mode")
+        }
+    }
+
+    private func modeColor(_ mode: String) -> Color {
+        switch mode {
+        case "acceptEdits": .purple
+        case "plan": .teal
+        case "auto", "dontAsk": .orange
+        case "bypassPermissions": .red
+        default: .secondary
+        }
+    }
+
+    /// What runs on in the background, and a way to stop it.
+    @ViewBuilder private var backgroundWork: some View {
+        let running = chat.background
+        if !running.isEmpty {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.mini)
+                Text(running.count == 1 ? (running[0].side.task?.description ?? "1 task") : ChatView.counted(running))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("in the background").font(.footnote).foregroundStyle(.tertiary)
+                Spacer()
+                Menu("Stop") {
+                    ForEach(running, id: \.id) { t in
+                        Button(t.side.task?.description ?? t.name, role: .destructive) { Task { await chat.stopTask(t) } }
+                    }
+                }
+                .font(.footnote)
+            }
+            .padding(.horizontal, 6)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("background")
+        }
+    }
+
+    /// What runs in the background, counted by kind, as Claude Code counts it: "1 shell · 1 monitor".
+    static func counted(_ tools: [Tool]) -> String {
+        var counts: [(one: String, many: String, n: Int)] = []
+        for t in tools {
+            let (one, many) = switch t.side.task?.kind ?? "" {
+            case "bash": ("shell", "shells")
+            case "monitor": ("monitor", "monitors")
+            case "agent", "remote_agent", "in_process_teammate": ("agent", "agents")
+            default: ("task", "tasks")
+            }
+            if let i = counts.firstIndex(where: { $0.one == one }) { counts[i].n += 1 } else { counts.append((one, many, 1)) }
+        }
+        let order = ["shell", "monitor", "agent", "task"]
+        return counts.sorted { (order.firstIndex(of: $0.one) ?? 9) < (order.firstIndex(of: $1.one) ?? 9) }
+            .map { $0.n == 1 ? "1 \($0.one)" : "\($0.n) \($0.many)" }.joined(separator: " · ")
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
+            if chat.state?.permissionMode != nil || !chat.background.isEmpty {
+                HStack(spacing: 10) {
+                    permissionMode
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 6)
+            }
+            backgroundWork
             approval
             if !images.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {

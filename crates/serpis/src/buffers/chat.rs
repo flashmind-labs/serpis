@@ -341,9 +341,19 @@ impl ChatBuffer {
         self.node.post(Request::Abort { chat: self.node.chat.clone() });
     }
 
+    /// The work running on the side (background commands, agents), the latest first.
+    pub fn background_tasks(&self) -> Vec<serpis_proto::Task> {
+        self.entries.iter().rev().flat_map(Entry::walk).filter_map(|e| if let Entry::Tool { task: Some(t), .. } = e { t.running().then(|| (**t).clone()) } else { None }).collect()
+    }
+
+    /// Ask the agent to stop task `task` (one of [`Self::background_tasks`]).
+    pub fn stop_task(&mut self, task: &str) {
+        self.node.post(Request::StopTask { chat: self.node.chat.clone(), task: task.to_string() });
+    }
+
     /// The first tool call waiting for the person: (id, name, args, what "always" allows).
     pub fn waiting(&self) -> Option<(String, String, Value, Option<String>)> {
-        self.entries.iter().find_map(|e| match e {
+        self.entries.iter().flat_map(Entry::walk).find_map(|e| match e {
             Entry::Tool { id, name, args, ask: Some(a), .. } => Some((id.clone(), name.clone(), args.clone(), a.always.clone())),
             _ => None,
         })
@@ -354,7 +364,7 @@ impl ChatBuffer {
         let Some((tool, ..)) = self.waiting() else { return false };
         self.node.post(Request::Answer { chat: self.node.chat.clone(), tool: tool.clone(), decision });
         // Shown at once; the node's splice confirms it.
-        if let Some(Entry::Tool { ask, .. }) = self.entries.iter_mut().find(|e| matches!(e, Entry::Tool { id, .. } if *id == tool)) {
+        if let Some(Entry::Tool { ask, .. }) = serpis_proto::find_tool_mut(&mut self.entries, &tool) {
             *ask = None;
         }
         self.dirty = true;
@@ -521,6 +531,8 @@ impl ChatBuffer {
             machine: (!self.node.local()).then(|| self.node.machine.clone()),
             node: (self.node.machine.clone(), self.node.chat.clone()),
             keep_going: s.keep_going,
+            permission_mode: s.permission_mode.clone(),
+            background: self.background_tasks().len(),
         }
     }
 
@@ -695,9 +707,10 @@ impl ChatBuffer {
                         }
                     }
                 }
-                Entry::Tool { name, args, partial, result, elapsed_ms, ask, .. } => {
+                Entry::Tool { name, args, partial, result, elapsed_ms, ask, task, steps, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
-                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), ask.as_ref(), v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
+                    let side = Side { task: task.as_deref(), steps };
+                    for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), ask.as_ref(), side, v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
@@ -1224,12 +1237,143 @@ fn arg<'a>(args: &'a Value, k: &str) -> &'a str {
 /// A tool call as a card: a header row (status, name, what it acts on, time), a hairline,
 /// then its output or diff.
 #[allow(clippy::too_many_arguments)]
+/// What kind of work a task is, as Claude Code counts them: ("Shell", "shell", "shells").
+fn task_kind(t: &serpis_proto::Task) -> (&'static str, &'static str, &'static str) {
+    match t.kind.as_str() {
+        "bash" => ("Shell", "shell", "shells"),
+        "monitor" => ("Monitor", "monitor", "monitors"),
+        "agent" | "remote_agent" | "in_process_teammate" => ("Agent", "agent", "agents"),
+        "local_workflow" => ("Workflow", "workflow", "workflows"),
+        _ => ("Task", "task", "tasks"),
+    }
+}
+
+/// What runs in the background, counted by kind: "1 shell · 1 monitor", "2 agents".
+pub fn background_counts(running: &[serpis_proto::Task]) -> String {
+    let mut counts: Vec<(&str, &str, usize)> = Vec::new();
+    // In a fixed order, as Claude Code lists them: shells first.
+    let order = ["shell", "monitor", "agent", "workflow", "task"];
+    let mut running: Vec<&serpis_proto::Task> = running.iter().collect();
+    running.sort_by_key(|t| order.iter().position(|o| *o == task_kind(t).1));
+    for t in running {
+        let (_, one, many) = task_kind(t);
+        match counts.iter_mut().find(|(o, ..)| *o == one) {
+            Some(c) => c.2 += 1,
+            None => counts.push((one, many, 1)),
+        }
+    }
+    counts.iter().map(|(one, many, n)| if *n == 1 { format!("1 {one}") } else { format!("{n} {many}") }).collect::<Vec<_>>().join(" · ")
+}
+
+/// Claude Code's permission mode as its prompt line says it, and its color.
+pub fn permission_mode_label(mode: &str, t: &crate::theme::Theme) -> (String, Color32) {
+    match mode {
+        "acceptEdits" => ("⏵⏵ accept edits on".into(), t.purple),
+        "plan" => ("⏸ plan mode on".into(), t.cyan),
+        "auto" => ("⏵⏵ auto mode on".into(), t.yellow),
+        "dontAsk" => ("⏵⏵ don't ask on".into(), t.yellow),
+        "bypassPermissions" => ("⏵⏵ bypass permissions on".into(), t.red),
+        _ => ("asks before acting".into(), t.fg_dim),
+    }
+}
+
+impl ChatBuffer {
+    /// Switch Claude Code's permission mode for this chat.
+    pub fn set_permission_mode(&mut self, mode: &str) {
+        self.node.post(Request::SetPermissionMode { chat: self.node.chat.clone(), mode: mode.to_string() });
+        // Shown at once; the node's state confirms it.
+        self.node.state.permission_mode = Some(mode.to_string());
+        self.dirty = true;
+    }
+}
+
+/// What a tool call started on the side: the work's state, and a subagent's steps.
+#[derive(Clone, Copy)]
+struct Side<'a> {
+    task: Option<&'a serpis_proto::Task>,
+    steps: &'a [Entry],
+}
+
+/// How work on the side is going, in a few words: "in background · 12s", "3 tools · 1.2k
+/// tokens", "stopped".
+fn task_status(task: &serpis_proto::Task) -> String {
+    let mut parts = Vec::new();
+    match task.status.as_str() {
+        "running" if task.background => parts.push("in background".to_string()),
+        "running" => {}
+        "failed" => parts.push("failed".into()),
+        "stopped" => parts.push("stopped".into()),
+        _ if task.background => parts.push("done in background".into()),
+        _ => {}
+    }
+    if task.tool_uses > 0 {
+        parts.push(format!("{} tool{}", task.tool_uses, if task.tool_uses == 1 { "" } else { "s" }));
+    }
+    if task.tokens > 0 {
+        parts.push(format!("{} tokens", fmt_tokens(task.tokens)));
+    }
+    if task.duration_ms >= 1000 {
+        parts.push(fmt_duration(Duration::from_millis(task.duration_ms), false));
+    }
+    parts.join(" · ")
+}
+
+/// A subagent's steps as rows: each tool call on a line (its status, name and what it acts
+/// on), and what it said.
+fn step_rows(steps: &[Entry], depth: usize, out: &mut Vec<(StyledLine, Option<Color32>)>) {
+    let pad = "    ".repeat(depth);
+    for (i, e) in steps.iter().enumerate() {
+        match e {
+            Entry::Tool { name, args, result, ask, task, steps: inner, .. } => {
+                let (icon, face) = match result {
+                    None if ask.is_some() => ("?", Face::Warning),
+                    None => ("●", Face::Warning),
+                    Some(r) if r.is_error => ("✗", Face::Error),
+                    Some(_) => ("✓", Face::ToolOk),
+                };
+                let mut text = format!("{pad}{icon} ");
+                let mut spans = vec![(pad.len()..text.len(), face)];
+                let n0 = text.len();
+                text.push_str(name);
+                spans.push((n0..text.len(), Face::ToolHeader));
+                let summary = serpis_chat::tool_summary(name, args);
+                if !summary.is_empty() {
+                    text.push_str("  ");
+                    let s0 = text.len();
+                    text.push_str(&summary);
+                    spans.push((s0..text.len(), Face::ToolArgs));
+                }
+                if let Some(t) = task.as_deref().map(task_status).filter(|s| !s.is_empty()) {
+                    text.push_str("   ");
+                    let s0 = text.len();
+                    text.push_str(&t);
+                    spans.push((s0..text.len(), Face::Meta));
+                }
+                out.push((StyledLine::new(text, Face::ToolArgs).spans(spans), None));
+                step_rows(inner, depth + 1, out);
+            }
+            Entry::Assistant { blocks, error, .. } => {
+                // What it said last is its answer; what it said on the way, dimmer.
+                let last = !steps[i + 1..].iter().any(|e| matches!(e, Entry::Assistant { .. }));
+                let face = if error.is_some() { Face::Error } else if last { Face::AssistantText } else { Face::Dim };
+                let text: String = blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
+                for l in text.lines().chain(error.as_deref().into_iter()) {
+                    out.push((StyledLine::new(format!("{pad}{l}"), face), None));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tool_lines(
     name: &str,
     args: &Value,
     partial: Option<&str>,
     result: Option<&ToolResultMessage>,
     ask: Option<&serpis_proto::Ask>,
+    side: Side,
     expanded: Option<bool>,
     started: Option<Instant>,
     elapsed: Option<Duration>,
@@ -1237,11 +1381,16 @@ fn tool_lines(
     gap: f32,
 ) -> Vec<StyledLine> {
     let k = t.ui_scale();
+    let working = side.task.is_some_and(|t| t.running());
     let (icon, icon_face) = match result {
         None if ask.is_some() => ("?", Face::Warning),
         None if started.is_some() => ("●", Face::Warning),
         None => ("○", Face::Meta),
         Some(r) if r.is_error => ("✗", Face::Error),
+        // Returned, and still at it in the background.
+        Some(_) if working => ("●", Face::Accent),
+        Some(_) if side.task.is_some_and(|t| t.status == "failed") => ("✗", Face::Error),
+        Some(_) if side.task.is_some_and(|t| t.status == "stopped") => ("■", Face::Meta),
         Some(_) => ("✓", Face::ToolOk),
     };
     let card = Block::new(t.tool_bg).border(t.border);
@@ -1261,6 +1410,7 @@ fn tool_lines(
     }
     let time = match (elapsed, started) {
         _ if ask.is_some() => "waiting for you".to_string(),
+        _ if side.task.is_some_and(|t| !task_status(t).is_empty()) => task_status(side.task.unwrap()),
         (Some(e), _) if e.as_millis() >= 100 => fmt_duration(e, true),
         (None, Some(s)) => fmt_duration(s.elapsed(), false),
         _ => String::new(),
@@ -1274,6 +1424,28 @@ fn tool_lines(
 
     // Body lines, each with an optional row tint (diffs).
     let mut body: Vec<(StyledLine, Option<Color32>)> = Vec::new();
+    // A subagent: what it does, as it goes (its own words close it).
+    step_rows(side.steps, 0, &mut body);
+    if body.is_empty()
+        && let Some(task) = side.task
+        && (task.kind == "bash" || task.kind == "monitor")
+        && task.background
+    {
+        // A command in the background: how it is going instead of where its output goes.
+        let (line, face) = match task.status.as_str() {
+            "running" => ("Running in the background · C-c C-k stops it".to_string(), Face::Meta),
+            "failed" => (task.summary.clone().unwrap_or_else(|| "It failed.".into()), Face::Error),
+            "stopped" => ("Stopped.".to_string(), Face::Meta),
+            _ => (task.summary.clone().unwrap_or_else(|| "Finished.".into()), Face::ToolOutput),
+        };
+        body.push((StyledLine::new(line, face), None));
+    } else if body.is_empty() && side.task.is_some_and(|t| t.running() && t.kind == "agent") {
+        body.push((StyledLine::new(side.task.and_then(|t| t.summary.clone()).unwrap_or_else(|| "Starting…".into()), Face::Meta), None));
+    }
+    if !body.is_empty() && side.task.is_some_and(|t| t.running()) && side.task.is_some_and(|t| t.kind == "agent") {
+        let now = side.task.and_then(|t| t.last_tool.clone()).map(|n| format!("● using {n}…")).unwrap_or_else(|| "● working…".into());
+        body.push((StyledLine::new(now, Face::Meta), None));
+    }
     let diff = result.and_then(|r| r.details.get("diff")).and_then(Value::as_str);
     if let (Some(d), Some(r)) = (diff, result) {
         if !r.is_error {
@@ -1387,16 +1559,17 @@ fn tool_lines(
     let total = body.len();
     let shown = if expanded {
         total
-    } else if name == "bash" || result.is_none() {
+    } else if name == "bash" || result.is_none() || !side.steps.is_empty() {
         total.min(PREVIEW_LINES)
     } else {
         total.min(if name == "read" { 0 } else { 4 })
     };
     // Bash previews show the tail, everything else the head.
-    let mut slice: Vec<(StyledLine, Option<Color32>)> = if name == "bash" && !expanded && total > shown { body[total - shown..].to_vec() } else { body[..shown].to_vec() };
+    let tail = name == "bash" || !side.steps.is_empty();
+    let mut slice: Vec<(StyledLine, Option<Color32>)> = if tail && !expanded && total > shown { body[total - shown..].to_vec() } else { body[..shown].to_vec() };
     if total > shown {
         let more = (StyledLine::new(format!("{} more lines · TAB or click to expand", total - shown), Face::Meta), None);
-        if name == "bash" {
+        if tail {
             slice.insert(0, more);
         } else {
             slice.push(more);
@@ -1693,9 +1866,38 @@ impl Buffer for ChatBuffer {
         } else {
             ("⏸ Waits", "If its machine's serpis-node stops mid-turn (a crash, a reboot), the turn waits for you to send a message. Click to make it keep going (chat-toggle-keep-going; default: chat-keep-going)")
         };
-        let (kr, clicked) = pill(ui, wr.right() + 2.0 * k, "keep-going", label, tip, None);
+        let (mut kr, clicked) = pill(ui, wr.right() + 2.0 * k, "keep-going", label, tip, None);
         if clicked {
             run = Some("chat-toggle-keep-going");
+        }
+        // Claude Code's permission mode, as its own prompt line shows it.
+        if let Some(mode) = self.node.state.permission_mode.clone() {
+            let (label, color) = permission_mode_label(&mode, &theme);
+            let w = crate::chrome::text_width(&painter, &label, small.clone()) + 20.0 * k;
+            let r = Rect::from_min_size(egui::pos2(kr.right() + 2.0 * k, cy - 13.0 * k), egui::vec2(w, 26.0 * k));
+            let resp = ui.interact(r, id.with("permission-mode"), egui::Sense::click()).on_hover_text("Claude Code's permission mode: S-TAB cycles it (chat-cycle-permission-mode), a click picks one (chat-select-permission-mode)");
+            if resp.hovered() {
+                painter.rect_filled(r, 8.0 * k, crate::chrome::hover_bg(&theme));
+            }
+            crate::chrome::text(&painter, egui::pos2(r.left() + 10.0 * k, cy), &label, small.clone(), color, w);
+            hits.push(("permission-mode", r));
+            kr = r;
+            if resp.clicked() {
+                run = Some("chat-select-permission-mode");
+            }
+        }
+        // Work the agent left running on the side (Claude Code's background shells, agents).
+        let running = self.background_tasks();
+        if !running.is_empty() {
+            let label = format!("· {}", background_counts(&running));
+            let mut tip: Vec<String> = running.iter().map(|t| format!("{}: {}", task_kind(t).0, t.description)).collect();
+            tip.push("Running in the background. Click (or C-c C-k) to stop one (chat-stop-task)".into());
+            let (br, clicked) = pill(ui, kr.right() + 2.0 * k, "background", &label, &tip.join("\n"), None);
+            hits.push(("background", br));
+            kr = br;
+            if clicked {
+                run = Some("chat-stop-task");
+            }
         }
         if let Some((_, name, args, always)) = &waiting {
             let r = ask_bar;

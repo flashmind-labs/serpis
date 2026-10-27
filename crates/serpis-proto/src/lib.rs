@@ -59,11 +59,86 @@ pub enum Entry {
         /// Waiting for the person to allow it (a [`wire::Request::Answer`] decides).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ask: Option<Ask>,
+        /// The work it started on the side (Claude Code's background commands and agents), as
+        /// it goes: still running after the call itself returned, or done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<Box<Task>>,
+        /// What a subagent it started said and did, in order: its replies and tool calls.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        steps: Vec<Entry>,
     },
     Info {
         text: String,
         tone: Tone,
     },
+}
+
+impl Entry {
+    /// This entry and, for a tool call, everything in the steps of the subagent it started,
+    /// depth first.
+    pub fn walk(&self) -> Vec<&Entry> {
+        let mut out = vec![self];
+        if let Entry::Tool { steps, .. } = self {
+            out.extend(steps.iter().flat_map(Entry::walk));
+        }
+        out
+    }
+
+    /// Whether this is tool call `id`, or holds it among its steps.
+    pub fn holds_tool(&self, id: &str) -> bool {
+        self.walk().iter().any(|e| matches!(e, Entry::Tool { id: i, .. } if i == id))
+    }
+}
+
+/// Tool call `id`, among `entries` or their subagents' steps (the latest first).
+pub fn find_tool<'a>(entries: &'a [Entry], id: &str) -> Option<&'a Entry> {
+    entries.iter().rev().flat_map(Entry::walk).find(|e| matches!(e, Entry::Tool { id: i, .. } if i == id))
+}
+
+/// [`find_tool`], to change it. `entries` is searched from the end.
+pub fn find_tool_mut<'a>(entries: &'a mut [Entry], id: &str) -> Option<&'a mut Entry> {
+    let i = entries.iter().rposition(|e| e.holds_tool(id))?;
+    let e = &mut entries[i];
+    if matches!(e, Entry::Tool { id: i, .. } if i == id) {
+        return Some(e);
+    }
+    match e {
+        Entry::Tool { steps, .. } => find_tool_mut(steps, id),
+        _ => None,
+    }
+}
+
+/// Work an agent runs on the side of a tool call: a command in the background, a subagent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    /// `bash` (a command) or `agent` (a subagent).
+    pub kind: String,
+    pub description: String,
+    /// `running`, `completed`, `failed` or `stopped`.
+    pub status: String,
+    /// It runs on while the agent does other things (else the tool call waits for it).
+    #[serde(default)]
+    pub background: bool,
+    /// What it did, once done (or a line on what it is doing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// The tool it is using now (a subagent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool: Option<String>,
+    #[serde(default)]
+    pub tool_uses: u64,
+    #[serde(default)]
+    pub tokens: u64,
+    /// How long it has run (or ran).
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+impl Task {
+    pub fn running(&self) -> bool {
+        self.status == "running"
+    }
 }
 
 /// A tool call waiting for the person's go-ahead (Claude Code's permission prompts).
@@ -175,6 +250,10 @@ pub struct ChatState {
     /// choice, else its node's `chat-keep-going`).
     #[serde(default = "yes")]
     pub keep_going: bool,
+    /// Claude Code's permission mode, for a chat on it: `default`, `acceptEdits`, `plan`,
+    /// `auto`, `dontAsk` or `bypassPermissions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 fn yes() -> bool {
@@ -200,6 +279,7 @@ impl Default for ChatState {
             custom: Vec::new(),
             cache_info: serde_json::Value::Null,
             keep_going: true,
+            permission_mode: None,
         }
     }
 }
@@ -237,7 +317,7 @@ mod tests {
                 error: None,
                 cache: Some(CacheHit::Hit(0.94)),
             },
-            Entry::Tool { id: "1".into(), name: "bash".into(), args: serde_json::json!({"command": "ls"}), partial: Some("a\n".into()), result: None, running_ms: Some(1200), elapsed_ms: None, ask: None },
+            Entry::Tool { id: "1".into(), name: "bash".into(), args: serde_json::json!({"command": "ls"}), partial: Some("a\n".into()), result: None, running_ms: Some(1200), elapsed_ms: None, ask: None, task: None, steps: vec![] },
             Entry::Info { text: "Compacted".into(), tone: Tone::MetaWarn },
         ];
         let s = Splice { from: 3, entries };

@@ -366,6 +366,23 @@ its reply instead.
 `claude-code-permission-mode`, `claude-code-args` and `claude-code-path` set the rest.
 `cargo run -p serpis-chat --example claude_code_smoke -- <dir> <prompt>` tries it headless.
 
+Its permission mode shows in the composer the way its own prompt line shows it
+(`⏵⏵ auto mode on`, `⏸ plan mode on`, `⏵⏵ accept edits on`), on the phone too. `S-TAB` cycles
+through `claude-code-permission-mode-cycle` (default, accept edits, plan, auto) and a click on it
+picks any mode (`chat-select-permission-mode`); the switch is immediate, with no restart, and
+when Claude Code changes mode itself (edits allowed for the session, a plan approved) the chat
+follows. New chats start in `claude-code-permission-mode`.
+
+Work it runs on the side shows as it goes, as many at once as it starts. A background shell
+(Bash with `run_in_background`), a monitor or an agent keeps a live status on the card that
+started it (`● in background`, then how it ended), and the composer counts what is running by
+kind, as Claude Code does (`· 1 shell · 1 monitor`); `C-c C-k` (`chat-stop-task`) stops one,
+asking which when several run. When such work finishes after the turn, Claude Code takes a turn of its own to act on
+it, and the chat runs that turn like any other: shown with what started it, recorded, stoppable.
+A subagent's steps (its commands, edits and answer) show inside its Agent card, live, even
+when it runs in the background. Stopping or closing a chat ends everything its `claude`
+started: what it runs is sent SIGTERM (so scripts clean up), then SIGKILL after a moment.
+
 `claude-code-usage` shows your subscription's usage as Claude Code's `/usage` reports it, in a
 page of its own: the current five-hour session and the week (and any per-model weeks), each with
 a bar that turns yellow and then red as it fills and when it resets, extra usage, where the week

@@ -854,6 +854,93 @@ pub fn install(ed: &mut Editor) {
     ed.define_command("chat-allow-always", "Allow the tool call waiting for you, and what its prompt offers from now on (\"edits in this session\", a rule for this project).", o, |ed, _| {
         answer(ed, serpis_proto::Decision::Always)
     });
+    ed.define_command(
+        "chat-cycle-permission-mode",
+        "Switch this Claude Code chat to the next permission mode of claude-code-permission-mode-cycle (default, accept edits, plan, auto), as shift+tab does in Claude Code.",
+        o,
+        |ed, _| {
+            let Some(mode) = with_chat(ed, |c, _| c.state_now().permission_mode)? else {
+                ed.message("Only chats on Claude Code have permission modes");
+                return Ok(());
+            };
+            let cycle: Vec<String> = ed.var("claude-code-permission-mode-cycle").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            let Some(next) = cycle.iter().position(|m| *m == mode).map(|i| cycle[(i + 1) % cycle.len()].clone()).or_else(|| cycle.first().cloned()) else {
+                ed.message("claude-code-permission-mode-cycle is empty");
+                return Ok(());
+            };
+            with_chat(ed, |c, _| c.set_permission_mode(&next))?;
+            ed.message(crate::buffers::chat::permission_mode_label(&next, &ed.theme).0);
+            Ok(())
+        },
+    );
+    ed.define_command(
+        "chat-select-permission-mode",
+        "Choose this Claude Code chat's permission mode: when it asks you before acting. Param: default, acceptEdits, plan, auto, dontAsk or bypassPermissions.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            if with_chat(ed, |c, _| c.state_now().permission_mode)?.is_none() {
+                ed.message("Only chats on Claude Code have permission modes");
+                return Ok(());
+            }
+            let set = move |ed: &mut Editor, mode: String| {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.set_permission_mode(&mode));
+                ed.message(crate::buffers::chat::permission_mode_label(&mode, &ed.theme).0);
+            };
+            if let Some(m) = a.str(0) {
+                if !serpis_chat::PERMISSION_MODES.contains(&m) {
+                    anyhow::bail!("{m} isn't a permission mode (one of {})", serpis_chat::PERMISSION_MODES.join(", "));
+                }
+                set(ed, m.to_string());
+                return Ok(());
+            }
+            let about = [
+                ("default", "asks before edits and commands its rules don't allow"),
+                ("acceptEdits", "edits without asking; asks for commands"),
+                ("plan", "reads and plans, changes nothing until you approve"),
+                ("auto", "decides itself what is safe, asks only for what isn't"),
+                ("dontAsk", "never asks: what its rules don't allow is refused"),
+                ("bypassPermissions", "never asks and allows everything"),
+            ];
+            let cands = about.iter().map(|(m, d)| Candidate::new(*m).detail(*d)).collect();
+            ed.completing_read("Permission mode: ", cands, true, move |ed, c, _| {
+                if let Some(c) = c {
+                    set(ed, c.value);
+                }
+            });
+            Ok(())
+        },
+    );
+    ed.define_command(
+        "chat-stop-task",
+        "Stop work the agent left running in the background (Claude Code's background commands and agents): the only one, or the one you pick. Param: its task id.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            let tasks = with_chat(ed, |c, _| c.background_tasks())?;
+            let stop = move |ed: &mut Editor, task: String| {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.stop_task(&task));
+                ed.message("Asked it to stop");
+            };
+            if let Some(task) = a.str(0) {
+                stop(ed, task.to_string());
+                return Ok(());
+            }
+            match tasks.len() {
+                0 => ed.message("Nothing is running in the background"),
+                1 => stop(ed, tasks[0].id.clone()),
+                _ => {
+                    let cands = tasks.iter().map(|t| Candidate::new(t.description.clone()).detail(format!("{} · {}", if t.kind == "agent" { "agent" } else { "command" }, t.id))).collect();
+                    ed.completing_read("Stop: ", cands, true, move |ed, c, _| {
+                        if let Some(t) = c.and_then(|c| tasks.into_iter().find(|t| t.description == c.value)) {
+                            stop(ed, t.id);
+                        }
+                    });
+                }
+            }
+            Ok(())
+        },
+    );
     ed.define_command("chat-deny", "Refuse the tool call waiting for you. Param: what to tell the agent instead.", o, |ed, a| {
         let message = a.str(0).filter(|m| !m.trim().is_empty()).map(str::to_string);
         answer(ed, serpis_proto::Decision::Deny { message })

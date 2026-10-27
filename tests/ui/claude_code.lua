@@ -96,6 +96,43 @@ local steps = {
     when(function() return idle_with("Edited.")() and select(2, (serpis.chat.transcript() or ""):gsub("Edited%.", "")) >= 2 end, go)
     return false
   end,
+  function(go)
+    local function mode() return (serpis.chat.info() or {}).permission_mode end
+    -- Always on an edit switched Claude Code to accepting edits; the chat follows it.
+    T.check("the chat shows the mode Claude Code switched to", mode(), "acceptEdits")
+    T.check("its composer shows the mode", d.composer()["permission-mode"] ~= nil, true)
+    -- Shift+Tab cycles the modes, as in Claude Code.
+    T.press("S-TAB")
+    when(function() return mode() == "plan" end, function()
+      T.check("S-TAB: plan", mode(), "plan")
+      T.press("S-TAB")
+      when(function() return mode() == "auto" end, function()
+        T.check("S-TAB: auto", mode(), "auto")
+        T.press("S-TAB")
+        when(function() return mode() == "default" end, go)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    local function mode() return (serpis.chat.info() or {}).permission_mode end
+    T.check("S-TAB: back to default", mode(), "default")
+    -- A click on it picks one.
+    click("permission-mode")
+    when(function() return d.minibuffer() == "Permission mode: " end, function()
+      d.text("auto")
+      serpis.defer(300, function()
+        T.press("RET")
+        when(function() return mode() == "auto" end, go)
+      end)
+    end)
+    return false
+  end,
+  function()
+    T.check("a click picks one", (serpis.chat.info() or {}).permission_mode, "auto")
+    local log = sh("cat '" .. os.getenv("FAKE_CLAUDE_LOG") .. "'")
+    T.check("and Claude Code is switched at once", log:find('"mode":"auto","subtype":"set_permission_mode"', 1, true) ~= nil or log:find('"subtype":"set_permission_mode","mode":"auto"', 1, true) ~= nil, true)
+  end,
   function(go) return ask("a question", go) end,
   function(go)
     local shots = os.getenv("SERPIS_TEST_SHOTS")
@@ -191,8 +228,89 @@ local steps = {
     when(idle_with("You chose Red in L."), go)
     return false
   end,
-  function()
+  function(go)
     T.check("chat-answer-questions takes answers from a script", has("You chose Red in L."), true)
+    -- A subagent: its steps show in its card.
+    d.text("use a subagent")
+    T.press("RET")
+    when(idle_with("The subagent said from-sub."), go)
+    return false
+  end,
+  function(go)
+    T.check("the subagent's command shows in its card", has("✓ bash  echo from-sub"), true)
+    T.check("and what it said", has("It printed from-sub."), true)
+    T.check("and how it went", has("1 tool · 1.2k tokens"), true)
+    -- A command left running: the composer says so, and C-c C-k stops it.
+    d.text("background forever")
+    T.press("RET")
+    when(function() return idle_with("Started it in the background.")() and d.composer()["background"] ~= nil end, go)
+    return false
+  end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      serpis.defer(1000, function() d.screenshot(shots .. "/claude-code-background.png"); serpis.defer(500, go) end)
+      return false
+    end
+  end,
+  function(go)
+    T.check("the composer shows what runs in the background", d.composer()["background"] ~= nil, true)
+    T.check("its card says it runs on", has("Running in the background · C-c C-k stops it"), true)
+    T.press("C-c C-k")
+    when(function() return d.composer()["background"] == nil and has("Stopped.") end, go)
+    return false
+  end,
+  function(go)
+    T.check("C-c C-k stopped it", has("Stopped."), true)
+    -- Several at once: a shell and a monitor.
+    d.text("background forever too")
+    T.press("RET")
+    when(idle_with("Started it in the background."), function()
+      d.text("start a monitor")
+      T.press("RET")
+      when(function() return idle_with("Watching the log.")() and (serpis.chat.info() or {}).background == 2 end, go)
+    end)
+    return false
+  end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      serpis.defer(1000, function() d.screenshot(shots .. "/claude-code-shell-and-monitor.png"); serpis.defer(500, go) end)
+      return false
+    end
+  end,
+  function(go)
+    T.check("both run in the background", (serpis.chat.info() or {}).background, 2)
+    T.check("the monitor's card says what it watches", has("Monitor  watch the log"), true)
+    -- With two, C-c C-k asks which.
+    T.press("C-c C-k")
+    when(function() return d.minibuffer() == "Stop: " end, function()
+      d.text("watch the log")
+      serpis.defer(300, function()
+        T.press("RET")
+        when(function() return (serpis.chat.info() or {}).background == 1 end, go)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("C-c C-k asked which and stopped the monitor", (serpis.chat.info() or {}).background, 1)
+    T.press("C-c C-k")
+    when(function() return (serpis.chat.info() or {}).background == 0 end, go)
+    return false
+  end,
+  function(go)
+    T.check("with one left, C-c C-k stops it", (serpis.chat.info() or {}).background, 0)
+    -- One that finishes after the turn: Claude Code takes a turn of its own, shown as any.
+    d.text("run it in the background")
+    T.press("RET")
+    when(function() return has("The background command finished: bg-done.") and not serpis.chat.running() end, go)
+    return false
+  end,
+  function()
+    T.check("its own turn shows, after what started it", has("Background command finished: sleep then echo bg-done"), true)
+    T.check("with what it said", has("The background command finished: bg-done."), true)
+    T.check("and its card says how it ended", has("completed (exit code 0)"), true)
   end,
   function()
     local log = sh("cat '" .. os.getenv("FAKE_CLAUDE_LOG") .. "'")

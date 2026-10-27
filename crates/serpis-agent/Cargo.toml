@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 serpis-ai.workspace = true
+serpis-proto.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

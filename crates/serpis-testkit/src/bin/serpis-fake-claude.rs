@@ -4,12 +4,18 @@
 //! lines); sessions are files in `$FAKE_CLAUDE_DIR`.
 //!
 //! Replies by what the prompt says: "edit" asks to edit `notes.txt` (a permission prompt, then a
-//! diff), "slow" streams until interrupted, "fail" ends in an API error, anything else is
-//! echoed after a thought.
+//! diff), "question" asks two questions, "slow" streams until interrupted, "fail" ends in an
+//! API error, "subagent" runs an agent whose steps come during the turn, "agent in the
+//! background" one whose steps come after it, "background" a command in the background (a
+//! real `sleep`, in a process group of its own, logged as `{"spawned": pid}`) that finishes
+//! after the turn ("forever": never), "monitor" a Monitor that runs until stopped; work
+//! finished after a turn gets a turn of its own, as
+//! Claude Code does. Anything else is echoed after a thought.
 
 use std::io::{BufRead, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -49,6 +55,47 @@ fn result(session: &str, error: Option<&str>) {
     out(json!({"type": "result", "subtype": if error.is_some() { "error_during_execution" } else { "success" }, "is_error": error.is_some(), "result": error.unwrap_or("ok"), "session_id": session, "total_cost_usd": 0.01}));
 }
 
+fn system(sub: &str, v: Value) {
+    let mut line = json!({"type": "system", "subtype": sub, "session_id": "s"});
+    line.as_object_mut().unwrap().extend(v.as_object().cloned().unwrap_or_default());
+    out(line);
+}
+
+/// A tool call, streamed.
+fn call(index: u64, id: &str, name: &str, input: &Value) {
+    ev(json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}}));
+    ev(json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}));
+    ev(json!({"type": "content_block_stop", "index": index}));
+}
+
+fn tool_result(id: &str, text: &str, parent: Option<&str>) {
+    out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": text}]}, "parent_tool_use_id": parent}));
+}
+
+/// A subagent's steps (under tool call `parent`): a command, its output, its answer.
+fn subagent_steps(parent: &str, n: u64) {
+    let bash = format!("sub{n}");
+    out(json!({"type": "assistant", "message": {"id": format!("s{n}a"), "role": "assistant", "model": "claude-fake-5", "content": [{"type": "tool_use", "id": bash, "name": "Bash", "input": {"command": "echo from-sub"}}]}, "parent_tool_use_id": parent}));
+    system("task_progress", json!({"task_id": format!("a{n}"), "tool_use_id": parent, "description": "Running echo from-sub", "last_tool_name": "Bash", "usage": {"total_tokens": 900, "tool_uses": 1, "duration_ms": 400}}));
+    tool_result(&bash, "from-sub", Some(parent));
+    out(json!({"type": "assistant", "message": {"id": format!("s{n}b"), "role": "assistant", "model": "claude-fake-5", "content": [{"type": "text", "text": "It printed from-sub."}]}, "parent_tool_use_id": parent}));
+}
+
+/// Its own turn, after work it left running finished.
+fn own_turn(session: &str, n: u64, text: &str) {
+    system("init", json!({}));
+    start(&format!("own{n}"));
+    text_block(0, text);
+    stop("end_turn");
+    result(session, None);
+}
+
+/// What finishes after a turn.
+enum Later {
+    Command { n: u64 },
+    Agent { n: u64 },
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -81,13 +128,49 @@ fn main() {
     });
     let mut lines = rx.iter();
     let mut n = 0;
-    while let Some(line) = lines.next() {
+    let mut later: Vec<(Instant, Later)> = Vec::new();
+    // Running in the background: task id to its command (stop_task ends it).
+    let mut running: Vec<(String, String, std::process::Child)> = Vec::new();
+    loop {
+        if let Some(i) = later.iter().position(|(at, _)| Instant::now() >= *at) {
+            match later.remove(i).1 {
+                Later::Command { n } => {
+                    let task = format!("b{n}");
+                    if let Some(i) = running.iter().position(|(t, ..)| *t == task) {
+                        let (.., mut child) = running.remove(i);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    system("task_updated", json!({"task_id": task, "patch": {"status": "completed"}}));
+                    system("task_notification", json!({"task_id": task, "tool_use_id": format!("t{n}"), "status": "completed", "summary": "Background command \"sleep then echo bg-done\" completed (exit code 0)", "output_file": "/tmp/out"}));
+                    own_turn(&session, n, "The background command finished: bg-done.");
+                }
+                Later::Agent { n } => {
+                    let parent = format!("t{n}");
+                    subagent_steps(&parent, n);
+                    system("task_updated", json!({"task_id": format!("a{n}"), "patch": {"status": "completed"}}));
+                    system("task_notification", json!({"task_id": format!("a{n}"), "tool_use_id": parent, "status": "completed", "summary": "It printed from-sub.", "output_file": "/tmp/out", "usage": {"total_tokens": 1200, "tool_uses": 1, "duration_ms": 900}}));
+                    own_turn(&session, n, "The agent reported: from-sub.");
+                }
+            }
+            continue;
+        }
+        let line = match rx.recv_timeout(Duration::from_millis(30)) {
+            Ok(l) => l,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         log(json!({"got": msg}));
         if msg["type"] == "control_request" && msg["request"]["subtype"] == "initialize" {
             let models = [json!({"value": "default", "displayName": "Default"}), json!({"value": "fake", "displayName": "Fake 5", "supportedEffortLevels": ["low", "high"], "supportsThinkingOff": true})];
             out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"models": models, "account": {"email": "test@example.com", "subscriptionType": "Claude Test"}}}}));
-            out(json!({"type": "system", "subtype": "init", "session_id": session}));
+            out(json!({"type": "system", "subtype": "init", "session_id": session, "permissionMode": after("--permission-mode").unwrap_or_else(|| "default".into())}));
+            continue;
+        }
+        if msg["type"] == "control_request" && msg["request"]["subtype"] == "set_permission_mode" {
+            out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"mode": msg["request"]["mode"]}}}));
+            system("status", json!({"status": null, "permissionMode": msg["request"]["mode"]}));
             continue;
         }
         if msg["type"] == "control_request" && msg["request"]["subtype"] == "get_usage" {
@@ -112,12 +195,83 @@ fn main() {
             out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": usage}}));
             continue;
         }
+        if msg["type"] == "control_request" && msg["request"]["subtype"] == "stop_task" {
+            let task = msg["request"]["task_id"].as_str().unwrap_or("").to_string();
+            if let Some(i) = running.iter().position(|(t, ..)| *t == task) {
+                let (task, tool, mut child) = running.remove(i);
+                let _ = child.kill();
+                let _ = child.wait();
+                later.retain(|(_, l)| !matches!(l, Later::Command { n } if format!("b{n}") == task));
+                system("task_updated", json!({"task_id": task, "patch": {"status": "killed"}}));
+                system("task_notification", json!({"task_id": task, "tool_use_id": tool, "status": "stopped", "summary": "Stopped", "output_file": "/tmp/out"}));
+            }
+            out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {}}}));
+            continue;
+        }
         if msg["type"] != "user" {
             continue;
         }
         let text = msg["message"]["content"].as_array().and_then(|b| b.iter().rev().find_map(|b| b["text"].as_str())).unwrap_or("").to_string();
         n += 1;
-        if text.contains("question") {
+        if text.contains("monitor") {
+            // A monitor: a shell task (its tool, Monitor, says so) that runs until stopped.
+            let id = format!("t{n}");
+            start(&format!("m{n}a"));
+            call(0, &id, "Monitor", &json!({"command": "tail -f app.log", "description": "watch the log"}));
+            stop("tool_use");
+            let child = std::process::Command::new("sleep").arg("300").process_group(0).spawn().expect("sleep");
+            log(json!({"spawned": child.id()}));
+            let task = format!("b{n}");
+            system("task_started", json!({"task_id": task, "tool_use_id": id, "description": "watch the log", "task_type": "local_bash", "is_backgrounded": true}));
+            tool_result(&id, &format!("Monitor started with ID: {task}"), None);
+            start(&format!("m{n}b"));
+            text_block(0, "Watching the log.");
+            stop("end_turn");
+            result(&session, None);
+            running.push((task, id, child));
+        } else if text.contains("background") && !text.contains("agent") {
+            let id = format!("t{n}");
+            start(&format!("m{n}a"));
+            call(0, &id, "Bash", &json!({"command": "sleep 300; echo bg-done", "description": "sleep then echo bg-done", "run_in_background": true}));
+            stop("tool_use");
+            let child = std::process::Command::new("sleep").arg("300").process_group(0).spawn().expect("sleep");
+            log(json!({"spawned": child.id()}));
+            let task = format!("b{n}");
+            system("task_started", json!({"task_id": task, "tool_use_id": id, "description": "sleep then echo bg-done", "is_backgrounded": true}));
+            tool_result(&id, &format!("Command running in background with ID: {task}. Output is being written to: /tmp/out"), None);
+            start(&format!("m{n}b"));
+            text_block(0, "Started it in the background.");
+            stop("end_turn");
+            result(&session, None);
+            running.push((task, id, child));
+            if !text.contains("forever") {
+                later.push((Instant::now() + Duration::from_millis(700), Later::Command { n }));
+            }
+        } else if text.contains("agent") {
+            // An agent: its steps come under its tool call, during the turn or after it.
+            let id = format!("t{n}");
+            let behind = text.contains("background");
+            start(&format!("m{n}a"));
+            call(0, &id, "Agent", &json!({"description": "Echo from-sub", "prompt": "Run echo from-sub and say what it printed.", "subagent_type": "general-purpose", "run_in_background": behind}));
+            stop("tool_use");
+            system("task_started", json!({"task_id": format!("a{n}"), "tool_use_id": id, "description": "Echo from-sub", "subagent_type": "general-purpose", "is_backgrounded": behind}));
+            if behind {
+                tool_result(&id, "Async agent launched successfully.", None);
+                start(&format!("m{n}b"));
+                text_block(0, "Launched it.");
+                stop("end_turn");
+                result(&session, None);
+                later.push((Instant::now() + Duration::from_millis(700), Later::Agent { n }));
+            } else {
+                subagent_steps(&id, n);
+                system("task_notification", json!({"task_id": format!("a{n}"), "tool_use_id": id, "status": "completed", "summary": "It printed from-sub.", "output_file": "/tmp/out", "usage": {"total_tokens": 1200, "tool_uses": 1, "duration_ms": 900}}));
+                tool_result(&id, "It printed from-sub.", None);
+                start(&format!("m{n}b"));
+                text_block(0, "The subagent said from-sub.");
+                stop("end_turn");
+                result(&session, None);
+            }
+        } else if text.contains("question") {
             // Two questions, the second multiple-choice; it says what it was told.
             let input = json!({"questions": [
                 {"question": "Which color?", "header": "Color", "multiSelect": false, "options": [{"label": "Red", "description": "warm"}, {"label": "Blue", "description": "cool"}]},
@@ -170,6 +324,10 @@ fn main() {
                 }
             };
             let behavior = &answer["response"]["response"]["behavior"];
+            // Allowing edits for the session switches its mode.
+            if let Some(mode) = answer["response"]["response"]["updatedPermissions"][0]["mode"].as_str() {
+                system("status", json!({"status": null, "permissionMode": mode}));
+            }
             if behavior == "allow" {
                 let patch = json!([{"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3, "lines": [" one", "-two", "+TWO", " three"]}]);
                 out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": "The file notes.txt has been updated."}]}, "parent_tool_use_id": null, "tool_use_result": {"filePath": "notes.txt", "structuredPatch": patch}}));

@@ -21,7 +21,7 @@ use serpis_ai::api::anthropic_messages::EventReader;
 use serpis_ai::stream::Emitter;
 use serpis_ai::*;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentEvent, AgentHandle, Answer, AskReply, EmitFn, ToolGate, ToolHooks};
@@ -77,9 +77,19 @@ impl Prompts {
 }
 
 /// A chat's Claude Code: the process, started with the first run and kept between runs.
+/// Between runs it is still read: its background work reports in, and when that work is done
+/// Claude Code takes a turn of its own ([`AgentEvent::Adopted`]).
 #[derive(Clone, Default)]
 pub struct ClaudeCode {
     proc: Arc<tokio::sync::Mutex<Option<Process>>>,
+    /// The watch between runs, ended when a run starts.
+    watching: Arc<Mutex<Option<CancellationToken>>>,
+    /// Lines to write to it, without its lock (asking it to stop a background task).
+    writer: Arc<Mutex<Option<mpsc::UnboundedSender<String>>>>,
+    /// Its pid, to stop it without its lock (a run or the watch holds that).
+    pid: Arc<Mutex<Option<u32>>>,
+    /// Stopped while locked: the next run starts it again.
+    stale: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Whether `m` is a reply Claude Code wrote (so its session holds what came before it).
@@ -93,22 +103,94 @@ impl ClaudeCode {
     /// along with the first prompt.
     pub fn run(&self, history: Vec<Message>, prompts: Vec<Message>, cfg: RunConfig, emit: EmitFn) -> AgentHandle {
         let handle = AgentHandle::new();
+        if let Some(w) = self.watching.lock().unwrap().take() {
+            w.cancel();
+        }
         let (h, me) = (handle.clone(), self.clone());
         tokio::spawn(async move {
             emit(AgentEvent::AgentStart);
+            let cfg = Arc::new(cfg);
             let error = me.drive(history, prompts, &cfg, &h, &emit).await.err().map(|e| format!("{e:#}"));
+            // Watching before the chat hears the run ended (and may start the next).
+            me.watch(cfg, emit.clone());
             emit(AgentEvent::AgentEnd { error });
         });
         handle
     }
 
+    /// Switch its permission mode now (between runs or in one). False when there is no
+    /// process: the next run starts in the mode its launch says.
+    pub fn set_permission_mode(&self, mode: &str) -> bool {
+        let line = json!({"type": "control_request", "request_id": format!("serpis-mode-{mode}"), "request": {"subtype": "set_permission_mode", "mode": mode}});
+        self.writer.lock().unwrap().as_ref().is_some_and(|w| w.send(format!("{line}\n")).is_ok())
+    }
+
+    /// Ask Claude Code to stop background task `task` (a command, a subagent). False when
+    /// there is no process to ask.
+    pub fn stop_task(&self, task: &str) -> bool {
+        let line = json!({"type": "control_request", "request_id": format!("serpis-stop-{task}"), "request": {"subtype": "stop_task", "task_id": task}});
+        self.writer.lock().unwrap().as_ref().is_some_and(|w| w.send(format!("{line}\n")).is_ok())
+    }
+
+    /// Read what it says between runs: its tasks' progress, background subagents' steps,
+    /// their permission prompts, and the turns it takes of its own accord, which are run as
+    /// runs the chat adopts. Ends when a run starts or the process does.
+    fn watch(&self, cfg: Arc<RunConfig>, emit: EmitFn) {
+        let token = CancellationToken::new();
+        *self.watching.lock().unwrap() = Some(token.clone());
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut guard = me.proc.lock().await;
+            loop {
+                let Some(p) = guard.as_mut().filter(|_| !token.is_cancelled()) else { return };
+                let v = tokio::select! {
+                    v = p.next_line() => v,
+                    _ = token.cancelled() => return,
+                };
+                let Some(v) = v else { return };
+                if p.aside(&v, &cfg.model, &emit) {
+                    continue;
+                }
+                match v["type"].as_str().unwrap_or("") {
+                    "control_request" => {
+                        if p.respond(&v, &cfg, &AgentHandle::new(), &emit, false).await.is_err() {
+                            return;
+                        }
+                    }
+                    // A turn it started: as a run, which the chat adopts.
+                    "stream_event" | "assistant" => {
+                        let h = AgentHandle::new();
+                        emit(AgentEvent::Adopted { handle: h.clone(), why: p.finished.take() });
+                        emit(AgentEvent::AgentStart);
+                        p.pending.push_front(v);
+                        let error = turns(p, VecDeque::new(), None, true, &cfg, &h, &emit).await.err().map(|e| format!("{e:#}"));
+                        emit(AgentEvent::AgentEnd { error });
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     /// Stop the process (the chat closed, or starts over).
     pub fn stop(&self) {
-        if let Ok(mut p) = self.proc.try_lock() {
-            if let Some(p) = p.as_mut() {
-                let _ = p.child.start_kill();
+        if let Some(w) = self.watching.lock().unwrap().take() {
+            w.cancel();
+        }
+        *self.writer.lock().unwrap() = None;
+        match self.proc.try_lock() {
+            Ok(mut p) => {
+                if let Some(p) = p.as_mut() {
+                    p.end(Duration::from_secs(3));
+                }
+                *p = None;
             }
-            *p = None;
+            Err(_) => {
+                if let Some(pid) = self.pid.lock().unwrap().take() {
+                    end_tree(pid, Duration::from_secs(3));
+                }
+                self.stale.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 
@@ -116,8 +198,12 @@ impl ClaudeCode {
         let mut guard = self.proc.lock().await;
         let resume = history.iter().any(is_reply);
         let mut fresh = !resume;
-        if guard.as_mut().is_none_or(|p| p.launch != cfg.launch || p.exited()) {
+        let stale = self.stale.swap(false, std::sync::atomic::Ordering::SeqCst);
+        // A new permission mode is switched to, not restarted for.
+        let same = |l: &Launch| Launch { permission_mode: cfg.launch.permission_mode.clone(), ..l.clone() } == cfg.launch;
+        if stale || guard.as_mut().is_none_or(|p| !same(&p.launch) || p.exited()) {
             if let Some(old) = guard.take() {
+                *self.writer.lock().unwrap() = None;
                 old.stop().await;
             }
             *guard = Some(match Process::start(cfg, resume).await {
@@ -132,27 +218,102 @@ impl ClaudeCode {
             });
         }
         let p = guard.as_mut().expect("started");
+        if p.mode != cfg.launch.permission_mode {
+            p.request(json!({"subtype": "set_permission_mode", "mode": cfg.launch.permission_mode})).await?;
+            p.mode = cfg.launch.permission_mode.clone();
+        }
+        *self.writer.lock().unwrap() = Some(p.out.clone());
+        *self.pid.lock().unwrap() = p.child.id();
         let earlier = if fresh { &history[..] } else { unseen(&history) };
-        let mut context = replay(earlier);
+        let context = replay(earlier);
         let mut queue: VecDeque<Message> = prompts.into();
         if queue.is_empty() {
             queue.push_back(Message::User { content: vec![UserContent::Text { text: CONTINUE.into() }], timestamp: now_ms() });
         }
-        while let Some(msg) = queue.pop_front() {
+        turns(p, queue, context, false, cfg, h, emit).await
+    }
+}
+
+/// Turns, one per message of `queue` (the first sent with `context`), and then one per
+/// message queued while they ran: Claude Code takes one message at a time. `going`: a turn
+/// it started itself is under way, read first.
+async fn turns(p: &mut Process, mut queue: VecDeque<Message>, mut context: Option<String>, mut going: bool, cfg: &RunConfig, h: &AgentHandle, emit: &EmitFn) -> Result<()> {
+    loop {
+        if !going {
+            let Some(msg) = queue.pop_front() else { return Ok(()) };
             emit(AgentEvent::MessageStart(msg.clone()));
             emit(AgentEvent::MessageEnd(msg.clone()));
             p.send(&user_line(&msg, context.take())).await?;
-            let stopped = p.turn(cfg, h, emit).await?;
-            emit(AgentEvent::TurnEnd);
-            if stopped {
-                break;
-            }
-            // Queued while it ran: Claude Code takes one message at a time.
-            let (steer, follow) = h.take_queued();
-            queue.extend(steer.into_iter().chain(follow));
         }
-        Ok(())
+        going = false;
+        let stopped = p.turn(cfg, h, emit).await?;
+        emit(AgentEvent::TurnEnd);
+        if stopped {
+            return Ok(());
+        }
+        let (steer, follow) = h.take_queued();
+        queue.extend(steer.into_iter().chain(follow));
     }
+}
+
+/// Stop process `pid` and its descendants: SIGTERM to each now (so a script's cleanup runs),
+/// SIGKILL after `grace` to those still there. Descendants are found by parent, not process
+/// group: the commands `claude` runs may be in groups of their own. A process is killed only
+/// if it is still the one found (same start time), never one that reused its pid.
+fn end_tree(pid: u32, grace: Duration) {
+    end_processes(process_tree(pid), grace);
+}
+
+/// SIGTERM to each of `found` still running, SIGKILL after `grace` to those left.
+fn end_processes(found: Vec<(i32, String)>, grace: Duration) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let now: HashMap<i32, String> = processes().into_iter().map(|(p, _, start)| (p, start)).collect();
+        let found: Vec<(i32, String)> = found.into_iter().filter(|(p, start)| now.get(p) == Some(start)).collect();
+        if found.is_empty() {
+            return;
+        }
+        for (p, _) in &found {
+            let _ = kill(Pid::from_raw(*p), Signal::SIGTERM);
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            let now: HashMap<i32, String> = processes().into_iter().map(|(p, _, start)| (p, start)).collect();
+            for (p, start) in found {
+                if now.get(&p) == Some(&start) {
+                    let _ = kill(Pid::from_raw(p), Signal::SIGKILL);
+                }
+            }
+        });
+    }
+}
+
+/// Every process: (pid, parent, start time), from `ps`.
+fn processes() -> Vec<(i32, i32, String)> {
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=", "-o", "ppid=", "-o", "lstart="]).output() else { return vec![] };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let (pid, ppid) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+            Some((pid, ppid, it.collect::<Vec<_>>().join(" ")))
+        })
+        .collect()
+}
+
+/// `pid` and its descendants, with their start times.
+fn process_tree(pid: u32) -> Vec<(i32, String)> {
+    let all = processes();
+    let mut found: Vec<(i32, String)> = all.iter().filter(|(p, ..)| *p == pid as i32).map(|(p, _, s)| (*p, s.clone())).collect();
+    let mut i = 0;
+    while i < found.len() {
+        let parent = found[i].0;
+        found.extend(all.iter().filter(|(_, pp, _)| *pp == parent).map(|(p, _, s)| (*p, s.clone())));
+        i += 1;
+    }
+    found
 }
 
 /// What a continued turn is sent (its node stopped while Claude Code worked).
@@ -287,8 +448,21 @@ pub fn patch_diff(hunks: &[Value]) -> String {
 
 struct Process {
     child: Child,
-    stdin: ChildStdin,
+    /// Lines for its stdin (written in order by a task of their own).
+    out: mpsc::UnboundedSender<String>,
     lines: mpsc::UnboundedReceiver<Value>,
+    /// Lines read ahead, to be read again first.
+    pending: VecDeque<Value>,
+    /// Its tasks (background commands, subagents): the tool call that started each, and how
+    /// it is going.
+    tasks: HashMap<String, (String, serpis_proto::Task)>,
+    /// What the last task to end did ("Background command finished: ..."): why it may take
+    /// a turn of its own next.
+    finished: Option<String>,
+    /// Subagents' tool calls by id: serpis's name for each.
+    nested_calls: HashMap<String, String>,
+    /// Its permission mode, as it last said.
+    mode: String,
     launch: Launch,
     /// The end of what it wrote to stderr, for when it dies.
     stderr: Arc<Mutex<String>>,
@@ -306,8 +480,18 @@ impl Process {
             cmd.args(["--effort", e]);
         }
         cmd.args(&l.args).envs(l.env.iter().cloned()).current_dir(&l.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
         let mut child = cmd.spawn().with_context(|| format!("starting Claude Code ({})", l.binary.display()))?;
-        let stdin = child.stdin.take().context("no stdin")?;
+        let mut stdin = child.stdin.take().context("no stdin")?;
+        let (writer, mut to_write) = mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Some(line) = to_write.recv().await {
+                if stdin.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
         let (tx, lines) = mpsc::unbounded_channel();
         let mut out = BufReader::new(child.stdout.take().context("no stdout")?).lines();
         tokio::spawn(async move {
@@ -331,7 +515,7 @@ impl Process {
                 }
             }
         });
-        let mut p = Process { child, stdin, lines, launch: l.clone(), stderr, next_request: 0 };
+        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), launch: l.clone(), stderr, next_request: 0 };
         p.initialize().await?;
         Ok(p)
     }
@@ -369,9 +553,149 @@ impl Process {
     }
 
     async fn send(&mut self, v: &Value) -> Result<()> {
-        let line = format!("{v}\n");
-        let r = self.stdin.write_all(line.as_bytes()).await;
-        r.map_err(|e| self.with_stderr(anyhow!("writing to Claude Code: {e}")))
+        self.out.send(format!("{v}\n")).map_err(|_| self.with_stderr(anyhow!("writing to Claude Code: it stopped")))
+    }
+
+    /// The next line it wrote (one read ahead first); None once it has stopped.
+    async fn next_line(&mut self) -> Option<Value> {
+        match self.pending.pop_front() {
+            Some(v) => Some(v),
+            None => self.lines.recv().await,
+        }
+    }
+
+    /// A line beside the turn, handled here: a subagent's step, or how a task is going. False
+    /// for the turn's own lines.
+    fn aside(&mut self, v: &Value, model: &Model, emit: &EmitFn) -> bool {
+        if let Some(parent) = v["parent_tool_use_id"].as_str() {
+            self.nested(parent, v, model, emit);
+            return true;
+        }
+        let sub = v["subtype"].as_str().unwrap_or("");
+        if v["type"] == "system" && sub.starts_with("task_") {
+            self.task(sub, v, emit);
+            return true;
+        }
+        // It says what mode it is in when it starts, and when that changes.
+        if v["type"] == "system"
+            && let Some(m) = v["permissionMode"].as_str()
+            && m != self.mode
+        {
+            self.mode = m.to_string();
+            emit(AgentEvent::PermissionMode(m.to_string()));
+        }
+        false
+    }
+
+    /// A subagent's step: its reply (and the tool calls in it) or its tools' results, as
+    /// events nested under the tool call that started it.
+    fn nested(&mut self, parent: &str, v: &Value, model: &Model, emit: &EmitFn) {
+        let under = |event: AgentEvent| emit(AgentEvent::Nested { parent: parent.to_string(), event: Box::new(event) });
+        match v["type"].as_str() {
+            Some("assistant") => {
+                let m = whole_message(v, model, &mut self.nested_calls);
+                let calls: Vec<ToolCall> = m.tool_calls().cloned().collect();
+                under(AgentEvent::MessageEnd(Message::Assistant(m)));
+                for c in calls {
+                    under(AgentEvent::ToolStart { id: c.id, name: c.name, args: c.arguments });
+                }
+            }
+            Some("user") => {
+                for r in tool_results(v, &self.nested_calls) {
+                    under(AgentEvent::ToolEnd { id: r.tool_call_id.clone(), name: r.tool_name.clone(), result: r });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// How task `v["task_id"]` is going (`task_started`, `task_progress`, `task_updated`,
+    /// `task_notification`), merged into what is known of it and passed on whole.
+    fn task(&mut self, sub: &str, v: &Value, emit: &EmitFn) {
+        let Some(id) = v["task_id"].as_str() else { return };
+        if sub != "task_started" && !self.tasks.contains_key(id) && v["tool_use_id"].is_null() {
+            return;
+        }
+        let (tool, t) = self.tasks.entry(id.to_string()).or_insert_with(|| (String::new(), serpis_proto::Task { id: id.to_string(), kind: "bash".into(), status: "running".into(), ..Default::default() }));
+        if let Some(by) = v["tool_use_id"].as_str() {
+            *tool = by.to_string();
+        }
+        let usage = |t: &mut serpis_proto::Task, u: &Value| {
+            if u.is_object() {
+                t.tool_uses = u["tool_uses"].as_u64().unwrap_or(t.tool_uses);
+                t.tokens = u["total_tokens"].as_u64().unwrap_or(t.tokens);
+                t.duration_ms = u["duration_ms"].as_u64().unwrap_or(t.duration_ms);
+            }
+        };
+        let status = |s: &str| match s {
+            "completed" | "failed" => s.to_string(),
+            "killed" | "stopped" => "stopped".to_string(),
+            _ => "running".to_string(),
+        };
+        match sub {
+            "task_started" => {
+                // Housekeeping of its own, which it says not to show.
+                if v["ambient"] == true || v["skip_transcript"] == true {
+                    let id = id.to_string();
+                    self.tasks.remove(&id);
+                    return;
+                }
+                t.description = v["description"].as_str().unwrap_or("").to_string();
+                t.kind = match (v["task_type"].as_str(), v["subagent_type"].is_string()) {
+                    (Some("local_agent"), _) | (None, true) => "agent".into(),
+                    (Some("local_bash") | None, _) => "bash".into(),
+                    (Some(other), _) => other.to_string(),
+                };
+                t.background = v["is_backgrounded"].as_bool().unwrap_or(false);
+            }
+            "task_progress" => {
+                t.summary = v["summary"].as_str().or(v["description"].as_str()).map(str::to_string);
+                t.last_tool = v["last_tool_name"].as_str().map(|n| serpis_tool(n, &Value::Null).0);
+                usage(t, &v["usage"]);
+            }
+            "task_updated" => {
+                let patch = &v["patch"];
+                if let Some(s) = patch["status"].as_str() {
+                    t.status = status(s);
+                }
+                if let Some(b) = patch["is_backgrounded"].as_bool() {
+                    t.background = b;
+                }
+                if let Some(e) = patch["error"].as_str() {
+                    t.summary = Some(e.to_string());
+                }
+            }
+            "task_notification" => {
+                t.status = status(v["status"].as_str().unwrap_or("completed"));
+                if let Some(s) = v["summary"].as_str().filter(|s| !s.is_empty()) {
+                    t.summary = Some(s.to_string());
+                }
+                t.last_tool = None;
+                usage(t, &v["usage"]);
+                let what = if t.kind == "agent" { "Background agent" } else { "Background command" };
+                let how = match t.status.as_str() {
+                    "failed" => "failed",
+                    "stopped" => "was stopped",
+                    _ => "finished",
+                };
+                self.finished = Some(if t.description.is_empty() { format!("{what} {how}") } else { format!("{what} {how}: {}", t.description) });
+            }
+            _ => return,
+        }
+        if !tool.is_empty() {
+            emit(AgentEvent::Task { tool: tool.clone(), task: t.clone() });
+        }
+    }
+
+    /// Answer a control request it sent (a permission prompt).
+    async fn respond(&mut self, v: &Value, cfg: &RunConfig, h: &AgentHandle, emit: &EmitFn, interrupted: bool) -> Result<()> {
+        let answer = self.answer(&v["request"], cfg, h, emit, interrupted).await;
+        let id = v["request_id"].clone();
+        let response = match answer {
+            Ok(r) => json!({"subtype": "success", "request_id": id, "response": r}),
+            Err(e) => json!({"subtype": "error", "request_id": id, "error": format!("{e:#}")}),
+        };
+        self.send(&json!({"type": "control_response", "response": response})).await
     }
 
     /// Send a control request; its id.
@@ -382,10 +706,23 @@ impl Process {
         Ok(id)
     }
 
-    async fn stop(mut self) {
-        drop(self.stdin);
-        if tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await.is_err() {
-            let _ = self.child.kill().await;
+    async fn stop(self) {
+        let Process { mut child, out, .. } = self;
+        // Found first: once it exits, what it started belongs to no one.
+        let tree = child.id().map(process_tree).unwrap_or_default();
+        drop(out);
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        end_processes(tree, Duration::from_secs(3));
+    }
+
+    /// End it and everything it started (the commands it runs, its background tasks, a
+    /// window a test opened): see [`end_tree`].
+    fn end(&mut self, grace: Duration) {
+        match self.child.id() {
+            Some(pid) => end_tree(pid, grace),
+            None => {
+                let _ = self.child.start_kill();
+            }
         }
     }
 
@@ -396,7 +733,8 @@ impl Process {
         let grace = tokio::time::sleep(Duration::from_secs(86_400));
         tokio::pin!(grace);
         loop {
-            let v = tokio::select! {
+            let ahead = self.pending.pop_front();
+            let v = if ahead.is_some() { ahead } else { tokio::select! {
                 v = self.lines.recv() => v,
                 _ = h.cancel.cancelled(), if !interrupted => {
                     interrupted = true;
@@ -406,11 +744,11 @@ impl Process {
                 }
                 // It didn't stop when asked: end it (the next run resumes its session).
                 _ = &mut grace => {
-                    let _ = self.child.start_kill();
+                    self.end(Duration::from_secs(3));
                     t.close_open(StopReason::Aborted, None);
                     return Ok(true);
                 }
-            };
+            } };
             let Some(v) = v else {
                 t.close_open(if interrupted { StopReason::Aborted } else { StopReason::Error }, Some("Claude Code stopped".into()));
                 if interrupted {
@@ -418,23 +756,14 @@ impl Process {
                 }
                 return Err(self.with_stderr(anyhow!("Claude Code stopped mid-turn")));
             };
-            // Subagents' own steps: their Task tool's card shows the outcome.
-            if !v["parent_tool_use_id"].is_null() {
+            if self.aside(&v, &cfg.model, emit) {
                 continue;
             }
             match v["type"].as_str().unwrap_or("") {
                 "stream_event" => t.event(&v["event"]),
                 "assistant" => t.whole(&v),
                 "user" => t.results(&v),
-                "control_request" => {
-                    let answer = self.answer(&v["request"], cfg, h, emit, interrupted).await;
-                    let id = v["request_id"].clone();
-                    let response = match answer {
-                        Ok(r) => json!({"subtype": "success", "request_id": id, "response": r}),
-                        Err(e) => json!({"subtype": "error", "request_id": id, "error": format!("{e:#}")}),
-                    };
-                    self.send(&json!({"type": "control_response", "response": response})).await?;
-                }
+                "control_request" => self.respond(&v, cfg, h, emit, interrupted).await?,
                 "result" => {
                     let aborted = interrupted || h.cancel.is_cancelled();
                     t.close_open(if aborted { StopReason::Aborted } else { StopReason::Error }, None);
@@ -666,39 +995,59 @@ impl Turn<'_> {
     /// A whole reply that didn't stream: Claude Code's own messages (an API error, a
     /// command's output). Streamed ones were already built from their events.
     fn whole(&mut self, line: &Value) {
-        let msg = &line["message"];
-        if msg["id"].as_str().is_some_and(|id| self.streamed.contains(id)) {
+        if line["message"]["id"].as_str().is_some_and(|id| self.streamed.contains(id)) {
             return;
         }
-        let mut m = AssistantMessage::empty(self.model);
-        for b in msg["content"].as_array().into_iter().flatten() {
-            match b["type"].as_str() {
-                Some("text") => m.content.push(AssistantContent::Text { text: b["text"].as_str().unwrap_or("").into(), text_signature: None }),
-                Some("thinking") => m.content.push(AssistantContent::Thinking { thinking: b["thinking"].as_str().unwrap_or("").into(), thinking_signature: None, redacted: false }),
-                Some("tool_use") => {
-                    let (name, arguments) = serpis_tool(b["name"].as_str().unwrap_or(""), &b["input"]);
-                    let id = b["id"].as_str().unwrap_or("").to_string();
-                    self.calls.insert(id.clone(), name.clone());
-                    m.content.push(AssistantContent::ToolCall(ToolCall { id, name, arguments, thought_signature: None, arguments_error: None }));
-                }
-                _ => {}
-            }
-        }
-        m.stop_reason = if m.tool_calls().next().is_some() { StopReason::ToolUse } else { StopReason::Stop };
-        if msg["model"] == "<synthetic>" && !line["error"].is_null() {
-            m.stop_reason = StopReason::Error;
-            m.error_message = Some(m.text());
-        }
+        let m = whole_message(line, self.model, &mut self.calls);
         (self.emit)(AgentEvent::MessageStart(Message::Assistant(AssistantMessage::empty(self.model))));
         self.reply(m);
     }
 
     /// Tool results (a `user` line).
     fn results(&mut self, v: &Value) {
-        let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else { return };
-        let results: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "tool_result").collect();
-        let only = results.len() == 1;
-        for b in results {
+        for r in tool_results(v, &self.calls) {
+            (self.emit)(AgentEvent::ToolEnd { id: r.tool_call_id.clone(), name: r.tool_name.clone(), result: r.clone() });
+            (self.emit)(AgentEvent::MessageStart(Message::ToolResult(r.clone())));
+            (self.emit)(AgentEvent::MessageEnd(Message::ToolResult(r)));
+        }
+    }
+}
+
+/// A whole `assistant` line as a reply (its tool calls under serpis's names, noted in `calls`).
+fn whole_message(line: &Value, model: &Model, calls: &mut HashMap<String, String>) -> AssistantMessage {
+    let msg = &line["message"];
+    let mut m = AssistantMessage::empty(model);
+    for b in msg["content"].as_array().into_iter().flatten() {
+        match b["type"].as_str() {
+            Some("text") => m.content.push(AssistantContent::Text { text: b["text"].as_str().unwrap_or("").into(), text_signature: None }),
+            Some("thinking") => m.content.push(AssistantContent::Thinking { thinking: b["thinking"].as_str().unwrap_or("").into(), thinking_signature: None, redacted: false }),
+            Some("tool_use") => {
+                let (name, arguments) = serpis_tool(b["name"].as_str().unwrap_or(""), &b["input"]);
+                let id = b["id"].as_str().unwrap_or("").to_string();
+                calls.insert(id.clone(), name.clone());
+                m.content.push(AssistantContent::ToolCall(ToolCall { id, name, arguments, thought_signature: None, arguments_error: None }));
+            }
+            _ => {}
+        }
+    }
+    m.stop_reason = if m.tool_calls().next().is_some() { StopReason::ToolUse } else { StopReason::Stop };
+    if msg["model"] == "<synthetic>" && !line["error"].is_null() {
+        m.stop_reason = StopReason::Error;
+        m.error_message = Some(m.text());
+    }
+    m.usage.recompute_total();
+    m.timestamp = now_ms();
+    m
+}
+
+/// The tool results of a `user` line (an edit's with its diff).
+fn tool_results(v: &Value, calls: &HashMap<String, String>) -> Vec<ToolResultMessage> {
+    let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else { return vec![] };
+    let results: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "tool_result").collect();
+    let only = results.len() == 1;
+    results
+        .into_iter()
+        .map(|b| {
             let id = b["tool_use_id"].as_str().unwrap_or("").to_string();
             let content = match &b["content"] {
                 Value::String(s) => vec![UserContent::Text { text: s.clone() }],
@@ -716,13 +1065,10 @@ impl Turn<'_> {
                 Some(hunks) if only && !hunks.is_empty() => json!({"diff": patch_diff(hunks)}),
                 _ => Value::Null,
             };
-            let name = self.calls.get(&id).cloned().unwrap_or_default();
-            let r = ToolResultMessage { tool_call_id: id.clone(), tool_name: name.clone(), content, is_error: b["is_error"].as_bool().unwrap_or(false), details, timestamp: now_ms() };
-            (self.emit)(AgentEvent::ToolEnd { id, name, result: r.clone() });
-            (self.emit)(AgentEvent::MessageStart(Message::ToolResult(r.clone())));
-            (self.emit)(AgentEvent::MessageEnd(Message::ToolResult(r)));
-        }
-    }
+            let name = calls.get(&id).cloned().unwrap_or_default();
+            ToolResultMessage { tool_call_id: id, tool_name: name, content, is_error: b["is_error"].as_bool().unwrap_or(false), details, timestamp: now_ms() }
+        })
+        .collect()
 }
 
 #[cfg(test)]

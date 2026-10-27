@@ -4570,6 +4570,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serpis-ai",
+ "serpis-proto",
  "serpis-testkit",
  "similar",
  "tokio",

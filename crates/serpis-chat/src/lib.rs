@@ -173,9 +173,11 @@ impl Transcript {
         self.items.len().checked_sub(1).and_then(|i| self.get_mut(i))
     }
 
-    fn rfind_mut(&mut self, f: impl Fn(&Entry) -> bool) -> Option<&mut Entry> {
-        let i = self.items.iter().rposition(f)?;
-        self.get_mut(i)
+    /// Tool call `id`, a subagent's step included.
+    fn tool_mut(&mut self, id: &str) -> Option<&mut Entry> {
+        let i = self.items.iter().rposition(|e| e.holds_tool(id))?;
+        self.mark(i);
+        serpis_proto::find_tool_mut(&mut self.items[i..=i], id)
     }
 
     fn find_mut(&mut self, f: impl Fn(&Entry) -> bool) -> Option<&mut Entry> {
@@ -228,6 +230,12 @@ pub struct Chat {
     claude: serpis_agent::claude_code::ClaudeCode,
     /// Tool calls waiting for the person to allow them, by id: where the answer goes.
     asks: HashMap<String, serpis_agent::AskReply>,
+    /// Claude Code's permission mode for this chat, once chosen or reported (else its
+    /// machine's `claude-code-permission-mode`).
+    permission_mode: Option<String>,
+    /// The machine's `claude-code-permission-mode`, as last read (what the chat shows until it
+    /// has its own).
+    default_mode: String,
     tx: mpsc::Sender<Done>,
     rx: mpsc::Receiver<Done>,
     wake: Wake,
@@ -289,6 +297,8 @@ impl Chat {
             agent: None,
             claude: Default::default(),
             asks: HashMap::new(),
+            permission_mode: None,
+            default_mode: "default".into(),
             tx,
             rx,
             wake,
@@ -353,6 +363,24 @@ impl Chat {
         if let Some(c) = &self.compacting {
             c.cancel();
         }
+    }
+
+    /// Switch this chat's Claude Code to permission mode `mode` (one of [`PERMISSION_MODES`]),
+    /// at once if it is running, else from its next turn.
+    pub fn set_permission_mode(&mut self, mode: &str) -> Result<(), String> {
+        if !PERMISSION_MODES.contains(&mode) {
+            return Err(format!("{mode} isn't a Claude Code permission mode (one of {})", PERMISSION_MODES.join(", ")));
+        }
+        self.permission_mode = Some(mode.to_string());
+        self.claude.set_permission_mode(mode);
+        (self.wake)();
+        Ok(())
+    }
+
+    /// Ask Claude Code to stop its background task `task` (a command, a subagent: the `id` of
+    /// a tool entry's `task`). False when it has no process to ask.
+    pub fn stop_task(&mut self, task: &str) -> bool {
+        self.claude.stop_task(task)
     }
 
     pub fn clear(&mut self) {
@@ -553,7 +581,7 @@ impl Chat {
             cwd: self.cwd.clone(),
             model: model.id.clone(),
             effort,
-            permission_mode: host.var_str("claude-code-permission-mode").unwrap_or_else(|| "default".into()),
+            permission_mode: self.permission_mode.clone().or_else(|| host.var_str("claude-code-permission-mode")).unwrap_or_else(|| "default".into()),
             args,
             env,
         };
@@ -949,6 +977,9 @@ impl Chat {
     /// Pick up what finished elsewhere (agent events, a compaction, a resume check). Call it
     /// whenever the chat's [`Wake`] fires, and once after creating or restoring it.
     pub fn poll(&mut self, host: &mut dyn Host) {
+        if self.permission_mode.is_none() {
+            self.default_mode = host.var_str("claude-code-permission-mode").unwrap_or_else(|| "default".into());
+        }
         if let Some(p) = self.pending_resume.take() {
             self.finish_resume(host, p);
         }
@@ -978,7 +1009,7 @@ impl Chat {
     }
 
     fn tool_entry(&mut self, id: &str) -> Option<&mut Entry> {
-        self.entries.rfind_mut(|e| matches!(e, Entry::Tool { id: i, .. } if i == id))
+        self.entries.tool_mut(id)
     }
 
     fn apply(&mut self, ev: AgentEvent, host: &mut dyn Host) {
@@ -1022,7 +1053,7 @@ impl Chat {
                     }
                 }
                 StreamEvent::ToolCallStart { id, name, .. } => {
-                    self.entries.push(Entry::Tool { id, name, args: Value::Object(Default::default()), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None })
+                    self.entries.push(Entry::Tool { id, name, args: Value::Object(Default::default()), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] })
                 }
                 StreamEvent::ToolCallDelta { arguments, .. } => {
                     let started = &self.entries.started;
@@ -1083,9 +1114,10 @@ impl Chat {
             }
             AgentEvent::ToolStart { id, name, args } => {
                 if self.tool_entry(&id).is_none() {
-                    self.entries.push(Entry::Tool { id: id.clone(), name, args: args.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None });
+                    self.entries.push(Entry::Tool { id: id.clone(), name, args: args.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] });
                 }
                 self.entries.started.insert(id.clone(), Instant::now());
+                let args = self.about_task(args);
                 if let Some(Entry::Tool { args: a, .. }) = self.tool_entry(&id) {
                     *a = args;
                 }
@@ -1105,7 +1137,7 @@ impl Chat {
                 host.hook(self, "tool-finished", &payload);
             }
             AgentEvent::ToolAsk { id, always, reply } => {
-                let (name, args) = match self.entries.iter().rev().find(|e| matches!(e, Entry::Tool { id: i, .. } if *i == id)) {
+                let (name, args) = match serpis_proto::find_tool(&self.entries, &id) {
                     Some(Entry::Tool { name, args, .. }) => (name.clone(), args.clone()),
                     _ => (String::new(), Value::Null),
                 };
@@ -1152,6 +1184,72 @@ impl Chat {
                 self.compact_if_needed(host);
             }
             AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
+            AgentEvent::Task { tool, mut task } => {
+                if let Some(Entry::Tool { name, task: t, .. }) = self.tool_entry(&tool) {
+                    // A shell task its Monitor tool started watches for events: a monitor.
+                    if name == "Monitor" && task.kind == "bash" {
+                        task.kind = "monitor".into();
+                    }
+                    *t = Some(Box::new(task));
+                }
+            }
+            AgentEvent::Nested { parent, event } => self.apply_nested(&parent, *event),
+            AgentEvent::PermissionMode(m) => self.permission_mode = Some(m),
+            // Claude Code went on by itself (work it left running finished): a run of the
+            // chat's, which it shows, records and can stop like any.
+            AgentEvent::Adopted { handle, why } => {
+                if self.agent.is_none() {
+                    self.agent = Some(handle);
+                    self.last_error = None;
+                }
+                self.entries.push(Entry::Info { text: why.unwrap_or_else(|| "Claude Code went on by itself".into()), tone: Tone::Meta });
+            }
+        }
+    }
+
+    /// A tool call's arguments as shown: one about a background task by its id (reading a
+    /// shell's output, stopping it) also says which, as `about` (the task's description).
+    fn about_task(&self, mut args: Value) -> Value {
+        let id = ["task_id", "bash_id", "shell_id"].iter().find_map(|k| args[k].as_str()).map(str::to_string);
+        let found = id.and_then(|id| {
+            self.entries.iter().flat_map(Entry::walk).find_map(|e| match e {
+                Entry::Tool { task: Some(t), .. } if t.id == id => Some(t.description.clone()),
+                _ => None,
+            })
+        });
+        if let (Some(d), Some(o)) = (found.filter(|d| !d.is_empty()), args.as_object_mut()) {
+            o.insert("about".into(), json!(d));
+        }
+        args
+    }
+
+    /// A subagent's event, shown in the steps of its tool call `parent`: its replies (their
+    /// text), its tool calls and their results.
+    fn apply_nested(&mut self, parent: &str, ev: AgentEvent) {
+        match ev {
+            AgentEvent::MessageEnd(Message::Assistant(m)) => {
+                let blocks: Vec<AssistantContent> = m.content.into_iter().filter(|b| matches!(b, AssistantContent::Text { text, .. } if !text.trim().is_empty())).collect();
+                if blocks.is_empty() && m.error_message.is_none() {
+                    return;
+                }
+                let step = Entry::Assistant { blocks, model: m.model, streaming: false, continuation: false, usage: None, error: m.error_message, cache: None };
+                if let Some(Entry::Tool { steps, .. }) = self.tool_entry(parent) {
+                    steps.push(step);
+                }
+            }
+            AgentEvent::ToolStart { id, name, args } => {
+                let args = self.about_task(args);
+                let step = Entry::Tool { id, name, args, partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] };
+                if let Some(Entry::Tool { steps, .. }) = self.tool_entry(parent) {
+                    steps.push(step);
+                }
+            }
+            AgentEvent::ToolEnd { id, result, .. } => {
+                if let Some(Entry::Tool { result: r, .. }) = self.tool_entry(&id) {
+                    *r = Some(result);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1177,20 +1275,17 @@ impl Chat {
 
     /// Tool calls waiting for the person, oldest first.
     pub fn asking(&self) -> Vec<String> {
-        self.entries.iter().filter_map(|e| if let Entry::Tool { id, ask: Some(_), .. } = e { Some(id.clone()) } else { None }).collect()
+        self.entries.iter().flat_map(Entry::walk).filter_map(|e| if let Entry::Tool { id, ask: Some(_), .. } = e { Some(id.clone()) } else { None }).collect()
     }
 
     /// The run ended: nothing waits for an answer any more.
     fn drop_asks(&mut self) {
         self.asks.clear();
-        self.entries.update_all(
-            |e| matches!(e, Entry::Tool { ask: Some(_), .. }),
-            |e| {
-                if let Entry::Tool { ask, .. } = e {
-                    *ask = None;
-                }
-            },
-        );
+        for id in self.asking() {
+            if let Some(Entry::Tool { ask, .. }) = self.tool_entry(&id) {
+                *ask = None;
+            }
+        }
     }
 
     /// Write to the session file; the first failure is reported, later ones are silent.
@@ -1259,7 +1354,7 @@ impl Chat {
                         cache: None,
                     });
                     for tc in a.tool_calls() {
-                        self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None });
+                        self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] });
                     }
                 }
                 Message::ToolResult(r) => {
@@ -1287,6 +1382,12 @@ impl Chat {
 
     /// What the running agent is doing right now.
     pub fn current_step(&self) -> String {
+        // A subagent's prompt waits as much as the agent's own (those are found below).
+        let own = self.entries.iter().any(|e| matches!(e, Entry::Tool { ask: Some(_), .. }));
+        if !own && let Some(Entry::Tool { name, args, .. }) = self.entries.iter().flat_map(Entry::walk).find(|e| matches!(e, Entry::Tool { ask: Some(_), .. })) {
+            let s = tool_summary(name, args);
+            return if s.is_empty() { format!("waiting for you: {name}") } else { format!("waiting for you: {name} {s}") };
+        }
         for e in self.entries.iter().rev() {
             match e {
                 Entry::Tool { name, args, ask: Some(_), .. } if name == "AskUserQuestion" => {
@@ -1342,9 +1443,13 @@ impl Chat {
             custom: self.custom_entries.clone(),
             cache_info: self.cache_info(),
             keep_going: self.keep_going(),
+            permission_mode: self.is_claude_code().then(|| self.permission_mode.clone().unwrap_or_else(|| self.default_mode.clone())),
         }
     }
 }
+
+/// Claude Code's permission modes.
+pub const PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
 /// The custom entry a chat's own [`Chat::keep_going`] choice is kept in: `{on = bool}`.
 pub const KEEP_GOING: &str = "keep-going";
@@ -1435,6 +1540,16 @@ fn arg<'a>(args: &'a Value, k: &str) -> &'a str {
 
 /// A tool call in a few words: `cargo test`, `src/main.rs`.
 pub fn tool_summary(name: &str, args: &Value) -> String {
+    // Claude Code's tools for its background shells and tasks: which one (by what it runs,
+    // when known), and whether it waits for it.
+    if name == "Monitor" {
+        return args["description"].as_str().or(args["command"].as_str()).unwrap_or("").lines().next().unwrap_or("").to_string();
+    }
+    if matches!(name, "TaskOutput" | "BashOutput" | "TaskStop" | "KillShell" | "KillBash") {
+        let which = ["about", "task_id", "bash_id", "shell_id"].iter().find_map(|k| args[k].as_str()).unwrap_or("").to_string();
+        let waits = name == "TaskOutput" && args["block"].as_bool() != Some(false);
+        return if waits { format!("{which} · waiting") } else { which };
+    }
     match name {
         "bash" => arg(args, "command").lines().next().unwrap_or("").to_string(),
         "read" => {

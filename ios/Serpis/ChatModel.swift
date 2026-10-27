@@ -101,7 +101,30 @@ final class ChatModel: Identifiable {
         entries.lazy.compactMap(Tool.init).first { $0.ask != nil }
     }
 
-    /// Answer the tool call waiting for the person: "allow", "always" or "deny".
+    /// Tool calls whose work runs on in the background (Claude Code's commands, agents).
+    var background: [Tool] {
+        entries.compactMap(Tool.init).filter(\.working)
+    }
+
+    /// Switch Claude Code's permission mode for this chat.
+    func setPermissionMode(_ mode: String) async {
+        do {
+            _ = try await app?.call(machine, ["op": "set_permission_mode", "chat": chat, "mode": mode])
+        } catch {
+            notice = AppModel.describe(error)
+        }
+    }
+
+    /// Ask the agent to stop the work `tool` started.
+    func stopTask(_ tool: Tool) async {
+        guard let task = tool.side.task?.id else { return }
+        do {
+            _ = try await app?.call(machine, ["op": "stop_task", "chat": chat, "task": task])
+        } catch {
+            notice = AppModel.describe(error)
+        }
+    }
+
     /// Answer what `tool` asks: "allow", "always", "deny", or "answers" (its questions, to `answers`).
     func answer(_ tool: String, _ kind: String, answers: [String: String]? = nil) async {
         var decision: [String: Any] = ["kind": kind]

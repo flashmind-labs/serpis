@@ -301,7 +301,19 @@ Next:
   ask in plain text.
 - The phone's own lines for Claude Code's tools (todo list, subagents); it shows mapped tools
   already.
-- Subagents: their steps (`parent_tool_use_id`) are skipped; show them inside their Task card.
+- *Done*: background work and subagents. The engine reads `claude` between runs too: its
+  `system task_*` lines become `AgentEvent::Task` (a tool entry's `task`: status, usage), a
+  subagent's lines (`parent_tool_use_id`) become `AgentEvent::Nested` (a tool entry's `steps`),
+  and a turn it starts itself (work it left running finished) becomes `AgentEvent::Adopted`, a
+  run the chat shows, records and can stop. `chat-stop-task` (`StopTask`, the CLI's
+  `stop_task`). Its process tree ends with it (SIGTERM, then SIGKILL by pid and start time:
+  commands it runs may sit in groups of their own). Found by probing the CLI 2.1.311 on Haiku.
+  Not yet: tasks and steps aren't in the session file, so a restored chat shows the cards
+  without them.
+- *Done*: permission modes per chat (`ChatState::permission_mode`, `SetPermissionMode`, the CLI's
+  `set_permission_mode`, its `system status` lines followed): the composer's TUI-like indicator,
+  `S-TAB`, `chat-select-permission-mode`, the phone's menu. Not yet: a chat's own mode isn't
+  kept across a restore (it starts in `claude-code-permission-mode` again).
 - Mid-turn steering: messages sent while it works wait for the turn's end today.
 - Moving a chat carries serpis's session but not Claude Code's (`~/.claude/projects/...`); it is
   caught up with the conversation as text instead. Carry the session file along.

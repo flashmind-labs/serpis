@@ -102,6 +102,24 @@ impl World {
         panic!("nothing asked: {:#?}", chat.entries());
     }
 
+    /// Poll until `done` says so.
+    fn until(&mut self, chat: &mut Chat, done: impl Fn(&Chat) -> bool) {
+        for _ in 0..400 {
+            let _ = self.woken.recv_timeout(Duration::from_millis(25));
+            chat.poll(&mut self.host);
+            if done(chat) {
+                return;
+            }
+        }
+        panic!("it didn't happen: {:#?}", chat.entries());
+    }
+
+    /// Everything the stand-in logged, a line each.
+    fn log_lines(&self) -> Vec<Value> {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
     /// What the stand-in logged: its starts' arguments, and the lines it was sent.
     fn log(&self) -> (Vec<Vec<String>>, Vec<Value>) {
         let text = std::fs::read_to_string(&self.log).unwrap_or_default();
@@ -205,6 +223,18 @@ fn chats_run_on_claude_code() {
     assert_eq!(answer["response"]["response"]["updatedInput"]["file_path"], "notes.txt", "arguments go back under Claude Code's names");
     assert_eq!(answer["response"]["response"]["updatedPermissions"][0]["mode"], "acceptEdits");
     assert!(chat.entries().iter().all(|e| !matches!(e, Entry::Tool { ask: Some(_), .. })));
+    // That switched Claude Code to accepting edits, and the chat says so.
+    assert_eq!(chat.state().permission_mode.as_deref(), Some("acceptEdits"));
+
+    // Its mode is switched at once, without starting it again.
+    let starts = w.log().0.len();
+    chat.set_permission_mode("auto").unwrap();
+    assert_eq!(chat.state().permission_mode.as_deref(), Some("auto"));
+    w.send(&mut chat, "in auto mode");
+    assert_eq!(w.log().0.len(), starts, "no restart for a new mode");
+    assert!(w.log().1.iter().any(|g| g["request"]["subtype"] == "set_permission_mode" && g["request"]["mode"] == "auto"));
+    assert!(chat.set_permission_mode("yolo").is_err());
+    chat.set_permission_mode("default").unwrap();
 
     // The person refuses one, saying why.
     chat.submit(&mut w.host, "edit no".into(), vec![], false, None).unwrap();
@@ -304,6 +334,73 @@ fn chats_run_on_claude_code() {
     assert!(after(starts.last().unwrap(), "--session-id").is_some());
     let first = got.iter().rev().find(|g| g["type"] == "user").unwrap()["message"]["content"][0]["text"].as_str().unwrap().to_string();
     assert!(first.contains("<conversation>") && first.contains("echo: back"), "{first}");
+
+    // Work on the side. A subagent: its steps go in its tool call's entry, with how it went.
+    let mut bg = w.chat();
+    w.send(&mut bg, "use a subagent");
+    let tool = |chat: &Chat, name: &str| chat.entries().iter().rev().find(|e| matches!(e, Entry::Tool { name: n, .. } if n == name)).cloned().unwrap_or_else(|| panic!("no {name}: {:#?}", chat.entries()));
+    let Entry::Tool { steps, task: Some(task), result: Some(_), .. } = tool(&bg, "Agent") else { panic!("{:#?}", bg.entries()) };
+    assert_eq!((task.kind.as_str(), task.status.as_str(), task.background, task.tool_uses), ("agent", "completed", false, 1), "{task:?}");
+    assert!(matches!(&steps[0], Entry::Tool { name, result: Some(r), .. } if name == "bash" && !r.is_error), "{steps:#?}");
+    assert_eq!(last_text(&steps), "It printed from-sub.");
+    assert!(bg.entries().iter().all(|e| !matches!(e, Entry::Tool { name, .. } if name == "bash")), "its steps aren't the chat's own");
+    assert_eq!(last_text(bg.entries()), "The subagent said from-sub.");
+
+    // A command in the background: the turn ends while it runs; when it finishes, Claude Code
+    // takes a turn of its own, which the chat runs (and records) as any.
+    w.send(&mut bg, "run it in the background");
+    assert_eq!(last_text(bg.entries()), "Started it in the background.");
+    let Entry::Tool { task: Some(task), .. } = tool(&bg, "bash") else { panic!() };
+    assert!(task.running() && task.background, "{task:?}");
+    w.until(&mut bg, |c| c.running());
+    w.finish(&mut bg);
+    assert_eq!(last_text(bg.entries()), "The background command finished: bg-done.");
+    assert!(bg.entries().iter().any(|e| matches!(e, Entry::Info { text, .. } if text == "Background command finished: sleep then echo bg-done")), "{:#?}", bg.entries());
+    let Entry::Tool { task: Some(task), .. } = tool(&bg, "bash") else { panic!() };
+    assert_eq!(task.status, "completed");
+    assert!(bg.history.last().is_some_and(|m| matches!(m, serpis_ai::Message::Assistant(a) if a.text() == "The background command finished: bg-done.")), "its own turn is recorded");
+
+    // An agent in the background: its steps come after the turn, then its own turn.
+    w.send(&mut bg, "an agent in the background");
+    assert_eq!(last_text(bg.entries()), "Launched it.");
+    w.until(&mut bg, |c| c.running());
+    w.finish(&mut bg);
+    assert_eq!(last_text(bg.entries()), "The agent reported: from-sub.");
+    let Entry::Tool { steps, task: Some(task), .. } = tool(&bg, "Agent") else { panic!() };
+    assert_eq!((steps.len(), task.status.as_str(), task.background), (2, "completed", true), "{steps:#?}");
+
+    // Stopping one: Claude Code is asked to.
+    w.send(&mut bg, "background forever");
+    let Entry::Tool { task: Some(task), .. } = tool(&bg, "bash") else { panic!() };
+    assert!(bg.stop_task(&task.id));
+    w.until(&mut bg, |c| matches!(c.entries().iter().rev().find(|e| matches!(e, Entry::Tool { name, .. } if name == "bash")), Some(Entry::Tool { task: Some(t), .. }) if t.status == "stopped"));
+    assert!(!bg.running(), "a stopped task takes no turn");
+
+    // A monitor beside a shell: both run, each its own task, and a monitor is told apart.
+    w.send(&mut bg, "background forever too");
+    w.send(&mut bg, "start a monitor");
+    let Entry::Tool { task: Some(monitor), .. } = tool(&bg, "Monitor") else { panic!("{:#?}", bg.entries()) };
+    let Entry::Tool { task: Some(shell), .. } = tool(&bg, "bash") else { panic!() };
+    assert_eq!((monitor.kind.as_str(), shell.kind.as_str()), ("monitor", "bash"));
+    assert!(monitor.running() && shell.running());
+    for t in [&monitor.id, &shell.id] {
+        assert!(bg.stop_task(t));
+    }
+    w.until(&mut bg, |c| c.entries().iter().all(|e| !matches!(e, Entry::Tool { task: Some(t), .. } if t.running())));
+
+    // What it leaves running goes with it: closing the chat's Claude Code ends what it started.
+    w.send(&mut bg, "background forever, again");
+    let pid = w.log_lines().iter().rev().find_map(|l| l["spawned"].as_u64()).expect("the stand-in's command");
+    let alive = |pid: u64| std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    assert!(alive(pid));
+    bg.clear();
+    for _ in 0..100 {
+        if !alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!alive(pid), "the command claude started, in a process group of its own, ended with it");
 
     assert!(w.host.notices.is_empty(), "{:?}", w.host.notices);
     let _ = std::fs::remove_dir_all(&w.home);

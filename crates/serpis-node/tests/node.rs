@@ -90,7 +90,11 @@ fn a_node_runs_chats_for_clients_anywhere() {
     let mock = rt.block_on(serpis_testkit::Mock::start(serpis_testkit::commands()));
     let (work, agent) = setup(&root, &mock.base);
     // SAFETY: the only test in this binary, before any thread of ours starts.
-    unsafe { std::env::set_var("HOME", root.join("home")) };
+    unsafe {
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("SERPIS_CLAUDE_CODE_PATH", serpis_testkit::fake_claude());
+        std::env::set_var("FAKE_CLAUDE_DIR", &root);
+    }
     let node_dir = root.join("node");
     std::fs::create_dir_all(&node_dir).unwrap();
     // Claude Code there is the stand-in (its usage is made up).
@@ -110,6 +114,23 @@ fn a_node_runs_chats_for_clients_anywhere() {
         let Response::ClaudeCodeUsage { usage } = a.call(Request::ClaudeCodeUsage { advice: false }).await.unwrap() else { panic!() };
         assert_eq!(usage["rate_limits"]["five_hour"]["utilization"], 42, "{usage}");
         assert!(usage["behaviors"].is_null(), "no advice asked for: {usage}");
+
+        // A chat on Claude Code says its permission mode, and switches it.
+        for _ in 0..100 {
+            let Response::Models { models } = a.call(Request::Models).await.unwrap() else { panic!() };
+            if models.iter().any(|m| m.model == "claude-code/fake") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let cc = chat_of(a.call(Request::New { cwd: "~/project".into(), model: Some("claude-code/fake".into()), thinking: None, chat: None }).await.unwrap());
+        a.call(Request::Attach { chat: cc.clone() }).await.unwrap();
+        let mut vc = View::default();
+        vc.until(&mut a_events, |v| v.state.as_ref().is_some_and(|s| s.permission_mode.as_deref() == Some("default"))).await;
+        a.call(Request::SetPermissionMode { chat: cc.clone(), mode: "auto".into() }).await.unwrap();
+        vc.until(&mut a_events, |v| v.state.as_ref().is_some_and(|s| s.permission_mode.as_deref() == Some("auto"))).await;
+        assert!(a.call(Request::SetPermissionMode { chat: cc.clone(), mode: "yolo".into() }).await.is_err());
+        a.call(Request::Close { chat: cc }).await.unwrap();
 
         // Mistakes are answered, not fatal.
         let err = a.call(Request::New { cwd: "/nowhere/at/all".into(), model: None, thinking: None, chat: None }).await.unwrap_err();

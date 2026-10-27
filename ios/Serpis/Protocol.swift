@@ -76,14 +76,66 @@ struct Ask: Decodable, Hashable {
     var always: String?
 }
 
+/// Work a tool call started on the side: a command in the background, a subagent.
+struct TaskInfo: Decodable, Hashable {
+    var id: String
+    /// "bash" or "agent".
+    var kind: String
+    var description: String
+    /// "running", "completed", "failed" or "stopped".
+    var status: String
+    var background: Bool
+    var summary: String?
+    var lastTool: String?
+    var toolUses: Int
+    var tokens: Int
+
+    private enum Keys: String, CodingKey { case id, kind, description, status, background, summary, last_tool, tool_uses, tokens }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        kind = (try? c.decode(String.self, forKey: .kind)) ?? "bash"
+        description = (try? c.decode(String.self, forKey: .description)) ?? ""
+        status = (try? c.decode(String.self, forKey: .status)) ?? "running"
+        background = (try? c.decode(Bool.self, forKey: .background)) ?? false
+        summary = try? c.decode(String.self, forKey: .summary)
+        lastTool = try? c.decode(String.self, forKey: .last_tool)
+        toolUses = (try? c.decode(Int.self, forKey: .tool_uses)) ?? 0
+        tokens = (try? c.decode(Int.self, forKey: .tokens)) ?? 0
+    }
+
+    var running: Bool { status == "running" }
+
+    /// How it is going, in a few words: "In the background", "2 tools · 1.2k tokens".
+    var statusLine: String {
+        var parts: [String] = []
+        switch status {
+        case "running": if background { parts.append("In the background") }
+        case "failed": parts.append("Failed")
+        case "stopped": parts.append("Stopped")
+        default: if background { parts.append("Done in the background") }
+        }
+        if toolUses > 0 { parts.append(toolUses == 1 ? "1 tool" : "\(toolUses) tools") }
+        if tokens > 0 { parts.append(tokens >= 1000 ? String(format: "%.1fk tokens", Double(tokens) / 1000) : "\(tokens) tokens") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// What a tool call started on the side: the work, and a subagent's own steps.
+struct Side: Hashable {
+    var task: TaskInfo? = nil
+    var steps: [Entry] = []
+}
+
 /// One item of a chat's transcript.
 enum Entry: Decodable, Hashable {
     case user(text: String, queued: Bool, images: [SentImage])
     case assistant(blocks: [Block], streaming: Bool, error: String?)
-    case tool(id: String, name: String, args: JSON, partial: String?, result: ToolResult?, elapsedMs: Int?, ask: Ask?)
+    case tool(id: String, name: String, args: JSON, partial: String?, result: ToolResult?, elapsedMs: Int?, ask: Ask?, side: Side)
     case info(text: String, tone: String)
 
-    private enum Keys: String, CodingKey { case kind, text, queued, images, blocks, streaming, error, id, name, args, partial, result, tone, elapsed_ms, ask }
+    private enum Keys: String, CodingKey { case kind, text, queued, images, blocks, streaming, error, id, name, args, partial, result, tone, elapsed_ms, ask, task, steps }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -93,7 +145,7 @@ enum Entry: Decodable, Hashable {
         case "assistant":
             self = .assistant(blocks: try c.decode([Block].self, forKey: .blocks), streaming: (try? c.decode(Bool.self, forKey: .streaming)) ?? false, error: try? c.decode(String.self, forKey: .error))
         case "tool":
-            self = .tool(id: try c.decode(String.self, forKey: .id), name: try c.decode(String.self, forKey: .name), args: (try? c.decode(JSON.self, forKey: .args)) ?? .null, partial: try? c.decode(String.self, forKey: .partial), result: try? c.decode(ToolResult.self, forKey: .result), elapsedMs: try? c.decode(Int.self, forKey: .elapsed_ms), ask: try? c.decode(Ask.self, forKey: .ask))
+            self = .tool(id: try c.decode(String.self, forKey: .id), name: try c.decode(String.self, forKey: .name), args: (try? c.decode(JSON.self, forKey: .args)) ?? .null, partial: try? c.decode(String.self, forKey: .partial), result: try? c.decode(ToolResult.self, forKey: .result), elapsedMs: try? c.decode(Int.self, forKey: .elapsed_ms), ask: try? c.decode(Ask.self, forKey: .ask), side: Side(task: try? c.decode(TaskInfo.self, forKey: .task), steps: (try? c.decode([Entry].self, forKey: .steps)) ?? []))
         default:
             self = .info(text: (try? c.decode(String.self, forKey: .text)) ?? "", tone: (try? c.decode(String.self, forKey: .tone)) ?? "meta")
         }
@@ -119,8 +171,10 @@ struct ChatState: Decodable, Hashable {
     var cwd: String
     var sessionId: String
     var lastError: String?
+    /// Claude Code's permission mode, for a chat on it.
+    var permissionMode: String?
 
-    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error }
+    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error, permission_mode }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -131,8 +185,19 @@ struct ChatState: Decodable, Hashable {
         cwd = (try? c.decode(String.self, forKey: .cwd)) ?? ""
         sessionId = (try? c.decode(String.self, forKey: .session_id)) ?? ""
         lastError = try? c.decode(String.self, forKey: .last_error)
+        permissionMode = try? c.decode(String.self, forKey: .permission_mode)
     }
 }
+
+/// Claude Code's permission modes: (mode, what its prompt line says, what it does).
+let permissionModes: [(mode: String, label: String, about: String)] = [
+    ("default", "Asks before acting", "Asks before edits and commands its rules don't allow"),
+    ("acceptEdits", "⏵⏵ accept edits on", "Edits without asking; asks for commands"),
+    ("plan", "⏸ plan mode on", "Reads and plans; changes nothing until you approve"),
+    ("auto", "⏵⏵ auto mode on", "Decides what is safe; asks only for what isn't"),
+    ("dontAsk", "⏵⏵ don't ask on", "Never asks: what its rules don't allow is refused"),
+    ("bypassPermissions", "⏵⏵ bypass permissions on", "Never asks and allows everything"),
+]
 
 /// Something a machine said about a chat it runs.
 enum Event: Decodable {

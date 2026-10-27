@@ -30,6 +30,19 @@ pub enum AgentEvent {
     ToolAsk { id: String, always: Option<String>, reply: AskReply },
     TurnEnd,
     AgentEnd { error: Option<String> },
+    /// Work started by tool call `task.id`'s tool, on the side (a background command, a
+    /// subagent), as it is now. Comes between runs too.
+    Task { tool: String, task: serpis_proto::Task },
+    /// An event of the subagent tool call `parent` started (its replies, tool calls and
+    /// results; nested subagents' are nested again). Comes between runs too.
+    Nested { parent: String, event: Box<AgentEvent> },
+    /// The agent started a run of its own (Claude Code, when work it left running in the
+    /// background finished): its events follow, as a run's, up to its `AgentEnd`. `handle`
+    /// stops it or steers it; `why` says what started it.
+    Adopted { handle: AgentHandle, why: Option<String> },
+    /// The agent's permission mode is now this (Claude Code's: it switches itself too, as
+    /// when a plan is approved or edits are allowed for the session).
+    PermissionMode(String),
 }
 
 pub type EmitFn = Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -112,6 +125,12 @@ pub fn supports_native_web_search(model: &Model) -> bool {
         // OpenRouter's "web" plugin searches on every request rather than letting the model
         // decide, so chat-completions models use the client-side tool instead.
         _ => false,
+    }
+}
+
+impl std::fmt::Debug for AgentHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentHandle")
     }
 }
 

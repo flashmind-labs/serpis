@@ -258,8 +258,8 @@ struct WorkView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(entries.enumerated()), id: \.offset) { _, e in
                         switch e {
-                        case .tool(let id, let name, let args, let partial, let result, let elapsed, let ask):
-                            ToolStep(tool: Tool(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed, ask: ask))
+                        case .tool:
+                            if let tool = Tool(e) { ToolStep(tool: tool) }
                         case .assistant(let blocks, let streaming, _):
                             ForEach(Array(blocks.enumerated()), id: \.offset) { _, b in
                                 if case .thinking(let t) = b, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -304,16 +304,21 @@ struct Tool: Hashable {
     var elapsedMs: Int?
     /// Waiting for the person to allow it.
     var ask: Ask? = nil
+    /// What it started on the side (a background command, a subagent and its steps).
+    var side = Side()
 
-    init(id: String, name: String, args: JSON, partial: String?, result: ToolResult?, elapsedMs: Int?, ask: Ask? = nil) {
-        (self.id, self.name, self.args, self.partial, self.result, self.elapsedMs, self.ask) = (id, name, args, partial, result, elapsedMs, ask)
+    init(id: String, name: String, args: JSON, partial: String?, result: ToolResult?, elapsedMs: Int?, ask: Ask? = nil, side: Side = Side()) {
+        (self.id, self.name, self.args, self.partial, self.result, self.elapsedMs, self.ask, self.side) = (id, name, args, partial, result, elapsedMs, ask, side)
     }
 
     /// The tool call an entry is, if it is one.
     init?(_ entry: Entry) {
-        guard case .tool(let id, let name, let args, let partial, let result, let elapsed, let ask) = entry else { return nil }
-        self.init(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed, ask: ask)
+        guard case .tool(let id, let name, let args, let partial, let result, let elapsed, let ask, let side) = entry else { return nil }
+        self.init(id: id, name: name, args: args, partial: partial, result: result, elapsedMs: elapsed, ask: ask, side: side)
     }
+
+    /// Still at work on the side, after the call itself returned.
+    var working: Bool { side.task?.running == true }
 
     func arg(_ k: String) -> String { args[k]?.string ?? "" }
 
@@ -349,6 +354,7 @@ struct Tool: Hashable {
         case "ls": "Listing \(file.isEmpty ? "files" : file)"
         case "web_search": "Searching the web"
         case "AskUserQuestion": "Asking you"
+        case "Agent", "Task": "Running an agent: \(arg("description"))"
         default: "Running \(name)"
         }
     }
@@ -437,12 +443,19 @@ struct ToolStep: View {
                 .font(.subheadline).lineLimit(1)
         case "web_search":
             Text(tool.arg("query")).font(.subheadline).lineLimit(1)
+        case "Agent", "Task":
+            Text(tool.arg("description").isEmpty ? "Agent" : tool.arg("description")).font(.subheadline.weight(.medium)).lineLimit(1)
         default:
             Text(tool.name).font(.subheadline.weight(.medium))
         }
     }
 
     private var subtitle: String? {
+        if let t = tool.side.task {
+            let using = t.running && t.kind == "agent" ? t.lastTool.map { "using \($0)" } : nil
+            let line = [t.statusLine, using ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+            return line.isEmpty ? nil : line
+        }
         switch tool.name {
         case "read":
             var s = tool.folder
@@ -458,7 +471,7 @@ struct ToolStep: View {
     }
 
     @ViewBuilder private var status: some View {
-        if tool.result == nil {
+        if tool.result == nil || tool.working {
             ProgressView().controlSize(.mini)
         } else if tool.result?.isError == true {
             Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).font(.footnote)
@@ -473,7 +486,28 @@ struct ToolStep: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if let diff = tool.result?.diff, !diff.isEmpty {
+        if !tool.side.steps.isEmpty {
+            // A subagent's own steps, and what it said.
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(tool.side.steps.enumerated()), id: \.offset) { _, e in
+                    switch e {
+                    case .tool:
+                        if let step = Tool(e) { ToolStep(tool: step).padding(.horizontal, -12) }
+                    case .assistant(let blocks, _, _):
+                        let text = blocks.compactMap { if case .text(let t) = $0 { t } else { nil } }.joined(separator: "\n")
+                        if !text.isEmpty {
+                            Text(text).font(.subheadline).padding(.vertical, 4)
+                        }
+                    default:
+                        EmptyView()
+                    }
+                }
+            }
+        } else if let t = tool.side.task, t.kind == "bash", t.background {
+            Text(t.running ? "Running in the background." : (t.summary ?? t.statusLine))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        } else if let diff = tool.result?.diff, !diff.isEmpty {
             DiffView(diff: diff)
         } else if tool.name == "bash" {
             TerminalCard(command: tool.command, output: tool.result?.text ?? tool.partial ?? "", failed: tool.result?.isError == true)
@@ -491,6 +525,7 @@ struct ToolStep: View {
         case "grep", "find": "magnifyingglass"
         case "ls": "folder"
         case "web_search": "globe"
+        case "Agent", "Task": "person.2"
         default: "wrench.and.screwdriver"
         }
     }

@@ -67,6 +67,8 @@ pub fn install_base(ed: &mut Editor) {
         ("C-c C-y", "chat-allow"),
         ("C-c C-a", "chat-allow-always"),
         ("C-c C-d", "chat-deny"),
+        ("C-c C-k", "chat-stop-task"),
+        ("S-TAB", "chat-cycle-permission-mode"),
     ] {
         ed.bind("chat", k, c, o);
     }

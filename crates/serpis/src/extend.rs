@@ -75,7 +75,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     // In a node (a chat's own hooks and tools), a chat is its id there, and nil is the chat whose
     // hook or tool is running. Reads see the chat as its node last said; actions are sent to it.
     ("serpis.chat.list", "(): every chat as serpis.chat.info returns it."),
-    ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil, session_id (the chat's id on its machine), machine = name | nil (where it runs, when not here), keep_going (a turn its node's stopping cut off continues)}."),
+    ("serpis.chat.info", "(buf?): {buffer, model = \"provider/id\", thinking, running, compacting, usage, context = {used, window, percent}, title, cwd, session = path | nil, session_id (the chat's id on its machine), machine = name | nil (where it runs, when not here), keep_going (a turn its node's stopping cut off continues), permission_mode = mode | nil (a Claude Code chat's), background (how many tasks run in the background)}."),
     ("serpis.chat.usage", "(buf?): the whole session's {input, output, cache_read, cache_write, total_tokens, cost} (cost in dollars, every message so far)."),
     ("serpis.chat.cache", "(buf?): the prompt cache: {hit_rate (share of prompt tokens read from the cache), state (\"warm\", \"cold\" or nil before anything was cached), left (seconds until it expires), misses = {{cause, text, tokens, cost}}} (newest last)."),
     ("serpis.chat.running", "(buf?): whether its agent is working."),

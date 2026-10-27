@@ -215,5 +215,38 @@ final class SerpisUITests: XCTestCase {
         if !reached, app.alerts.firstMatch.exists { XCTFail("refused: \(app.alerts.firstMatch.staticTexts.allElementsBoundByIndex.map(\.label))") }
         XCTAssertTrue(reached, "the answers reached it")
         XCTAssertFalse(form.exists)
+
+        // Its permission mode shows above the composer, and switches from there.
+        let mode = app.buttons["permission-mode"]
+        if !mode.waitForExistence(timeout: 10) {
+            XCTFail("the mode shows; on screen: \(app.debugDescription.components(separatedBy: "\n").filter { $0.contains("Button") || $0.contains("StaticText") }.suffix(40).joined(separator: " | "))")
+        }
+        mode.tap()
+        // (A row with its description is labelled with both.)
+        let auto = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "⏵⏵ auto mode on")).firstMatch
+        XCTAssertTrue(auto.waitForExistence(timeout: 5))
+        auto.tap()
+        XCTAssertTrue(app.buttons["Permission mode: ⏵⏵ auto mode on"].waitForExistence(timeout: 20), "switched: \(mode.label)")
+
+        // A subagent's turn.
+        composer.tap()
+        composer.typeText("use a subagent")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts["The subagent said from-sub."].waitForExistence(timeout: 30), "a subagent's turn")
+
+        // A command left running: the phone says so above its composer, and stops it.
+        composer.tap()
+        composer.typeText("background forever")
+        app.buttons["Send"].tap()
+        let running = app.descendants(matching: .any)["background"]
+        let shown = running.waitForExistence(timeout: 30)
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        shot("15-background")
+        XCTAssertTrue(shown, "what runs in the background shows")
+        running.buttons["Stop"].tap()
+        let item = app.buttons["sleep then echo bg-done"]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        item.tap()
+        XCTAssertTrue(running.waitForNonExistence(timeout: 30), "stopped, it shows no more")
     }
 }

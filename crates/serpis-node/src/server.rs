@@ -1013,6 +1013,16 @@ impl Node {
                 }
                 Response::Ok
             }
+            Request::SetPermissionMode { chat, mode } => {
+                self.with_chat(&chat, |c, _| c.set_permission_mode(&mode))??;
+                Response::Ok
+            }
+            Request::StopTask { chat, task } => {
+                if !self.with_chat(&chat, |c, _| c.stop_task(&task))? {
+                    return Err("Nothing runs that task: the chat's Claude Code has stopped".into());
+                }
+                Response::Ok
+            }
             Request::Compact { chat, instructions } => {
                 self.with_chat(&chat, |c, h| c.compact(h, serpis_chat::CompactReason::Manual, instructions))?;
                 Response::Ok

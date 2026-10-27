@@ -39,6 +39,10 @@ pub struct ChatInfo {
     pub node: (String, String),
     /// A turn cut off by its node stopping continues by itself (`chat-keep-going`).
     pub keep_going: bool,
+    /// Claude Code's permission mode, for a chat on it.
+    pub permission_mode: Option<String>,
+    /// How many tasks run in the background (Claude Code's shells and agents).
+    pub background: usize,
 }
 
 pub fn usage_json(u: &Usage) -> Value {
@@ -67,6 +71,8 @@ impl ChatInfo {
             "session_id": self.session_id,
             "machine": self.machine,
             "keep_going": self.keep_going,
+            "permission_mode": self.permission_mode,
+            "background": self.background,
             "context": {
                 "used": self.context.0.unwrap_or(0),
                 "window": self.context.1,
