@@ -149,6 +149,13 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     let same = |es: &[Entry]| es.iter().map(comparable).collect::<Vec<_>>();
     assert_eq!(same(&resumed[1..resumed.len() - 1]), same(&all.entries), "resumed sessions show the same conversation");
     assert!(host.notices.is_empty(), "{:?}", host.notices);
+
+    // Its commands know they run for an agent (a shell config can tell its own terminals
+    // from them): SERPIS_AGENT, beside the session's id.
+    chat.submit(&mut host, r#"CALL bash {"command": "echo agent=$SERPIS_AGENT"}"#.into(), vec![], false, None).unwrap();
+    finish(&mut chat, &mut host, &woken, &mut mirror);
+    let out = chat.entries().iter().rev().find_map(|e| if let Entry::Tool { name, result: Some(r), .. } = e { (name == "bash").then(|| format!("{:?}", r.content)) } else { None }).expect("the command ran");
+    assert!(out.contains("agent=1"), "{out}");
     let _ = std::fs::remove_dir_all(&home);
 }
 

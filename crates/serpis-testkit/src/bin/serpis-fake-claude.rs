@@ -99,7 +99,7 @@ enum Later {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cwd = std::env::current_dir().unwrap_or_default();
-    log(json!({"start": args, "cwd": cwd}));
+    log(json!({"start": args, "cwd": cwd, "agent_env": std::env::var("SERPIS_AGENT").ok()}));
     let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let dir = PathBuf::from(std::env::var_os("FAKE_CLAUDE_DIR").unwrap_or_else(|| std::env::temp_dir().into_os_string()));
     let session = match (after("--resume"), after("--session-id")) {

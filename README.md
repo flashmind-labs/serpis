@@ -383,6 +383,18 @@ A subagent's steps (its commands, edits and answer) show inside its Agent card, 
 when it runs in the background. Stopping or closing a chat ends everything its `claude`
 started: what it runs is sent SIGTERM (so scripts clean up), then SIGKILL after a moment.
 
+The commands an agent runs, serpis's own or Claude Code's (and `claude` itself), have
+`SERPIS_AGENT=1` in their environment, beside `SERPIS_SESSION_ID`; your own terminals don't. A
+shell config can tell them apart, e.g. in `~/.zshrc`:
+
+```zsh
+if [[ -n $SERPIS_AGENT || -n $CLAUDECODE ]]; then
+  unsetopt nomatch equals          # globs and "=word" as bash reads them
+else
+  alias rm='rm -i' cp='cp -i' mv='mv -i'
+fi
+```
+
 `claude-code-usage` shows your subscription's usage as Claude Code's `/usage` reports it, in a
 page of its own: the current five-hour session and the week (and any per-model weeks), each with
 a bar that turns yellow and then red as it fills and when it resets, extra usage, where the week

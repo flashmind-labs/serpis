@@ -47,6 +47,10 @@ pub enum AgentEvent {
 
 pub type EmitFn = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
+/// What the processes an agent starts (its commands, Claude Code) have in their environment,
+/// so a shell config can treat them unlike a person's terminal: `SERPIS_AGENT=1`.
+pub const AGENT_ENV: (&str, &str) = ("SERPIS_AGENT", "1");
+
 /// The person's answer to a [`AgentEvent::ToolAsk`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Answer {
@@ -366,6 +370,8 @@ async fn prepare(call: &ToolCall, tools: &[ToolRef], cfg: &AgentConfig) -> Prepa
 
 fn session_env(cfg: &AgentConfig) -> HashMap<String, String> {
     HashMap::from([
+        // An agent runs this, not a person: a shell config can tell (no `rm -i`, ...).
+        (AGENT_ENV.0.into(), AGENT_ENV.1.into()),
         ("SERPIS_SESSION_ID".into(), cfg.session_id.clone()),
         ("SERPIS_PROVIDER".into(), cfg.model.provider.clone()),
         ("SERPIS_MODEL".into(), cfg.model.id.clone()),

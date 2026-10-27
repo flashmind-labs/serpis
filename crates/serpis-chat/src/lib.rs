@@ -567,11 +567,14 @@ impl Chat {
         let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
         self.record(host, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
         // Thinking levels are Claude Code's efforts; `off` only where the model can do without.
-        let (effort, env) = match model.thinking_map(self.thinking) {
+        let (effort, mut env) = match model.thinking_map(self.thinking) {
             Some(Some("off")) => (None, vec![("MAX_THINKING_TOKENS".to_string(), "0".to_string())]),
             Some(Some(v)) => (Some(v.to_string()), Vec::new()),
             _ => (None, Vec::new()),
         };
+        // Its commands run for an agent, as serpis's own agent's do (a shell config can tell).
+        env.push((serpis_agent::AGENT_ENV.0.into(), serpis_agent::AGENT_ENV.1.into()));
+        env.push(("SERPIS_SESSION_ID".into(), self.session_id.clone()));
         let args = match host.var("claude-code-args") {
             Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
             _ => Vec::new(),

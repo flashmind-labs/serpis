@@ -191,6 +191,7 @@ fn chats_run_on_claude_code() {
     assert_eq!((u.input, u.cache_read, u.output, u.cost.total), (10, 100, 7, 0.01));
     let (starts, _) = w.log();
     assert_eq!(starts.len(), 1);
+    assert!(w.log_lines().iter().any(|l| l["agent_env"] == "1"), "claude runs with SERPIS_AGENT, as its commands then do");
     assert_eq!(after(&starts[0], "--session-id"), Some(chat.session_id.as_str()));
     assert_eq!(after(&starts[0], "--model"), Some("sonnet"));
     assert_eq!(after(&starts[0], "--effort"), Some("high"));
