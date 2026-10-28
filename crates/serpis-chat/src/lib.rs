@@ -1877,6 +1877,12 @@ pub fn tool_summary(name: &str, args: &Value) -> String {
     }
     match name {
         "bash" => arg(args, "command").lines().next().unwrap_or("").to_string(),
+        "serpis_lua" => arg(args, "code").lines().next().unwrap_or("").to_string(),
+        "serpis_api" => match (arg(args, "topic"), arg(args, "filter")) {
+            ("", _) => "guide".into(),
+            (t, "") => t.to_string(),
+            (t, f) => format!("{t} · {f}"),
+        },
         "read" => {
             let mut s = arg(args, "path").to_string();
             if let Some(o) = args.get("offset").and_then(Value::as_u64) {

@@ -1649,8 +1649,9 @@ fn tool_lines(
                     body.push((StyledLine::new(l, if r.is_error { Face::ToolError } else { Face::AssistantText }), None));
                 }
             }
-        } else if name == "bash" {
-            let cmd = arg(args, "command");
+        } else if name == "bash" || name == "serpis_lua" {
+            // The rest of the command (or Lua code), then what it printed.
+            let cmd = arg(args, if name == "bash" { "command" } else { "code" });
             for l in cmd.lines().skip(1) {
                 body.push((StyledLine::new(l, Face::ToolArgs), None));
             }
