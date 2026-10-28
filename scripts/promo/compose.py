@@ -89,9 +89,9 @@ SEGMENTS = [
     ("windows", marks["windows"], marks["palette"], 1.3,
      "Tile everything.", "Chats, terminals and files side by side, on workspaces, like i3.",
      [(0, 1.0, .5, .5), (1, 1.04, .62, .5)]),
-    ("palette", marks["palette"], marks["extend"], 1.0,
+    ("palette", marks["palette"], marks["extend"], 0.8,
      "Every action is a keystroke away.", "One palette for every command, fuzzy-searched.",
-     [(0, 1.04, .55, .4), (0.3, 1.2, .5, .3), (0.85, 1.2, .5, .3), (1, 1.0, .5, .5)]),
+     [(0, 1.04, .55, .4), (0.4, 1.04, .55, .4), (0.6, 1.2, .5, .3), (0.88, 1.2, .5, .3), (1, 1.0, .5, .5)]),
     ("extend", marks["extend"], marks["end"] - 600, 1.1,
      "Reshape it by asking.", "Agents read serpis's own Lua API and change it, live.",
      [(0, 1.0, .5, .5), (0.25, 1.0, .5, .5), (0.5, 1.32, .8, .93), (1, 1.36, .8, .93)]),
@@ -180,20 +180,27 @@ def card(src):
 
 def place_card(img, src, scale, fx, fy, alpha=1.0, dy=0.0):
     """Card at `scale` (of BASE_SCALE), with window point (fx, fy) moved toward the stage point
-    it has at scale 1 — a camera push toward it."""
+    it has at scale 1 — a camera push toward it. One affine transform at subpixel precision:
+    resizing to whole pixels and pasting at whole pixels makes slow moves wobble."""
     c = card(src)
     s = BASE_SCALE * scale
-    cw, ch = int(c.width * s), int(c.height * s)
-    cs = c.resize((cw, ch), Image.LANCZOS if s < 1 else Image.BICUBIC)
     # Where the focus point sits at scale 1, and keep it there.
     x1 = W / 2 + (fx - .5) * FW * BASE_SCALE
     y1 = CARD_CY + (fy - .5) * FH * BASE_SCALE
     px = x1 - (PAD + fx * FW) * s
     py = y1 - (PAD + fy * FH) * s + dy
+    # The part of the stage it covers, in whole pixels; the fraction goes into the transform.
+    left, top = max(0, math.floor(px)), max(0, math.floor(py))
+    right, bottom = min(W, math.ceil(px + c.width * s)), min(H, math.ceil(py + c.height * s))
+    if right <= left or bottom <= top:
+        return
+    # Premultiplied, so edges blend without dark fringes.
+    out = c.convert("RGBa").transform((right - left, bottom - top), Image.AFFINE,
+                                      (1 / s, 0, (left - px) / s, 0, 1 / s, (top - py) / s), resample=Image.BICUBIC)
+    out = out.convert("RGBA")
     if alpha < 1:
-        a = cs.getchannel("A").point(lambda v: int(v * alpha))
-        cs.putalpha(a)
-    img.alpha_composite(cs, (int(round(px)), int(round(py))))
+        out.putalpha(out.getchannel("A").point(lambda v: int(v * alpha)))
+    img.alpha_composite(out, (left, top))
 
 
 # ---------- text ----------
