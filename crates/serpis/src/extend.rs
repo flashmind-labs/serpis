@@ -229,8 +229,29 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("worktree-removed", "{project, path, branch}."),
 ];
 
-const GUIDE: &str = r#"# Extending serpis (the editor you are running in)
+const GUIDE: &str = r#"# Configuring and extending serpis (the editor you are running in)
 
+## Changing serpis for the user
+A request about serpis itself (bigger text, a theme, a key, the sidebar, how a window or chat
+behaves) is a change to the user's config. Don't read serpis's source for it:
+1. Find what to change: serpis_api topic "variables" with a filter ("font", "sidebar",
+   "theme") lists settings with their values and docs; "commands" lists commands, and keys
+   bind them (serpis.keymap.set). "usage" says how serpis is used, with the user's keys.
+2. Read the user's config first. Their files: {files}. A file that already sets related
+   things (fonts, keys, windows) is where the change goes, in its style; otherwise init.lua.
+   Settings: serpis.var.set("font-size", 16). Keys: serpis.keymap.set("global", "s-k",
+   "command-name"), or the helper the user's files already use.
+3. Load it and check it: serpis_lua { code = "serpis.reload()" } runs the config again and
+   reports errors, then read the result back (serpis_lua { code =
+   'return serpis.var.get("font-size")' }).
+   The result lists what serpis said meanwhile. A warning there (a font not found, a key
+   that doesn't parse) means the change didn't take: tell the user, and offer what exists
+   (serpis.font.list() lists the installed fonts), rather than reporting success.
+4. Tell the user what you changed and in which file.
+Only change something live (serpis.var.set in serpis_lua, no file) when the user wants it
+just for now: a live change is gone when serpis restarts.
+
+## Extending
 Serpis is extended with Lua (LuaJIT: Lua 5.1 plus `bit`, `ffi` and `goto`; there is no `//`
 or `utf8` library). Everything a user sees is reachable: commands, keys, hooks, settings,
 buffers, chats, agent tools, UI segments.
@@ -308,6 +329,80 @@ fn config_dir() -> String {
     }
 }
 
+/// The user's Lua config files, as paths under the config directory (or "none yet").
+fn config_files() -> String {
+    let root = crate::config_dir();
+    let mut found = Vec::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(d) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let depth = p.strip_prefix(&root).map(|r| r.components().count()).unwrap_or(9);
+            if p.is_dir() && depth < 3 {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "lua") {
+                found.push(p.strip_prefix(&root).unwrap_or(&p).display().to_string());
+            }
+        }
+    }
+    found.sort();
+    if found.is_empty() { format!("none yet (create {}/init.lua)", config_dir()) } else { format!("{} (under {})", found.join(", "), config_dir()) }
+}
+
+/// How serpis is used, for someone new to it (or an agent helping them): `[[command]]` becomes
+/// the key bound to it now.
+const USAGE: &str = r#"# Using serpis
+
+Serpis is a keyboard-driven workspace for coding with agents, a bit like Emacs crossed with
+the i3 window manager. Everything is a buffer (a chat, a terminal, a file, the log) shown in a
+window; windows tile on workspaces. Every action is a command, run from the palette or by its
+key. The keys below are this user's, as bound right now.
+
+## The basics
+- The command palette, every command fuzzy-searched: [[execute-extended-command]]
+- A new chat: [[new-chat]]. A new terminal: [[new-terminal]]. Open a file: [[find-file]]
+- Switch to another buffer: [[switch-to-buffer]]
+- Cancel a prompt or a half-typed key sequence: [[keyboard-quit]]
+
+## Chats
+- Type in the composer at the bottom; RET sends. While the agent works, what you send steers it.
+- Stop the agent: [[chat-abort]]
+- Its model: [[chat-select-model]]. Thinking level: [[chat-select-thinking]]. The machine it
+  runs on: [[chat-select-machine]]
+- Use a skill: [[chat-select-skill]]. Compact a long chat: [[chat-compact]]
+- Pick up an earlier chat: [[chat-resume]]
+
+## Windows and workspaces
+- Split side by side: [[split-window-right]]. Stacked: [[split-window-below]]
+- The next window: [[other-window]]. Window 1 (and so on): [[select-window-1]]
+- Close a window (its buffer stays open): [[close-window]]. Kill the buffer: [[kill-current-buffer]]
+- Fullscreen a window and back: [[window-fullscreen-toggle]]
+- Workspaces: [[workspace]] switches by name, [[workspace-1]] (and so on) by number, and
+  [[workspace-back-and-forth]] goes back to the last one
+- The sidebar (projects, branches, chats, terminals): [[sidebar-toggle]]
+
+## Settings and help
+- Open the config: [[open-config]]. Load it again: [[reload-config]]
+- Text size: [[text-scale-increase]] and [[text-scale-decrease]]
+- What a key does: [[describe-key]]. What a setting does: [[describe-variable]]
+- Serpis's log: [[log-view]]
+"#;
+
+fn usage(ed: &Editor) -> String {
+    let keys = crate::commands::all_bindings(ed);
+    let re = regex::Regex::new(r"\[\[([a-z0-9-]+)\]\]").unwrap();
+    re.replace_all(USAGE, |c: &regex::Captures| {
+        let cmd = &c[1];
+        match keys.get(cmd) {
+            _ if !ed.commands.contains_key(cmd) => format!("MISSING COMMAND {cmd}"),
+            Some(k) => format!("{} ({cmd})", crate::chrome::pretty_keys(k)),
+            None => format!("M-x {cmd} (no key)"),
+        }
+    })
+    .into_owned()
+}
+
 /// The reference text for `topic`, filtered to lines (entries) containing `filter`.
 pub fn reference(ed: &Editor, topic: &str, filter: Option<&str>) -> String {
     let keep = |s: &str| filter.is_none_or(|f| s.to_lowercase().contains(&f.to_lowercase()));
@@ -316,6 +411,7 @@ pub fn reference(ed: &Editor, topic: &str, filter: Option<&str>) -> String {
         "hooks" => std::iter::once("A chat's hooks (\"In the chat's node\") run where the chat runs: in its machine's node, which loads this same config (serpis.where is \"node\" there), so register them in init.lua or an extension; there, `buffer` is the chat's id and serpis.chat.* takes it.".to_string())
             .chain(HOOKS.iter().map(|(n, d)| format!("{n}: {d}")))
             .collect(),
+        "usage" => return usage(ed),
         "commands" => {
             let mut v: Vec<String> = ed.commands.values().map(|c| format!("{}: {}", c.name, c.doc)).collect();
             v.sort();
@@ -328,7 +424,7 @@ pub fn reference(ed: &Editor, topic: &str, filter: Option<&str>) -> String {
         }
         _ => {
             let loaded = if ed.loaded_extensions.is_empty() { "none".to_string() } else { ed.loaded_extensions.join(", ") };
-            return GUIDE.replace("{config}", &config_dir()).replace("{loaded}", &loaded);
+            return GUIDE.replace("{config}", &config_dir()).replace("{loaded}", &loaded).replace("{files}", &config_files());
         }
     };
     let out: Vec<String> = lines.into_iter().filter(|l| keep(l)).collect();
@@ -345,19 +441,19 @@ impl serpis_agent::AgentTool for ApiDocs {
         "serpis_api"
     }
     fn description(&self) -> String {
-        "Read how to extend serpis, the editor this chat runs in, with Lua: topic \"guide\" (start here: where extensions live, how they load, how to test them), \"lua\" (the serpis.* API), \"hooks\" (events and payloads), \"commands\" or \"variables\" (everything defined right now). `filter` keeps matching entries.".into()
+        "Read how to configure, extend and use serpis, the editor this chat runs in: topic \"guide\" (start here: changing the user's config, where extensions live, how they load, how to test them), \"usage\" (how serpis is used, with the user's keys), \"lua\" (the serpis.* API), \"hooks\" (events and payloads), \"commands\" or \"variables\" (everything defined right now). `filter` keeps matching entries.".into()
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "topic": {"type": "string", "enum": ["guide", "lua", "hooks", "commands", "variables"]},
+                "topic": {"type": "string", "enum": ["guide", "usage", "lua", "hooks", "commands", "variables"]},
                 "filter": {"type": "string", "description": "Only entries containing this text (case-insensitive)."}
             }
         })
     }
     fn prompt_snippet(&self) -> Option<String> {
-        Some("Read the API for extending serpis (the editor you run in) with Lua".into())
+        Some("Read how to configure, extend and use serpis (the editor you run in)".into())
     }
     fn execute(&self, _id: String, args: Value, _ctx: serpis_agent::ToolContext) -> futures::future::BoxFuture<'static, anyhow::Result<serpis_agent::ToolResult>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -488,6 +584,11 @@ pub fn eval(ed: &mut Editor, code: &str, chat: Option<u64>) -> (String, bool) {
         report.push(format!("messages:\n{}", messages.iter().map(|m| m.as_str()).collect::<Vec<_>>().join("\n")));
     }
     let errors = messages.iter().any(|m| m.starts_with("error:"));
+    // A warning (a font not found, say) means something didn't take, though the code ran: said
+    // first, so it isn't read as plain success.
+    if !errors && messages.iter().any(|m| m.starts_with("warning:")) {
+        report.insert(0, "serpis warned (see messages): what was asked may not have taken effect.".into());
+    }
     (report.join("\n\n"), failed || errors)
 }
 

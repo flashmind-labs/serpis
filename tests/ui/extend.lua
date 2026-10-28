@@ -353,5 +353,90 @@ steps({
   function()
     T.check("read output renders", serpis.chat.transcript(other):find("pub fn double", 1, true) ~= nil, true)
     if os.getenv("SERPIS_TEST_SHOTS") then serpis.debug.screenshot(os.getenv("SERPIS_TEST_SHOTS") .. "/highlight.png") end
+    -- Changing serpis for the user, as an agent asked to "make the font bigger" would: the
+    -- user's config keeps its look in lua/look.lua.
+    T.check("the prompt points requests about serpis at serpis_api", requests()[4]:find('"serpis_docs": true', 1, true) ~= nil, true)
+    sh("mkdir -p '" .. serpis.config_dir .. "/lua'")
+    local f = io.open(serpis.config_dir .. "/lua/look.lua", "w")
+    f:write('serpis.var.set("font-size", 14.5)\n')
+    f:close()
+    local init = io.open(serpis.config_dir .. "/init.lua")
+    local before = init and init:read("*a") or ""
+    if init then init:close() end
+    init = io.open(serpis.config_dir .. "/init.lua", "w")
+    init:write(before .. '\nrequire("look")\n')
+    init:close()
+    serpis.reload()
+    base = #lines()
+    serpis.chat.prompt(other, "API:guide")
+  end,
+  function(go)
+    settled(other, go, 2)
+    return false
+  end,
+  function()
+    local g = requests()[2]
+    T.check("serpis_api: guide says how to change the user's config", g:find("Changing serpis for the user", 1, true) ~= nil, true)
+    T.check("serpis_api: guide lists the user's config files", g:find("lua/look.lua", 1, true) ~= nil and g:find("init.lua", 1, true) ~= nil, true)
+    serpis.chat.prompt(other, "API:usage")
+  end,
+  function(go)
+    settled(other, go, 4)
+    return false
+  end,
+  function()
+    local u = requests()[4]
+    T.check("serpis_api: usage names the user's keys", u:find("(new-chat)", 1, true) ~= nil and u:find("(execute-extended-command)", 1, true) ~= nil, true)
+    T.check("serpis_api: usage names only commands that exist", u:find("MISSING COMMAND", 1, true), nil)
+    serpis.chat.prompt(other, "EDIT:" .. serpis.config_dir .. "/lua/look.lua|14.5|18")
+  end,
+  function(go)
+    settled(other, go, 6)
+    return false
+  end,
+  function()
+    serpis.chat.prompt(other, "LUA:serpis.reload() return serpis.var.get('font-size')")
+  end,
+  function(go)
+    settled(other, go, 8)
+    return false
+  end,
+  function()
+    T.check("the agent's edit to the config loads", requests()[8]:find("18", 1, true) ~= nil and serpis.var.get("font-size") == 18, true)
+    serpis.reload()
+  end,
+  function()
+    T.check("and lasts: it is in the user's file, not only live", serpis.var.get("font-size"), 18)
+    -- A font that isn't installed: the agent sees serpis's warning in the result, live or
+    -- from the user's config, and can list the fonts there are.
+    serpis.chat.prompt(other, "LUA:serpis.var.set('font-mono', 'No Such Font Mono')")
+  end,
+  function(go)
+    settled(other, go, 10)
+    return false
+  end,
+  function()
+    T.check("a missing font is reported to the agent", requests()[10]:find("font-mono: font not found: No Such Font Mono", 1, true) ~= nil, true)
+    T.check("first thing in the result, not as plain success", requests()[10]:find('"tool_content": "serpis warned', 1, true) ~= nil, true)
+    serpis.var.set("font-mono", nil)
+    local f = io.open(serpis.config_dir .. "/lua/look.lua", "a")
+    f:write('serpis.var.set("font-mono", "No Such Font Mono")\n')
+    f:close()
+    serpis.chat.prompt(other, "LUA:serpis.reload()")
+  end,
+  function(go)
+    settled(other, go, 12)
+    return false
+  end,
+  function()
+    T.check("from the config too, on reload", requests()[12]:find("font not found: No Such Font Mono", 1, true) ~= nil, true)
+    serpis.chat.prompt(other, "LUA:return #serpis.font.list() > 0")
+  end,
+  function(go)
+    settled(other, go, 14)
+    return false
+  end,
+  function()
+    T.check("and can list the installed fonts", requests()[14]:find("true", 1, true) ~= nil, true)
   end,
 })

@@ -76,6 +76,19 @@ fn build_rules(tools: &[ToolRef], extra: &[String]) -> String {
     rules.iter().map(|r| format!("- {r}")).collect::<Vec<_>>().join("\n")
 }
 
+/// What the agent knows of serpis itself: with `serpis_api` (an editor around the chat), that
+/// requests about serpis are about the editor it runs in and how to act on them.
+fn docs(tools: &[ToolRef]) -> String {
+    if tools.iter().any(|t| t.name() == "serpis_api") {
+        "You run inside serpis, the editor the user is talking to you from: an extensible, Emacs-like harness, configured and extended in Lua. \
+         A request about serpis itself (its fonts, theme, keys, windows, sidebar, settings or commands; how to use it; changing how it behaves) is about this editor, not the project in the working directory. For one:\n\
+         - Call serpis_api first, not serpis's source code: topic \"guide\" says how to change the user's config and write extensions, \"usage\" how serpis is used (with the user's keys), \"variables\" and \"commands\" what can be set and run (`filter` narrows them).\n\
+         - Make lasting changes in the user's config files, then load and check them with serpis_lua.".into()
+    } else {
+        "Serpis, the harness running you, is an extensible, Emacs-like editor configured in Lua (~/.config/serpis: init.lua, lua/, extensions/).".into()
+    }
+}
+
 /// Build the full system prompt: preamble, `<tools>`, `<rules>`, `<docs>`, addendum, project context, cwd.
 pub fn build_system_prompt(tools: &[ToolRef], cwd: &Path, opts: &PromptOptions) -> String {
     let mut sections: Vec<(String, String)> = Vec::new();
@@ -92,10 +105,7 @@ pub fn build_system_prompt(tools: &[ToolRef], cwd: &Path, opts: &PromptOptions) 
                 format!("{list}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project."),
             ));
             sections.push(("rules".into(), build_rules(tools, &opts.guidelines)));
-            sections.push((
-                "docs".into(),
-                "Serpis is an extensible, Emacs-like harness. Read its documentation only when the user asks about serpis itself, its Lua/Rust extension API, keybindings, buffers or configuration:\n- Config: ~/.config/serpis/init.lua (Lua) and ~/.config/serpis/plugins/ (Rust dylibs)\n- Use the `describe-*` commands in the editor (M-x) to inspect commands, keymaps and variables".into(),
-            ));
+            sections.push(("docs".into(), docs(tools)));
             "You are an expert coding assistant operating inside serpis, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.".to_string()
         }
     };
