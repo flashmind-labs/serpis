@@ -5,8 +5,6 @@
   </picture>
 </p>
 
-<p align="center"><em>Named after the Serpis, the river that winds from Alcoi down to the Mediterranean at Gandia.</em></p>
-
 An agent harness for power users: pi's agent and tools inside an Emacs-shaped GUI (Rust, egui).
 Everything is a buffer (chats, terminals, text), every key goes through keymaps, and the whole
 core is open to extension from Lua or Rust plugins that link the same library.
