@@ -25,6 +25,7 @@ local chat, before
 local steps = {
   function(go)
     T.check("tests don't show them on the desktop", serpis.var.get("notify-backend"), "none")
+    T.check("they notify whether you look or not, by default", serpis.var.get("notify-when"), "always")
     serpis.var.set("notify-after", 0)
     serpis.var.set("notify-when", "always")
     serpis.command.run("new-chat")

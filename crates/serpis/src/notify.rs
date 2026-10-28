@@ -34,7 +34,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("notify", json!(true), "Send desktop notifications when a chat's turn ends, an agent waits for you or fails, or a terminal's command finishes, while you aren't looking (notify-when). Which: notify-events.");
     ed.defvar("notify-events", json!(["done", "waiting", "failed"]), "What notifies: \"done\" (a chat's turn ended, a terminal's command finished: after notify-after seconds), \"waiting\" (an agent waits for you: a permission, its questions, a plan), \"failed\" (a run ended in an error).");
     ed.defvar("notify-after", json!(15), "Seconds a turn or a terminal's command must have run for its end to notify (\"done\"); what waits for you or failed notifies at once.");
-    ed.defvar("notify-when", json!("unseen"), "When to notify: \"unseen\" (serpis isn't the focused app, or the buffer isn't on screen), \"away\" (serpis isn't the focused app) or \"always\".");
+    ed.defvar("notify-when", json!("always"), "When to notify: \"always\", \"unseen\" (serpis isn't the focused app or its window is hidden, or the buffer isn't on screen) or \"away\" (serpis isn't the focused app, or its window is hidden). Some window managers (AeroSpace) hide windows without the app being told it lost focus, so the last two can miss.");
     ed.defvar("notify-terminals", json!(true), "Also notify when a terminal's command finishes (after notify-after seconds), and when an agent run in one waits.");
     ed.defvar("notify-sound", json!(true), "Notifications play the system's sound.");
     ed.defvar("notify-app", json!(""), "macOS: the app notifications come from (its icon, and where System Settings > Notifications allows them), a bundle id. \"\": Serpis.app when it is installed (a click brings serpis back), else they are shown through AppleScript (as Script Editor's, and a click doesn't). An app that sends its own notifications can't be named: macOS refuses them.");
@@ -61,15 +61,22 @@ pub fn activity_changed(ed: &mut Editor, id: BufferId, prev: ActivityState, now:
     };
     let wanted = ed.var("notify-events").and_then(|v| v.as_array().cloned()).unwrap_or_default();
     if !wanted.iter().any(|e| e.as_str() == Some(event)) {
+        tracing::debug!(target: "serpis::notify", "not notifying \"{event}\": not in notify-events");
         return;
     }
-    let focused = ed.ctx.input(|i| i.viewport().focused).unwrap_or(true);
+    // A hidden window (covered, minimized, on another space) isn't looked at, whatever focus it
+    // last had (while hidden, its input is the last shown frame's).
+    let focused = ed.ctx.input(|i| {
+        let v = i.viewport();
+        v.focused.unwrap_or(true) && v.occluded != Some(true) && v.minimized != Some(true)
+    });
     let looking = match ed.var("notify-when").and_then(|v| v.as_str().map(str::to_string)).as_deref() {
         Some("always") => false,
         Some("away") => focused,
         _ => focused && visible,
     };
     if looking {
+        tracing::debug!(target: "serpis::notify", "not notifying \"{event}\": you are looking (notify-when; focused {focused}, on screen {visible})");
         return;
     }
     let title = ed.buffer_display_name(id);

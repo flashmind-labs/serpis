@@ -165,8 +165,10 @@ notification; a click on it brings you back to that chat or terminal:
 - a run fails;
 - a terminal's command finishes (after `notify-after`; `notify-terminals` = `false` stops it).
 
-Only while you aren't looking: `notify-when` = `"unseen"` (serpis isn't the focused app, or the
-buffer isn't on screen), `"away"` (serpis isn't the focused app) or `"always"`. `notify-events`
+Always, by default; `notify-when` = `"unseen"` sends them only while serpis isn't the focused app
+(or its window is hidden) or the buffer isn't on screen, `"away"` only while serpis isn't the
+focused app. Some window managers (AeroSpace) hide windows without telling the app it lost focus,
+which those two can't see. `notify-events`
 picks among `"done"`, `"waiting"` and `"failed"`; `notify` = `false` turns them off,
 `notify-sound` the sound. On macOS they come from Serpis.app when it is installed
 (`scripts/install-macos.sh`), even when serpis runs from a terminal, and a click brings you back;
