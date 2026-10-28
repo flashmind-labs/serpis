@@ -102,6 +102,13 @@ final class AppModel {
 
     func link(_ machine: String) -> Link { links[machine] ?? .offline(nil) }
 
+    /// `path` on `machine` as its person reads it: their home there as `~`.
+    func tilde(_ path: String, on machine: String) -> String {
+        guard case .online(let home) = link(machine), !home.isEmpty else { return path }
+        if path == home { return "~" }
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+
     func machine(_ id: String) -> Machine? { machines.first { $0.id == id } }
 
     // MARK: Machines

@@ -53,7 +53,7 @@ struct FolderList: View {
                     Section("Recent") {
                         ForEach(Array(recent), id: \.self) { dir in
                             Button { start(in: dir) } label: {
-                                Label((dir as NSString).abbreviatingWithTildeInPath, systemImage: "clock")
+                                Label(app.tilde(dir, on: machine.id), systemImage: "clock")
                             }
                         }
                     }

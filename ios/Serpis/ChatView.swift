@@ -13,6 +13,8 @@ struct ChatView: View {
     /// Where the transcript is scrolled: it follows new text only while it is at the bottom.
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var atBottom = true
+    /// The person is moving the transcript (dragging, or it coasting from a drag).
+    @State private var scrolling = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -42,7 +44,12 @@ struct ChatView: View {
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 48
             } action: { _, bottom in
-                atBottom = bottom
+                // Only the person scrolls away from the bottom: content growing by more than
+                // the margin at once (a card, a long chunk) mustn't stop it following.
+                if bottom || scrolling { atBottom = bottom }
+            }
+            .onScrollPhaseChange { _, phase in
+                scrolling = phase == .interacting || phase == .decelerating
             }
             // New text is followed while you're at the bottom; scrolled up to read, nothing moves.
             .onChange(of: chat.entries) { _, _ in
@@ -53,12 +60,12 @@ struct ChatView: View {
                     ContentUnavailableView {
                         Label(app.machine(chat.machine)?.name ?? "", systemImage: "desktopcomputer")
                     } description: {
-                        Text(chat.state.map { ($0.cwd as NSString).abbreviatingWithTildeInPath } ?? "")
+                        Text(chat.state.map { app.tilde($0.cwd, on: chat.machine) } ?? "")
                     }
                     .foregroundStyle(.secondary)
                 }
             }
-            if !atBottom {
+            if !atBottom && !chat.entries.isEmpty {
                 Button {
                     withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
                 } label: {
