@@ -1017,6 +1017,10 @@ impl Node {
                 self.with_chat(&chat, |c, h| c.set_permission_mode(h, &mode))??;
                 Response::Ok
             }
+            Request::Logs { after } => {
+                let (records, dropped) = crate::logs::since(after);
+                Response::Logs { records, dropped }
+            }
             Request::SetContinueAfterLimit { chat, on } => {
                 self.with_chat(&chat, |c, h| c.set_continue_after_limit(h, on))??;
                 Response::Ok

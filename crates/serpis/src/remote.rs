@@ -838,7 +838,10 @@ pub fn answer_with(ed: &mut Editor, answer: impl Future<Output = Result<Response
     let main = ed.main_sender();
     ed.rt.spawn(async move {
         let r = answer.await;
-        tracing::debug!("answer {token}: {r:?}");
+        // (Not a log's own records: logged, they would be read back and logged again.)
+        if !matches!(r, Ok(Response::Logs { .. })) {
+            tracing::debug!("answer {token}: {r:?}");
+        }
         main.send(move |ed| {
             if let Some(done) = ed.remote.answers.remove(&token) {
                 done(ed, r);

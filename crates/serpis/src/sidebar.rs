@@ -351,6 +351,7 @@ pub fn track(ed: &mut Editor) {
         }
         if t.state != a.state {
             let prev = t.state;
+            let ran = now - t.since;
             t.state = a.state;
             t.since = now;
             // Something you'd want to look at happened out of sight.
@@ -358,7 +359,7 @@ pub fn track(ed: &mut Editor) {
             if notable && a.state != ActivityState::Working && !visible.contains(&id) {
                 t.attention = true;
             }
-            changes.push((id, prev, a.clone(), agent, t.attention));
+            changes.push((id, prev, a.clone(), agent, t.attention, ran, visible.contains(&id)));
         }
         if seen {
             t.attention = false;
@@ -369,7 +370,8 @@ pub fn track(ed: &mut Editor) {
     if agent_busy {
         ed.ctx.request_repaint_after(Duration::from_millis(500));
     }
-    for (id, prev, a, agent, attention) in changes {
+    for (id, prev, a, agent, attention, ran, shown) in changes {
+        crate::notify::activity_changed(ed, id, prev, &a, agent, ran, shown);
         let (name, kind) = ed.meta(id).map(|m| (m.name.clone(), m.major.clone())).unwrap_or_default();
         let payload = json!({
             "buffer": buffer_id_to_u64(id), "name": name, "kind": kind,

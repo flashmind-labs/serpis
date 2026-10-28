@@ -13,6 +13,8 @@ pub mod buffers;
 pub use serpis_chat::cache_watch;
 pub mod chat_api;
 pub mod claude_usage;
+pub mod log_view;
+pub mod notify;
 pub mod extend;
 pub mod frecency;
 pub mod highlight;
@@ -170,6 +172,8 @@ pub fn bootstrap(ed: &mut Editor) {
 
     minibuffer::install(ed);
     commands::install(ed);
+    log_view::install(ed);
+    notify::install(ed);
     wm::install(ed);
     workspace::install(ed);
     mouse::install(ed);
@@ -254,9 +258,8 @@ fn run_test_script_when_settled(ed: &mut Editor, script: PathBuf, started: std::
 pub fn run() -> anyhow::Result<()> {
     // Before any thread starts or anything reads the environment.
     launch::prepare();
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,serpis=info".into()))
-        .init();
+    // Printed to the terminal as before, and kept for the *Log* page.
+    serpis_node::logs::init("warn,serpis=info,message=info,lua=info");
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("serpis-rt").build()?;
     let handle = rt.handle().clone();
     let options = eframe::NativeOptions {

@@ -360,21 +360,21 @@ impl Editor {
 
     pub fn message(&mut self, text: impl Into<String>) {
         let text = text.into();
-        tracing::info!("{text}");
+        tracing::info!(target: "message", "{text}");
         self.messages.push(text.clone());
         self.echo = Some((text, Level::Info, Instant::now()));
     }
 
     pub fn warn(&mut self, text: impl Into<String>) {
         let text = text.into();
-        tracing::warn!("{text}");
+        tracing::warn!(target: "message", "{text}");
         self.messages.push(format!("warning: {text}"));
         self.echo = Some((text, Level::Warn, Instant::now()));
     }
 
     pub fn error(&mut self, text: impl Into<String>) {
         let text = text.into();
-        tracing::error!("{text}");
+        tracing::error!(target: "message", "{text}");
         self.messages.push(format!("error: {text}"));
         self.echo = Some((text, Level::Error, Instant::now()));
     }

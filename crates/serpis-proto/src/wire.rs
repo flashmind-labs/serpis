@@ -137,6 +137,11 @@ pub enum Request {
         #[serde(default)]
         advice: bool,
     },
+    /// What the node has logged since record `after` (0: all it keeps), oldest first.
+    Logs {
+        #[serde(default)]
+        after: u64,
+    },
     /// Saved sessions on the node, newest first.
     Sessions {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +299,8 @@ pub enum Response {
     Models { models: Vec<ModelInfo> },
     /// The machine's `claude` answer to `get_usage`, as it gave it.
     ClaudeCodeUsage { usage: serde_json::Value },
+    /// Its log since the record asked after; `dropped` older ones it no longer keeps.
+    Logs { records: Vec<LogRecord>, dropped: u64 },
     Sessions { sessions: Vec<SessionInfo> },
     Dirs { path: String, dirs: Vec<String> },
     /// A session file's text (`Export`).
@@ -548,4 +555,21 @@ mod tests {
         let r = serde_json::to_value(Reply { id: 7, response: Response::Chat { chat: "x".into() } }).unwrap();
         assert_eq!(r, serde_json::json!({"id": 7, "kind": "chat", "chat": "x"}));
     }
+}
+
+/// A line of a process's log (serpis's, a node's).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogRecord {
+    /// Its place in that process's log, from 1.
+    pub seq: u64,
+    /// When, in unix milliseconds.
+    pub time: u64,
+    /// `error`, `warn`, `info`, `debug` or `trace`.
+    pub level: String,
+    /// Where it comes from: a module (`serpis_chat::session`), `lua`, `message`.
+    pub target: String,
+    pub message: String,
+    /// What else it said: (name, value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<(String, String)>,
 }

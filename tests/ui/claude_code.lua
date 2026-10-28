@@ -59,7 +59,11 @@ local steps = {
     T.check("chat-select-model offers it and the chat takes it", (serpis.chat.info() or {}).model, "claude-code/fake")
     return true
   end,
-  function(go) return ask("please edit", go) end,
+  function(go)
+    -- Notified of what waits for you, whether looking or not (notify-backend is "none" here).
+    serpis.var.set("notify-when", "always")
+    return ask("please edit", go)
+  end,
   function(go)
     local shots = os.getenv("SERPIS_TEST_SHOTS")
     if shots then
@@ -70,6 +74,9 @@ local steps = {
   end,
   function(go)
     T.check("the edit waits for you", asking(), true)
+    T.check("the sidebar says it waits for you", (serpis.buffer.activity() or {}).state, "waiting")
+    local n = (d.notifications() or {})[#(d.notifications() or {})] or {}
+    T.check("and a notification says what", (n.event or "") .. " · " .. (n.body or ""), "waiting · Waiting for you: allow edit notes.txt")
     T.check("its card says so", has("Allow it?"), true)
     T.check("and shows the change it asks for", has("+ TWO"), true)
     T.check("the composer offers always", d.composer()["always"] ~= nil, true)

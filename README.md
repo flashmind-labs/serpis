@@ -154,6 +154,39 @@ sidebar), `new-chat-in-folder`, `new-terminal-in-folder`, `project-add`, or `C-u
 the folders in your home folder; typed paths start from home (`src/app`, no `~/` needed) unless they
 begin with `/`, `~` or `.`; and Browse… opens the system's folder dialog.
 
+## Notifications
+
+When something you'd want to know about happens out of sight, serpis sends a desktop
+notification; a click on it brings you back to that chat or terminal:
+
+- a chat's turn ends, on serpis's own agent or Claude Code, here or on another machine ("Done in
+  2m 14s: …" with the start of its reply), if it ran at least `notify-after` seconds (15);
+- an agent waits for you: a permission, its questions, a plan to approve (at once);
+- a run fails;
+- a terminal's command finishes (after `notify-after`; `notify-terminals` = `false` stops it).
+
+Only while you aren't looking: `notify-when` = `"unseen"` (serpis isn't the focused app, or the
+buffer isn't on screen), `"away"` (serpis isn't the focused app) or `"always"`. `notify-events`
+picks among `"done"`, `"waiting"` and `"failed"`; `notify` = `false` turns them off,
+`notify-sound` the sound. On macOS they come from the app serpis was started from (your terminal,
+or Serpis.app; `notify-app` names another); `notify-test` sends one to try. Scripts send their own
+with `serpis.notify(title, body, {buffer = ...})`, and the `notify` hook changes any (return
+`{title = ..., body = ...}`) or drops it (`false`).
+
+## Log
+
+`log-view` opens the `*Log*` page: what serpis logs (also printed to the terminal it was started
+from, as before), and the log of each connected machine's serpis-node, where its chats and their
+agents run (Claude Code's included). A row a record, with when, how severe, where from and what;
+a click opens one in full. `l` cycles the level shown (or the Errors · Warnings · Info · Debug
+control), `/` searches, `f` follows the newest (scrolling up pauses, `G` follows again), `s` shows
+the next machine's log, `c` clears, `q` closes. `log-level` says what is kept (`"debug"` for
+more); `log-view-level` what shows first.
+
+Extensions log with `serpis.log.info(text, fields)` (`error`, `warn`, `debug`, `trace` too):
+`serpis.log.info("synced", {files = 3})` shows `files=3` beside it. In a node's config, they go to
+that node's log. `serpis.log.records(after)` reads the log back.
+
 ## Jumping and copying (avy, hop.nvim, ninja)
 
 `jump-word` (`M-g w`, vim `gw`), `jump-line` (`M-g l`), `jump-char` (`M-g c`), `jump-char-2`

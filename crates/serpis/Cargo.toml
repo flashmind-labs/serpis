@@ -49,6 +49,8 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-f
 [target.'cfg(target_os = "macos")'.dependencies]
 # Same winit as eframe; used to drop the default app menu (Cmd-H/Cmd-Q would never reach keymaps).
 winit = "0.30"
+# Desktop notifications (works for a binary run from a terminal, outside an app bundle).
+mac-notification-sys = "0.6"
 
 [dev-dependencies]
 proptest = "1"

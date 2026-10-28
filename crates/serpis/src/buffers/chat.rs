@@ -359,6 +359,17 @@ impl ChatBuffer {
         })
     }
 
+    /// The text of the agent's last reply (what a notification quotes).
+    pub fn last_reply(&self) -> Option<String> {
+        self.entries.iter().rev().find_map(|e| match e {
+            Entry::Assistant { blocks, .. } => {
+                let text: Vec<&str> = blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.trim()) } else { None }).filter(|t| !t.is_empty()).collect();
+                (!text.is_empty()).then(|| text.join(" "))
+            }
+            _ => None,
+        })
+    }
+
     /// Answer the first tool call waiting for the person; false when none waits.
     pub fn answer(&mut self, decision: serpis_proto::Decision) -> bool {
         let Some((tool, ..)) = self.waiting() else { return false };
@@ -2196,6 +2207,20 @@ impl Buffer for ChatBuffer {
         let s = self.state_now();
         if s.compacting {
             return Activity::new(ActivityState::Working, "compacting");
+        }
+        // Asking you something (a permission, its questions, a plan): waiting for you, not working.
+        if s.running
+            && let Some((_, name, args, _)) = self.waiting()
+        {
+            let what = match name.as_str() {
+                "ExitPlanMode" => "approve its plan".to_string(),
+                "AskUserQuestion" => format!("answer: {}", serpis_chat::tool_summary(&name, &args)),
+                _ => match serpis_chat::tool_summary(&name, &args) {
+                    s if s.is_empty() => format!("allow {name}"),
+                    s => format!("allow {name} {s}"),
+                },
+            };
+            return Activity { since: self.started, ..Activity::new(ActivityState::Waiting, what) };
         }
         if s.running {
             return Activity { since: self.started, ..Activity::new(ActivityState::Working, s.step.unwrap_or_else(|| "working".into())) };

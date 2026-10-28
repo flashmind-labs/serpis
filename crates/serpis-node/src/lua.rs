@@ -362,6 +362,7 @@ fn api(lua: &Lua, st: Rc<RefCell<State>>, dir: &Path) -> mlua::Result<Table> {
     let s = lua.create_table()?;
     s.set("version", crate::VERSION)?;
     s.set("where", "node")?;
+    s.set("log", crate::logs::lua_api(lua)?)?;
     s.set("config_dir", dir.to_string_lossy().into_owned())?;
     for (name, level) in [("message", Level::Info), ("warn", Level::Warn), ("error", Level::Error)] {
         let st = st.clone();

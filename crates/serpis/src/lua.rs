@@ -251,9 +251,14 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     s.set("version", env!("CARGO_PKG_VERSION"))?;
     s.set("config_dir", crate::config_dir().to_string_lossy().into_owned())?;
     s.set("where", "window")?;
+    s.set("log", serpis_node::logs::lua_api(lua)?)?;
 
     s.set("message", lua.create_function(|_, msg: String| ed(|e| e.message(msg)))?)?;
     s.set("error", lua.create_function(|_, msg: String| ed(|e| e.error(msg)))?)?;
+    s.set("notify", lua.create_function(|_, (title, body, opts): (String, Option<String>, Option<Table>)| {
+        let buffer: Option<u64> = opts.as_ref().and_then(|o| o.get("buffer").ok());
+        ed(|e| crate::notify::send(e, title, body.unwrap_or_default(), "script", buffer.map(buffer_id_from_u64)))
+    })?)?;
     s.set("reload", lua.create_function(|_, ()| ed(|e| e.call("reload-config")))?)?;
     s.set(
         "schedule",
@@ -1454,6 +1459,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         lua_of(lua, &v)
     })?)?;
     // Where the chat's composer controls are: {model = {x, y, w, h}, thinking = ..., send = ...}.
+    // The notifications sent (to the desktop or not: notify-backend), oldest first.
+    debug.set("notifications", lua.create_function(|lua, ()| lua_of(lua, &crate::notify::sent()))?)?;
+    // Whether the window has the keyboard (the system's focus), as notify-when reads it.
+    debug.set("focused", lua.create_function(|_, ()| ed(|e| e.ctx.input(|i| i.viewport().focused.unwrap_or(true))))?)?;
     debug.set("composer", lua.create_function(|lua, id: Option<u64>| {
         let v = ed(|e| {
             let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());
@@ -1463,6 +1472,12 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                     o.insert(name.to_string(), json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}));
                 }
                 Value::Object(o)
+            })
+            // The log page's controls, the same way.
+            .or_else(|| {
+                e.with_buffer_as::<crate::log_view::LogBuffer, _>(id, |b, _| {
+                    Value::Object(b.hits.iter().map(|(name, r)| (name.clone(), json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}))).collect())
+                })
             })
         })?;
         lua_of(lua, &v)

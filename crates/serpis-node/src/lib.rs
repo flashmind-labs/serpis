@@ -18,6 +18,8 @@ pub mod deploy;
 #[cfg(feature = "node")]
 pub mod keys;
 #[cfg(feature = "node")]
+pub mod logs;
+#[cfg(feature = "node")]
 pub mod lua;
 #[cfg(feature = "node")]
 pub mod workspace;

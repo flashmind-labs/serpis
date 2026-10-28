@@ -16,9 +16,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("serpis-node-rt").build()?;
     match args.first().map(String::as_str) {
         Some("serve") => {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-                .init();
+            serpis_node::logs::init("info");
             let node = match serpis_node::server::start(serpis_node::server::Config::default_paths(), rt.handle().clone()) {
                 Ok(n) => n,
                 // Nothing to do (a service starting one at login finds it running): not a failure,
@@ -37,9 +35,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("terminals") => {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-                .init();
+            serpis_node::logs::init("info");
             let socket = serpis_node::terminals::socket();
             tracing::info!("serpis-node {} holding terminals at {}", serpis_node::VERSION, socket.display());
             rt.block_on(serpis_node::terminals::serve(&socket))
