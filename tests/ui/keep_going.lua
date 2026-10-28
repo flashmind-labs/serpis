@@ -3,6 +3,7 @@
 -- cut off isn't run again. The composer's pill says whether the chat keeps going, and a click
 -- on it changes that.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
+T.room()
 local d = serpis.debug
 local function sh(cmd) local p = io.popen(cmd); local o = p:read("*a"); p:close(); return o end
 

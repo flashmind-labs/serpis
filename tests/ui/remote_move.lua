@@ -3,6 +3,7 @@
 -- its id, and answers; the machine it left keeps its session, marked as moved. The machines
 -- are nodes here in throwaway homes, reached through `serpis-node agent` as ssh would.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
+T.room()
 local d = serpis.debug
 local root = os.getenv("SERPIS_TEST_DIR") .. "/../.."
 local function sh(cmd) local p = io.popen(cmd); local o = p:read("*a"); p:close(); return o end

@@ -1,5 +1,12 @@
 -- Tiny assertion helpers for serpis UI tests (run via scripts/ui-test.sh).
 local T = { results = {} }
+-- ui-test.sh --narrow: serpis is laid out at a small size (SERPIS_TEST_SIZE).
+T.narrow = os.getenv("SERPIS_TEST_SIZE") ~= nil
+-- For a test about what clicking a control does, when a narrow window may leave it out: room
+-- for it (no sidebar).
+function T.room()
+  if T.narrow then serpis.var.set("sidebar-visible", false) end
+end
 
 function T.check(name, got, want)
   local ok = got == want
@@ -45,6 +52,10 @@ function T.press(seq)
 end
 
 function T.finish()
+  -- Any frame of the test: controls that overlapped or spilled out of their row.
+  for _, issue in ipairs(serpis.debug.layout_issues()) do
+    table.insert(T.results, "FAIL layout: " .. issue)
+  end
   local f = io.open(os.getenv("SERPIS_TEST_OUT"), "w")
   f:write(table.concat(T.results, "\n"), "\n")
   f:close()

@@ -1357,6 +1357,8 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             })
         })?,
     )?;
+    // Rows of controls that overlapped or spilled out this run (Editor::check_row).
+    debug.set("layout_issues", lua.create_function(|lua, ()| lua_of(lua, &ed(|e| e.layout_issues.clone())?))?)?;
     // Resize the window (points), as for a recording.
     debug.set(
         "resize",

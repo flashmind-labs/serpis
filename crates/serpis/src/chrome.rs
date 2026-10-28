@@ -57,7 +57,11 @@ pub fn selected_bg(t: &Theme) -> Color32 {
 /// Text laid out on one line and cut with an ellipsis to fit `max_w`; returns its width.
 pub fn text(p: &egui::Painter, pos: Pos2, s: &str, font: FontId, color: Color32, max_w: f32) -> f32 {
     let mut g = p.layout_no_wrap(s.to_string(), font.clone(), color);
-    if g.size().x > max_w && max_w > 10.0 {
+    // No room for even a letter and an ellipsis: nothing.
+    if g.size().x > max_w && max_w < font.size * 1.2 {
+        return 0.0;
+    }
+    if g.size().x > max_w {
         let chars: Vec<char> = s.chars().collect();
         let (mut lo, mut hi) = (0, chars.len());
         while lo < hi {

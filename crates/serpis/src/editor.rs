@@ -247,6 +247,12 @@ pub struct Editor {
     pub frames_drawn: u64,
     /// Where named controls were drawn last frame (`serpis.debug.rect`, for tests).
     pub debug_rects: HashMap<&'static str, Rect>,
+    /// In UI tests: rows of controls that overlapped or spilled out of their place this run
+    /// (`check_row`), once each.
+    pub layout_issues: Vec<String>,
+    check_layout: bool,
+    /// SERPIS_TEST_SIZE (WxH, points): the size UI tests lay serpis out at.
+    pub test_size: Option<egui::Vec2>,
     /// Jump labels on screen (avy/hop), and copies fading out.
     pub jump: crate::jump::JumpState,
     /// What each chat is doing (model, usage, session entries), readable even while the chat
@@ -336,6 +342,12 @@ impl Editor {
             frame_times: Default::default(),
             frames_drawn: 0,
             debug_rects: HashMap::new(),
+            layout_issues: Vec::new(),
+            check_layout: std::env::var_os("SERPIS_TEST_SCRIPT").is_some(),
+            test_size: std::env::var("SERPIS_TEST_SIZE").ok().and_then(|s| {
+                let (w, h) = s.split_once('x')?;
+                Some(egui::vec2(w.parse().ok()?, h.parse().ok()?))
+            }),
             jump: Default::default(),
             chats: HashMap::new(),
             buffer_stack: Vec::new(),
@@ -532,6 +544,32 @@ impl Editor {
     }
 
     /// Evaluate header segments for a buffer.
+    /// In UI tests: that a row of controls (`items`, by name; empty rects are ones left out)
+    /// keep apart and within `bounds`. What doesn't goes to `layout_issues`.
+    pub fn check_row(&mut self, group: &str, bounds: Rect, items: &[(&str, Rect)]) {
+        if !self.check_layout {
+            return;
+        }
+        let items: Vec<&(&str, Rect)> = items.iter().filter(|(_, r)| r.width() > 0.0 && r.height() > 0.0).collect();
+        let mut found = Vec::new();
+        for (i, (a, ra)) in items.iter().enumerate() {
+            if ra.left() < bounds.left() - 0.5 || ra.right() > bounds.right() + 0.5 {
+                found.push(format!("{group}: {a} spills out"));
+            }
+            for (b, rb) in &items[i + 1..] {
+                let o = ra.intersect(*rb);
+                if o.width() > 0.5 && o.height() > 0.5 {
+                    found.push(format!("{group}: {a} overlaps {b}"));
+                }
+            }
+        }
+        for f in found {
+            if self.layout_issues.len() < 40 && !self.layout_issues.iter().any(|x| x.starts_with(&f)) {
+                self.layout_issues.push(format!("{f} ({:.0} px wide, font {})", bounds.width(), self.theme.font_size));
+            }
+        }
+    }
+
     pub fn header_text(&mut self, id: BufferId) -> Vec<String> {
         let segs = self.header_segments.clone();
         segs.iter().filter_map(|s| (s.f)(self, Some(id))).filter(|t| !t.is_empty()).collect()

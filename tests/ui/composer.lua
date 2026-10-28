@@ -79,5 +79,24 @@ steps({
   end,
   function()
     T.check("stop aborts the agent", state() ~= "working", true)
+    if not T.narrow then
+      T.check("all its pills shown when there's room", d.composer()["keep-going"] ~= nil and d.composer().machine ~= nil, true)
+    end
+    -- A narrow window at a large font: what doesn't fit is left out, never under the send button.
+    serpis.var.set("font-size", 20)
+    T.press("s-\\")
+  end,
+  function()
+    local hits = d.composer()
+    local clear = true
+    for _, name in ipairs({ "model", "thinking", "machine", "keep-going" }) do
+      local r = hits[name]
+      if r and r.x + r.w > hits.send.x then clear = false end
+    end
+    T.check("pills stay clear of the send button", clear, true)
+    T.check("keep-going left out first", hits["keep-going"], nil)
+    -- (Narrow, the split leaves room for none of them.)
+    if not T.narrow then T.check("the model shows while there's room for it", hits.model ~= nil, true) end
+    serpis.var.set("font-size", 14.5)
   end,
 })

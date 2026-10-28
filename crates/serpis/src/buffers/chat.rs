@@ -1960,8 +1960,10 @@ impl Buffer for ChatBuffer {
         let small = egui::FontId::proportional(theme.font_size - 2.0);
         let id = ui.scope_id().with("composer");
         let mut run: Option<&'static str> = None;
-        let pill = |ui: &mut egui::Ui, x: f32, key: &str, label: &str, tip: &str, icon: Option<Color32>| -> (Rect, bool) {
-            let w = crate::chrome::text_width(&painter, label, small.clone()) + if icon.is_some() { 30.0 } else { 20.0 } * k;
+        let pill_w = |label: &str, icon: bool| crate::chrome::text_width(&painter, label, small.clone()) + if icon { 30.0 } else { 20.0 } * k;
+        // `max`: the widest it may be (its label is cut to fit).
+        let pill = |ui: &mut egui::Ui, x: f32, key: &str, label: &str, tip: &str, icon: Option<Color32>, max: f32| -> (Rect, bool) {
+            let w = pill_w(label, icon.is_some()).min(max);
             let r = Rect::from_min_size(egui::pos2(x, cy - 13.0 * k), egui::vec2(w, 26.0 * k));
             let resp = ui.interact(r, id.with(key), egui::Sense::click()).on_hover_text(tip);
             if resp.hovered() {
@@ -1972,19 +1974,11 @@ impl Buffer for ChatBuffer {
                 crate::chrome::diamond(&painter, egui::pos2(tx + 4.0 * k, cy), 4.5 * k, c);
                 tx += 14.0 * k;
             }
-            crate::chrome::text(&painter, egui::pos2(tx, cy), label, small.clone(), if resp.hovered() { theme.fg } else { theme.fg_dim }, w);
+            crate::chrome::text(&painter, egui::pos2(tx, cy), label, small.clone(), if resp.hovered() { theme.fg } else { theme.fg_dim }, (r.right() - tx - 6.0 * k).max(0.0));
             (r, resp.clicked())
         };
         let model = self.model_short().unwrap_or_else(|| "Choose a model".into());
-        let (mr, clicked) = pill(ui, bar.left(), "model", &model, "Model (chat-select-model)", Some(theme.accent));
-        if clicked {
-            run = Some("chat-select-model");
-        }
         let thinking = format!("Thinking · {}", self.thinking_level().as_str());
-        let (tr, clicked) = pill(ui, mr.right() + 2.0 * k, "thinking", &thinking, "Thinking level (chat-select-thinking)", None);
-        if clicked {
-            run = Some("chat-select-thinking");
-        }
         // Where the chat runs: this machine, or another one's node.
         let machine = match &self.node {
             r if r.local() && r.online => "local".to_string(),
@@ -1992,17 +1986,68 @@ impl Buffer for ChatBuffer {
             r if r.online => format!("⇄ {}", r.machine),
             r => format!("⇄ {} · offline", r.machine),
         };
-        let (wr, clicked) = pill(ui, tr.right() + 2.0 * k, "machine", &machine, "Where this chat runs (chat-select-machine)", None);
-        if clicked {
-            run = Some("chat-select-machine");
-        }
         // Whether a turn cut off by its machine's node stopping goes on by itself.
         let (label, tip) = if self.keep_going() {
             ("↻ Keeps going", "If its machine's serpis-node stops mid-turn (a crash, a reboot), the turn continues when it starts again. Click to make it wait for you instead (chat-toggle-keep-going; default: chat-keep-going)")
         } else {
             ("⏸ Waits", "If its machine's serpis-node stops mid-turn (a crash, a reboot), the turn waits for you to send a message. Click to make it keep going (chat-toggle-keep-going; default: chat-keep-going)")
         };
-        let (mut kr, clicked) = pill(ui, wr.right() + 2.0 * k, "keep-going", label, tip, None);
+        // What doesn't fit before the send button is left out: keep-going first, then the
+        // machine, then thinking; the model is cut to what is left. The pills after them (the
+        // permission mode, background work, a limit) always show.
+        let running = self.background_tasks();
+        let warning = self.limit_warning();
+        let mut after = 0.0;
+        if let Some(mode) = &self.node.state.permission_mode {
+            after += pill_w(&permission_mode_label(mode, &theme).0, false) + 2.0 * k;
+        }
+        if !running.is_empty() {
+            after += pill_w(&format!("· {}", background_counts(&running)), false) + 2.0 * k;
+        }
+        if let Some(l) = &warning {
+            after += pill_w(&format!("⚠ {}% of {}", (l.utilization.unwrap_or(0.0) * 100.0).round(), l.name()), false) + 2.0 * k;
+        }
+        // Room is kept for the context meter too (drawn later, beside the send button), unless
+        // the model wouldn't fit then.
+        let meter = match self.context() {
+            (used, window @ 1..) => {
+                let label = format!("{:.0}%", used.unwrap_or(0) as f64 * 100.0 / window as f64);
+                32.0 * k + crate::chrome::text_width(&painter, &label, small.clone()) + 26.0 * k
+            }
+            _ => 0.0,
+        };
+        let widths = [pill_w(&model, true), pill_w(&thinking, false), pill_w(&machine, false), pill_w(label, false)];
+        // (pills shown, the model's widest) in `room`.
+        let fit = |room: f32| {
+            let mut shown = 4;
+            while shown > 1 && widths[..shown].iter().sum::<f32>() + 2.0 * k * (shown - 1) as f32 > room {
+                shown -= 1;
+            }
+            (shown, room - widths[1..shown].iter().map(|w| w + 2.0 * k).sum::<f32>())
+        };
+        let room = bar.width() - 28.0 * k - 8.0 * k - after;
+        let (shown, model_max) = match fit(room - meter) {
+            (_, m) if m < 40.0 * k => fit(room),
+            f => f,
+        };
+        // A pill left out: nothing, where the next one would start.
+        let hidden = |prev: Rect| (Rect::from_min_size(egui::pos2(prev.right(), cy - 13.0 * k), egui::vec2(0.0, 26.0 * k)), false);
+        // Too narrow even for the model (a sliver of a window): nothing.
+        let start = Rect::from_min_size(egui::pos2(bar.left() - 2.0 * k, cy - 13.0 * k), egui::vec2(0.0, 26.0 * k));
+        let (mr, clicked) = if model_max >= 40.0 * k { pill(ui, bar.left(), "model", &model, "Model (chat-select-model)", Some(theme.accent), model_max) } else { hidden(start) };
+        if clicked {
+            run = Some("chat-select-model");
+        }
+        let (tr, clicked) = if shown > 1 { pill(ui, mr.right() + 2.0 * k, "thinking", &thinking, "Thinking level (chat-select-thinking)", None, f32::INFINITY) } else { hidden(mr) };
+        if clicked {
+            run = Some("chat-select-thinking");
+        }
+        let (wr, clicked) = if shown > 2 { pill(ui, tr.right() + 2.0 * k, "machine", &machine, "Where this chat runs (chat-select-machine)", None, f32::INFINITY) } else { hidden(tr) };
+        if clicked {
+            run = Some("chat-select-machine");
+        }
+        let (mut kr, clicked) = if shown > 3 { pill(ui, wr.right() + 2.0 * k, "keep-going", label, tip, None, f32::INFINITY) } else { hidden(wr) };
+        let keep_r = kr;
         if clicked {
             run = Some("chat-toggle-keep-going");
         }
@@ -2023,12 +2068,11 @@ impl Buffer for ChatBuffer {
             }
         }
         // Work the agent left running on the side (Claude Code's background shells, agents).
-        let running = self.background_tasks();
         if !running.is_empty() {
             let label = format!("· {}", background_counts(&running));
             let mut tip: Vec<String> = running.iter().map(|t| format!("{}: {}", task_kind(t).0, t.description)).collect();
             tip.push("Running in the background. Click (or C-c C-k) to stop one (chat-stop-task)".into());
-            let (br, clicked) = pill(ui, kr.right() + 2.0 * k, "background", &label, &tip.join("\n"), None);
+            let (br, clicked) = pill(ui, kr.right() + 2.0 * k, "background", &label, &tip.join("\n"), None, f32::INFINITY);
             hits.push(("background", br));
             kr = br;
             if clicked {
@@ -2036,7 +2080,7 @@ impl Buffer for ChatBuffer {
             }
         }
         // Close to a usage limit: how close, until it resets.
-        if let Some(l) = self.limit_warning() {
+        if let Some(l) = warning {
             let label = format!("⚠ {}% of {}", (l.utilization.unwrap_or(0.0) * 100.0).round(), l.name());
             let tip = match l.resets_at {
                 Some(t) => format!("Claude Code says this chat's account is close to its {}: it resets in {}. claude-code-usage shows all its limits", l.name(), crate::claude_usage::until(t as u64, unix_now() as u64)),
@@ -2179,6 +2223,7 @@ impl Buffer for ChatBuffer {
             let label = format!("Working {}", fmt_duration(self.started.map(|s| s.elapsed()).unwrap_or_default(), false));
             let w = crate::chrome::text_width(&painter, &label, small.clone());
             if right - w - 18.0 * k > tr.right() {
+                hits.push(("activity", Rect::from_min_max(egui::pos2(right - w - 16.0 * k, cy - 8.0 * k), egui::pos2(right, cy + 8.0 * k))));
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.accent, w + 1.0);
                 crate::chrome::spinner(&painter, egui::pos2(right - w - 11.0 * k, cy), 5.0 * k, ui.input(|i| i.time), theme.accent);
                 right -= w + 30.0 * k;
@@ -2229,10 +2274,15 @@ impl Buffer for ChatBuffer {
             let label = self.usage_label();
             let w = crate::chrome::text_width(&painter, &label, small.clone());
             if right - w > tr.right() + 8.0 * k {
+                hits.push(("usage", Rect::from_min_max(egui::pos2(right - w, cy - 8.0 * k), egui::pos2(right, cy + 8.0 * k))));
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
-        hits.extend([("model", mr), ("thinking", think_r), ("machine", wr), ("keep-going", tr), ("send", send), ("card", card)]);
+        hits.extend([("model", mr), ("thinking", think_r), ("machine", wr), ("keep-going", keep_r), ("send", send), ("card", card)].into_iter().filter(|(_, r)| r.width() > 0.0));
+        // The toolbar's row: its pills, labels and the send button.
+        const TOOLBAR: [&str; 11] = ["model", "thinking", "machine", "keep-going", "permission-mode", "background", "limit", "context", "activity", "usage", "send"];
+        let row: Vec<(&str, Rect)> = hits.iter().filter(|(n, _)| TOOLBAR.contains(n)).copied().collect();
+        ed.check_row("composer", card, &row);
         self.composer_hits = hits;
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;

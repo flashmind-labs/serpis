@@ -22,7 +22,13 @@ const ECHO_H: f32 = 30.0;
 const TAB_H: f32 = 24.0;
 
 pub fn draw(ui: &mut egui::Ui, ed: &mut Editor) {
-    let full = ui.max_rect();
+    let mut full = ui.max_rect();
+    // UI tests at a set size (SERPIS_TEST_SIZE=WxH; ui-test.sh --narrow): serpis keeps to that
+    // much of the window, whatever size the window manager gave it.
+    if let Some(size) = ed.test_size {
+        ui.painter().rect_filled(full, 0.0, Color32::BLACK);
+        full.max = full.min + size.min(full.size());
+    }
     ui.painter().rect_filled(full, 0.0, ed.theme.bg);
     let echo_h = (ECHO_H * ed.theme.ui_scale()).round();
     let mut body = Rect::from_min_max(full.min + Vec2::splat(GAP), egui::pos2(full.right() - GAP, full.bottom() - echo_h - GAP));
@@ -428,6 +434,8 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let mut x = header.left() + 14.0 * k;
     let icon_color = if modeline.busy { theme.yellow } else if is_focus_win { theme.accent } else { theme.fg_faint };
     crate::chrome::kind_icon(p, egui::pos2(x + 6.0 * k, cy), 12.0 * k, &meta.major, icon_color);
+    // The header's row, checked in UI tests (Editor::check_row).
+    let mut row: Vec<(&str, Rect)> = vec![("icon", Rect::from_center_size(egui::pos2(x + 6.0 * k, cy), Vec2::splat(12.0 * k)))];
     x += 22.0 * k;
 
     // Right side first: buttons, badges, status pills; the title gets what is left.
@@ -437,26 +445,40 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let button = |ui: &mut egui::Ui, bx: f32, name: &str, tip: &str, paint: fn(&egui::Painter, Rect, Color32)| {
         crate::chrome::ghost_button(ui, Rect::from_min_size(egui::pos2(bx, cy - bsz / 2.0), Vec2::splat(bsz)), wid.with(name), &theme, tip, paint)
     };
+    // A narrow window keeps room for some of its title: the split buttons, then the badges, are
+    // left out first (the close button stays).
+    let badge_font = FontId::proportional(theme.font_size - 3.0);
+    let measure = ui.painter().clone();
+    let badge_w = |label: &str| crate::chrome::text_width(&measure, label, badge_font.clone()) + (badge_font.size + 8.0).round() * 0.8 + 6.0 * k;
+    let mut spare = bx - 8.0 * k - x - 40.0 * k;
     let close = button(ui, bx, "close", "Close window (the buffer stays open)", crate::chrome::cross);
-    bx -= bsz;
-    let below = button(ui, bx, "below", "Split below", crate::chrome::split_below);
-    bx -= bsz;
-    let right = button(ui, bx, "right", "Split right", crate::chrome::split_right);
+    row.push(("close", close.rect));
+    let (mut below, mut right) = (None, None);
+    if spare >= 2.0 * bsz {
+        spare -= 2.0 * bsz;
+        bx -= bsz;
+        let b = button(ui, bx, "below", "Split below", crate::chrome::split_below);
+        bx -= bsz;
+        let r = button(ui, bx, "right", "Split right", crate::chrome::split_right);
+        row.extend([("split-below", b.rect), ("split-right", r.rect)]);
+        (below, right) = (Some(b), Some(r));
+    }
     let buttons_left = bx - 2.0;
     bx -= 8.0 * k;
     let p = ui.painter();
-    let badge_font = FontId::proportional(theme.font_size - 3.0);
     // Fullscreen (monocle): say so, with how many windows it hides; clicking restores.
     let mut fullscreen_badge = None;
     let indicator = ed.var_str("fullscreen-indicator").unwrap_or_default();
-    if ed.layout.fullscreen == Some(w) && !indicator.is_empty() {
-        let hidden = ed.layout.leaves().len().saturating_sub(1);
-        let label = if hidden > 0 { format!("{indicator} +{hidden}") } else { indicator };
+    let hidden = ed.layout.leaves().len().saturating_sub(1);
+    let label = if hidden > 0 { format!("{indicator} +{hidden}") } else { indicator.clone() };
+    if ed.layout.fullscreen == Some(w) && !indicator.is_empty() && badge_w(&label) <= spare {
+        spare -= badge_w(&label);
         let badge = crate::chrome::pill(p, bx, cy, &label, badge_font.clone(), theme.yellow, crate::chrome::tint(theme.yellow, 0.16), true);
+        row.push(("fullscreen", badge));
         bx = badge.left() - 6.0 * k;
         fullscreen_badge = Some(badge);
     }
-    if let Some(st) = vim::state_of(ed, id) {
+    if let Some(st) = vim::state_of(ed, id).filter(|st| badge_w(st.label()) <= spare) {
         let color = match st {
             vim::State::Normal => theme.accent,
             vim::State::Insert => theme.green,
@@ -464,6 +486,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         };
         let color = if is_focus_win { color } else { theme.fg_faint };
         let badge = crate::chrome::pill(p, bx, cy, st.label(), badge_font.clone(), color, crate::chrome::tint(color, 0.14), true);
+        row.push(("vim-state", badge));
         bx = badge.left() - 6.0 * k;
     }
     let name_font = FontId::proportional(theme.font_size - 0.5);
@@ -482,6 +505,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
             break;
         }
         let pr = crate::chrome::pill(ui.painter(), bx, cy, st, small.clone(), theme.fg_dim, theme.chip(), true);
+        row.push(("status", pr));
         if let Some(cmd) = cmd {
             buttons.push((pr, (*cmd).clone(), i));
         }
@@ -499,6 +523,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         if w + 20.0 < status_left - (x + min_title) {
             let right_edge = status_left - 10.0 * k;
             crate::chrome::text(p, egui::pos2(right_edge - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
+            row.push(("place", Rect::from_min_size(egui::pos2(right_edge - w, cy - 8.0 * k), egui::vec2(w, 16.0 * k))));
             status_left = right_edge - w;
         }
     }
@@ -506,6 +531,8 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let title_room = status_left - 16.0 * k - x;
     let name_w = crate::chrome::text(p, egui::pos2(x, cy), &label, name_font.clone(), if is_focus_win { theme.fg } else { theme.fg_dim }, title_room);
     let name_rect = Rect::from_min_size(egui::pos2(x, cy - 9.0), egui::vec2(name_w, 18.0));
+    row.push(("title", name_rect));
+    ed.check_row("header", header, &row);
     if !secondary.is_empty() && title_room - name_w > 40.0 {
         crate::chrome::text(p, egui::pos2(x + name_w + 10.0 * k, cy), &secondary, small.clone(), theme.fg_faint, title_room - name_w - 10.0 * k);
     }
@@ -571,12 +598,12 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         ed.close_window();
         return;
     }
-    if right.clicked() {
+    if right.as_ref().is_some_and(|r| r.clicked()) {
         ed.focus_window(w);
         ed.split_window(false);
         return;
     }
-    if below.clicked() {
+    if below.as_ref().is_some_and(|r| r.clicked()) {
         ed.focus_window(w);
         ed.split_window(true);
         return;

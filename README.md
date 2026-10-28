@@ -572,4 +572,11 @@ docs/PLAN.md          design and roadmap
 ```sh
 cargo test                 # unit tests
 scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces, sidebar, sessions
+scripts/ui-test.sh --narrow  # the same at 760x560, however big the window is
+scripts/promo/build.sh     # the promo video, from a scripted run (scripts/promo/README.md)
 ```
+
+Every UI test also checks that no controls overlap or spill out of their place. These are
+the composer's pills and labels and a window header's title, badges and buttons, checked in
+every frame of the test. Your window manager decides the window's size, so a normal run
+covers whatever size you happen to have, and `--narrow` always covers a cramped one.

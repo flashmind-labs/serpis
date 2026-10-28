@@ -6,6 +6,7 @@
 -- cache (from what the provider reports) must agree: the chip on each response, the header entry,
 -- miss notices with their cause, and warnings before actions that throw the cache away.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
+T.room()
 local agent_dir = os.getenv("SERPIS_AGENT_DIR")
 local chat
 local veto = false

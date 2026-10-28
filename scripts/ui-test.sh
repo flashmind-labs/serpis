@@ -3,6 +3,9 @@
 # Uses throwaway config/agent dirs so your own config is untouched. SERPIS_TEST_BIN runs another
 # build of serpis (a release one, to measure speed).
 set -euo pipefail
+# --narrow: serpis lays itself out at 760x560 in every test, however big its window is, so
+# crowded layouts show (each test also fails on controls that overlap: lib.lua's T.finish).
+if [[ "${1:-}" == "--narrow" ]]; then export SERPIS_TEST_SIZE=760x560; shift; fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build -q --manifest-path "$root/Cargo.toml" -p serpis-bin -p serpis-testkit -p serpis-node
 # Short: each test's node listens on a socket in its home, and socket paths are limited to about
