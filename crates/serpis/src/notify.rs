@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::buffer::{Activity, ActivityState, BufferId};
-use crate::editor::{BUILTIN, Editor, buffer_id_from_u64, buffer_id_to_u64};
+use crate::editor::{Editor, buffer_id_from_u64, buffer_id_to_u64};
 
 /// A notification, as sent (and as `serpis.debug.notifications` lists them).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -31,19 +31,14 @@ pub fn sent() -> Vec<Sent> {
 }
 
 pub fn install(ed: &mut Editor) {
-    let o = BUILTIN;
     ed.defvar("notify", json!(true), "Send desktop notifications when a chat's turn ends, an agent waits for you or fails, or a terminal's command finishes, while you aren't looking (notify-when). Which: notify-events.");
     ed.defvar("notify-events", json!(["done", "waiting", "failed"]), "What notifies: \"done\" (a chat's turn ended, a terminal's command finished: after notify-after seconds), \"waiting\" (an agent waits for you: a permission, its questions, a plan), \"failed\" (a run ended in an error).");
     ed.defvar("notify-after", json!(15), "Seconds a turn or a terminal's command must have run for its end to notify (\"done\"); what waits for you or failed notifies at once.");
     ed.defvar("notify-when", json!("unseen"), "When to notify: \"unseen\" (serpis isn't the focused app, or the buffer isn't on screen), \"away\" (serpis isn't the focused app) or \"always\".");
     ed.defvar("notify-terminals", json!(true), "Also notify when a terminal's command finishes (after notify-after seconds), and when an agent run in one waits.");
     ed.defvar("notify-sound", json!(true), "Notifications play the system's sound.");
-    ed.defvar("notify-app", json!(""), "macOS: the app notifications come from (its icon, a bundle id like \"com.mitchellh.ghostty\"); \"\" picks: the app serpis was started from (the terminal, Serpis.app), else Terminal.");
+    ed.defvar("notify-app", json!(""), "macOS: the app notifications come from (its icon, and where System Settings > Notifications allows them), a bundle id. \"\": Serpis.app when it is installed (a click brings serpis back), else they are shown through AppleScript (as Script Editor's, and a click doesn't). An app that sends its own notifications can't be named: macOS refuses them.");
     ed.defvar("notify-backend", json!(if std::env::var_os("SERPIS_TEST_SCRIPT").is_some() { "none" } else { "system" }), "\"system\" shows notifications on the desktop; \"none\" only logs them (and lists them for serpis.debug.notifications), as tests do.");
-    ed.define_command("notify-test", "Send a test notification, to see how they look (and that the system lets serpis send them).", o, |ed, _| {
-        send(ed, "serpis".into(), "Notifications work. A click brings you back here.".into(), "script", Some(ed.current_buffer()));
-        Ok(())
-    });
 }
 
 /// Whether to notify of a buffer's activity changing from `prev` (held for `ran`) to `now`.
@@ -160,18 +155,28 @@ fn bring(ed: &mut Editor, id: BufferId) {
 }
 
 /// Show it, and wait for a click on it: true when clicked.
+///
+/// macOS shows a process's notifications as some app's: serpis's own when Serpis.app is
+/// installed. Not the terminal it was started from: such an app sends its own notifications
+/// (the newer API), and macOS refuses the older one this uses under the same app ("can't mix
+/// modern clients with legacy clients"), silently. With no app to send as, AppleScript shows it.
 #[cfg(target_os = "macos")]
 fn deliver(title: &str, body: &str, sound: bool, app: Option<String>) -> bool {
     use mac_notification_sys::{Notification, NotificationResponse};
-    static APP: std::sync::Once = std::sync::Once::new();
-    APP.call_once(|| {
-        // The app it comes from: the one asked for, else the one serpis was started from (a
-        // terminal, Serpis.app), else Terminal.
-        let app = app.or_else(|| std::env::var("__CFBundleIdentifier").ok().filter(|a| !a.is_empty())).unwrap_or_else(|| "com.apple.Terminal".into());
-        if let Err(e) = mac_notification_sys::set_application(&app) {
-            tracing::warn!("notifications from {app}: {e}");
+    static APP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let app = APP.get_or_init(|| {
+        let app = app.or_else(|| mac_notification_sys::get_bundle_identifier("Serpis"))?;
+        match mac_notification_sys::set_application(&app) {
+            Ok(()) => Some(app),
+            Err(e) => {
+                tracing::warn!("notifications as {app}: {e}");
+                None
+            }
         }
     });
+    if app.is_none() {
+        return applescript(title, body, sound);
+    }
     let mut n = Notification::new();
     n.title(title).message(body).wait_for_click(true);
     if sound {
@@ -185,6 +190,20 @@ fn deliver(title: &str, body: &str, sound: bool, app: Option<String>) -> bool {
             false
         }
     }
+}
+
+/// Show it with AppleScript's `display notification` (as Script Editor's; no click to wait for).
+#[cfg(target_os = "macos")]
+fn applescript(title: &str, body: &str, sound: bool) -> bool {
+    let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut script = format!("display notification {} with title {}", q(body), q(title));
+    if sound {
+        script.push_str(" sound name \"default\"");
+    }
+    if let Err(e) = std::process::Command::new("osascript").args(["-e", &script]).status() {
+        tracing::warn!("couldn't show a notification (osascript: {e})");
+    }
+    false
 }
 
 /// Show it with `notify-send` (no click to wait for).

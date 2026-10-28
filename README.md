@@ -168,8 +168,9 @@ notification; a click on it brings you back to that chat or terminal:
 Only while you aren't looking: `notify-when` = `"unseen"` (serpis isn't the focused app, or the
 buffer isn't on screen), `"away"` (serpis isn't the focused app) or `"always"`. `notify-events`
 picks among `"done"`, `"waiting"` and `"failed"`; `notify` = `false` turns them off,
-`notify-sound` the sound. On macOS they come from the app serpis was started from (your terminal,
-or Serpis.app; `notify-app` names another); `notify-test` sends one to try. Scripts send their own
+`notify-sound` the sound. On macOS they come from Serpis.app when it is installed
+(`scripts/install-macos.sh`), even when serpis runs from a terminal, and a click brings you back;
+without it they show through AppleScript, and a click doesn't. Scripts send their own
 with `serpis.notify(title, body, {buffer = ...})`, and the `notify` hook changes any (return
 `{title = ..., body = ...}`) or drops it (`false`).
 
