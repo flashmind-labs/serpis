@@ -123,6 +123,8 @@ impl CompactReason {
 enum Done {
     Agent(AgentEvent),
     Compacted { a: AssistantMessage, cut: usize, tokens: u64, reason: CompactReason },
+    /// The usage limit it stopped at has reset: time to go on.
+    LimitReset,
 }
 
 /// Called whenever the chat has something new for [`Chat::poll`] (the desktop repaints, a node
@@ -235,6 +237,11 @@ pub struct Chat {
     permission_mode: Option<String>,
     /// How much the reply being written has thought (Claude Code's estimate).
     thinking_tokens: Option<u64>,
+    /// Where its account stands against its usage limits, as Claude Code last said.
+    limit: Option<serpis_proto::Limit>,
+    /// It stopped at a usage limit, and goes on by itself at this time (unix seconds); the
+    /// token cancels the wait.
+    continues: Option<(i64, CancellationToken)>,
     /// The machine's `claude-code-permission-mode`, as last read (what the chat shows until it
     /// has its own).
     default_mode: String,
@@ -301,6 +308,8 @@ impl Chat {
             asks: HashMap::new(),
             permission_mode: None,
             thinking_tokens: None,
+            limit: None,
+            continues: None,
             default_mode: "default".into(),
             tx,
             rx,
@@ -392,6 +401,8 @@ impl Chat {
     pub fn clear(&mut self) {
         self.abort();
         self.claude.stop();
+        self.stop_waiting_for_reset();
+        self.limit = None;
         self.entries.clear();
         self.history.clear();
         self.totals = Usage::default();
@@ -476,6 +487,8 @@ impl Chat {
             content.push(UserContent::Image { data: i.data.clone(), mime_type: i.mime.clone() });
         }
         let msg = Message::User { content, timestamp: now_ms() };
+        // Sent before the limit resets: it goes now (and waits again if still refused).
+        self.stop_waiting_for_reset();
         if let Some(agent) = &self.agent {
             if follow_up {
                 agent.follow_up(msg);
@@ -984,6 +997,89 @@ impl Chat {
         }
     }
 
+    /// Its usage limits as last reported, while that still holds (until the window resets).
+    pub fn current_limit(&self) -> Option<serpis_proto::Limit> {
+        let now = unix_now();
+        self.limit.clone().filter(|l| l.status != "allowed" && l.resets_at.is_none_or(|t| t > now))
+    }
+
+    /// When it goes on by itself after the usage limit it stopped at resets (unix seconds).
+    pub fn continues_at(&self) -> Option<i64> {
+        self.continues.as_ref().map(|(at, _)| *at)
+    }
+
+    /// The turn just ended: refused at a usage limit, it waits for the limit to reset and goes
+    /// on then (`claude-code-continue-after-limit`), else for the person.
+    fn stopped_at_limit(&mut self, host: &mut dyn Host) {
+        let refused = matches!(self.history.last(), Some(Message::Assistant(a)) if a.stop_reason == StopReason::Error);
+        let Some(limit) = self.limit.clone().filter(|l| l.reached() && refused) else { return };
+        let Some(at) = limit.resets_at else { return };
+        let on = host.var_bool("claude-code-continue-after-limit", true);
+        self.append_entry(host, CLAUDE_LIMIT, json!({"limit": limit, "at": self.history.len(), "continue": on}));
+        if on {
+            self.wait_for_reset(host, at);
+        }
+        host.hook(self, "usage-limit", &json!({"buffer": host.chat_ref(), "limit": limit, "continues_at": self.continues_at()}));
+    }
+
+    /// Go on by itself once the limit that resets at `at` has (`claude-code-limit-continue-delay`
+    /// seconds after, as its reset can lag).
+    fn wait_for_reset(&mut self, host: &mut dyn Host, at: i64) {
+        self.stop_waiting_for_reset();
+        let when = at + host.var_u64("claude-code-limit-continue-delay", 60) as i64;
+        let cancel = CancellationToken::new();
+        let (tx, wake, stop) = (self.tx.clone(), self.wake.clone(), cancel.clone());
+        let wait = Duration::from_secs(when.saturating_sub(unix_now()).max(0) as u64);
+        host.runtime().spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {
+                    let _ = tx.send(Done::LimitReset);
+                    wake();
+                }
+                _ = stop.cancelled() => {}
+            }
+        });
+        self.continues = Some((when, cancel));
+        (self.wake)();
+    }
+
+    fn stop_waiting_for_reset(&mut self) {
+        if let Some((_, c)) = self.continues.take() {
+            c.cancel();
+        }
+    }
+
+    /// Whether this chat, stopped at a usage limit, goes on by itself when it resets. Err when
+    /// it isn't stopped at one.
+    pub fn set_continue_after_limit(&mut self, host: &mut dyn Host, on: bool) -> Result<(), String> {
+        let held = self.custom_entries.iter().rev().find(|(k, _)| k == CLAUDE_LIMIT).filter(|(_, d)| d["at"].as_u64() == Some(self.history.len() as u64)).map(|(_, d)| d.clone());
+        let Some(mut d) = held.filter(|_| !self.running()) else { return Err("The chat isn't stopped at a usage limit".into()) };
+        if on == self.continues.is_some() {
+            return Ok(());
+        }
+        d["continue"] = json!(on);
+        let at = d["limit"]["resets_at"].as_i64();
+        self.append_entry(host, CLAUDE_LIMIT, d);
+        match at {
+            Some(at) if on => self.wait_for_reset(host, at),
+            _ => self.stop_waiting_for_reset(),
+        }
+        (self.wake)();
+        Ok(())
+    }
+
+    /// The limit it stopped at has reset: go on, with `claude-code-limit-continue-prompt`.
+    fn go_on_after_limit(&mut self, host: &mut dyn Host) {
+        if self.continues.take().is_none() || self.running() {
+            return;
+        }
+        self.limit = None;
+        let text = host.var_str("claude-code-limit-continue-prompt").unwrap_or_else(|| LIMIT_CONTINUE_PROMPT.into());
+        if let Err(e) = self.submit(host, text, Vec::new(), false, None) {
+            self.notice(format!("Couldn't go on after the usage limit reset: {e}"), Tone::Warning);
+        }
+    }
+
     /// Pick up what finished elsewhere (agent events, a compaction, a resume check). Call it
     /// whenever the chat's [`Wake`] fires, and once after creating or restoring it.
     pub fn poll(&mut self, host: &mut dyn Host) {
@@ -997,6 +1093,7 @@ impl Chat {
             match d {
                 Done::Agent(ev) => self.apply(ev, host),
                 Done::Compacted { a, cut, tokens, reason } => self.finish_compaction(host, a, cut, tokens, reason),
+                Done::LimitReset => self.go_on_after_limit(host),
             }
         }
     }
@@ -1193,6 +1290,7 @@ impl Chat {
                     },
                 );
                 host.hook(self, "agent-finished", &json!({"buffer": host.chat_ref(), "total": usage_json(&self.totals)}));
+                self.stopped_at_limit(host);
                 self.compact_if_needed(host);
             }
             AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
@@ -1219,6 +1317,7 @@ impl Chat {
                 self.permission_mode = Some(m);
             }
             AgentEvent::ThinkingTokens(d) => *self.thinking_tokens.get_or_insert(0) += d,
+            AgentEvent::Limit(l) => self.limit = Some(l),
             // Claude Code went on by itself (work it left running finished): a run of the
             // chat's, which it shows, records and can stop like any.
             AgentEvent::Adopted { handle, why } => {
@@ -1421,6 +1520,21 @@ impl Chat {
             }
         }
         self.permission_mode = l.entries.iter().rev().find(|(k, _)| k == CLAUDE_MODE).and_then(|(_, d)| d["mode"].as_str()).map(str::to_string);
+        // Stopped at a usage limit, with nothing sent since: it still goes on when that resets
+        // (at once if it already has).
+        self.stop_waiting_for_reset();
+        self.limit = None;
+        if let Some((_, d)) = l.entries.iter().rev().find(|(k, _)| k == CLAUDE_LIMIT)
+            && d["at"].as_u64() == Some(l.messages.len() as u64)
+            && let Ok(limit) = serde_json::from_value::<serpis_proto::Limit>(d["limit"].clone())
+        {
+            if d["continue"].as_bool().unwrap_or(false)
+                && let Some(at) = limit.resets_at
+            {
+                self.wait_for_reset(host, at);
+            }
+            self.limit = Some(limit);
+        }
         self.system_prompt = None;
         self.cache = cache_watch::CacheWatch::from_usages(l.messages.iter().filter_map(|m| match m {
             Message::Assistant(a) => Some(&a.usage),
@@ -1499,8 +1613,21 @@ impl Chat {
             keep_going: self.keep_going(),
             permission_mode: self.is_claude_code().then(|| self.permission_mode.clone().unwrap_or_else(|| self.default_mode.clone())),
             thinking_tokens: self.thinking_tokens.filter(|_| self.running()),
+            limit: self.current_limit(),
+            continues_at: self.continues.as_ref().map(|(at, _)| *at),
         }
     }
+}
+
+/// The custom entry a stop at a usage limit is kept in: `{limit, at = messages before it,
+/// continue = bool}` (a resumed chat still goes on when it resets).
+pub const CLAUDE_LIMIT: &str = "claude-code-limit";
+
+/// What a chat stopped at a usage limit says when it goes on after it resets.
+pub const LIMIT_CONTINUE_PROMPT: &str = "Your usage limit has reset. Continue where you left off.";
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Claude Code's permission modes.

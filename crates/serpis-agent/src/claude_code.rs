@@ -605,6 +605,11 @@ impl Process {
             }
             return true;
         }
+        // Where the account stands against its usage limits, when that changes.
+        if v["type"] == "rate_limit_event" {
+            emit(AgentEvent::Limit(limit_of(&v["rate_limit_info"])));
+            return true;
+        }
         // It says what mode it is in when it starts, and when that changes.
         if v["type"] == "system"
             && let Some(m) = v["permissionMode"].as_str()
@@ -811,7 +816,13 @@ impl Process {
                     }
                 }
                 "stream_event" => t.event(&v["event"]),
-                "assistant" => t.whole(&v),
+                "assistant" => {
+                    // Refused at a usage limit: the reply says so, with the limit it hit.
+                    if let Some(info) = v.pointer("/api_error_params/rate_limit_info").filter(|i| i.is_object()) {
+                        emit(AgentEvent::Limit(limit_of(info)));
+                    }
+                    t.whole(&v)
+                }
                 "user" => t.results(&v),
                 "control_request" => self.respond(&v, cfg, h, emit, interrupted).await?,
                 "result" => {
@@ -951,6 +962,16 @@ fn always_label(suggestions: &Value) -> Option<String> {
         })
         .collect();
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// A `rate_limit_info`: how the account stands against its usage limits.
+fn limit_of(info: &Value) -> serpis_proto::Limit {
+    serpis_proto::Limit {
+        status: info["status"].as_str().unwrap_or("allowed").to_string(),
+        resets_at: info["resetsAt"].as_i64(),
+        kind: info["rateLimitType"].as_str().map(str::to_string),
+        utilization: info["utilization"].as_f64(),
+    }
 }
 
 /// What a failed `result` says.

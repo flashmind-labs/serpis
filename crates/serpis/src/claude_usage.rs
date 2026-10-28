@@ -463,7 +463,7 @@ fn capitalized(s: &str) -> String {
 }
 
 /// `3d 4h`, `3h 12m`, `12m`: from `now` to `t`.
-fn until(t: u64, now: u64) -> String {
+pub(crate) fn until(t: u64, now: u64) -> String {
     let s = t.saturating_sub(now);
     match s {
         0..60 => "under a minute".into(),

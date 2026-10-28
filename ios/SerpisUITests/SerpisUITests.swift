@@ -274,5 +274,29 @@ final class SerpisUITests: XCTestCase {
         XCTAssertTrue(item.waitForExistence(timeout: 5))
         item.tap()
         XCTAssertTrue(running.waitForNonExistence(timeout: 30), "stopped, it shows no more")
+
+        // Close to a usage limit, it says how close; stopped at one, until when, and that it
+        // goes on by itself then (or, told so, waits). Sent once the chat is idle, so it isn't
+        // taken in by the turn still ending.
+        XCTAssertTrue(app.buttons["Stop"].waitForNonExistence(timeout: 30), "the chat is idle")
+        composer.tap()
+        composer.typeText("near the limit")
+        app.buttons["Send"].tap()
+        let warning = app.staticTexts["limit-warning"]
+        if !warning.waitForExistence(timeout: 30) {
+            XCTFail("the warning shows; on screen: \(app.debugDescription.components(separatedBy: "\n").filter { $0.contains("Button") || $0.contains("StaticText") }.suffix(40).joined(separator: " | "))")
+        }
+        XCTAssertEqual(warning.label, "⚠ 85% of session limit")
+        composer.tap()
+        composer.typeText("hit the limit for an hour")
+        app.buttons["Send"].tap()
+        let wait = app.buttons["limit-wait"]
+        let stopped = wait.waitForExistence(timeout: 30)
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        shot("16-limit")
+        XCTAssertTrue(stopped, "the limit card shows, going on by itself")
+        XCTAssertTrue(app.staticTexts["Session limit reached"].exists)
+        wait.tap()
+        XCTAssertTrue(app.buttons["limit-go"].waitForExistence(timeout: 20), "told not to, it waits for you")
     }
 }

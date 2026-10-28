@@ -46,6 +46,9 @@ pub enum AgentEvent {
     /// The reply being written has thought about `tokens` more tokens (an estimate, while its
     /// thinking streams or is left out of the stream).
     ThinkingTokens(u64),
+    /// Where the account stands against its usage limits (it changed, or a request was refused
+    /// at one).
+    Limit(serpis_proto::Limit),
 }
 
 pub type EmitFn = Arc<dyn Fn(AgentEvent) + Send + Sync>;

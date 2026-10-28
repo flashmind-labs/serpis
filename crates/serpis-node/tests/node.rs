@@ -138,6 +138,12 @@ fn a_node_runs_chats_for_clients_anywhere() {
         let phone: serpis_proto::wire::Request = serde_json::from_value(json!({"op": "answer", "chat": cc, "tool": tool, "decision": {"kind": "plan", "mode": "acceptEdits"}})).expect("the phone's request reads");
         a.call(phone).await.unwrap();
         vc.until(&mut a_events, |v| v.idle() && v.entries.iter().any(|e| matches!(e, Entry::Assistant { blocks, .. } if blocks.iter().any(|b| matches!(b, serpis_ai::AssistantContent::Text { text, .. } if text == "Plan approved; on in acceptEdits."))))).await;
+        // Stopped at a usage limit, it says when it goes on; the phone can make it wait instead.
+        a.call(Request::Prompt { chat: cc.clone(), text: "hit the limit for an hour".into(), images: vec![], follow_up: false, request_id: None }).await.unwrap();
+        vc.until(&mut a_events, |v| v.idle() && v.state.as_ref().is_some_and(|s| s.continues_at.is_some() && s.limit.as_ref().is_some_and(|l| l.reached()))).await;
+        let phone: serpis_proto::wire::Request = serde_json::from_value(json!({"op": "set_continue_after_limit", "chat": cc, "on": false})).expect("the phone's request reads");
+        a.call(phone).await.unwrap();
+        vc.until(&mut a_events, |v| v.state.as_ref().is_some_and(|s| s.continues_at.is_none() && s.limit.is_some())).await;
         a.call(Request::Close { chat: cc }).await.unwrap();
 
         // Mistakes are answered, not fatal.

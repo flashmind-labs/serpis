@@ -175,8 +175,12 @@ struct ChatState: Decodable, Hashable {
     var permissionMode: String?
     /// How much the reply being written has thought (an estimate), while it runs.
     var thinkingTokens: Int?
+    /// A usage limit it is close to, or stopped at (Claude Code's).
+    var limit: Limit?
+    /// Stopped at a usage limit: when it goes on by itself (nil: it waits for you).
+    var continuesAt: Date?
 
-    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error, permission_mode, thinking_tokens }
+    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error, permission_mode, thinking_tokens, limit, continues_at }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -189,6 +193,41 @@ struct ChatState: Decodable, Hashable {
         lastError = try? c.decode(String.self, forKey: .last_error)
         permissionMode = try? c.decode(String.self, forKey: .permission_mode)
         thinkingTokens = try? c.decode(Int.self, forKey: .thinking_tokens)
+        limit = try? c.decode(Limit.self, forKey: .limit)
+        continuesAt = (try? c.decode(Double.self, forKey: .continues_at)).map { Date(timeIntervalSince1970: $0) }
+    }
+}
+
+/// Where a chat's account stands against a usage limit: close to it (`allowed_warning`), or at
+/// it (`rejected`) until it resets.
+struct Limit: Decodable, Hashable {
+    var status: String
+    var resetsAt: Date?
+    var kind: String?
+    var utilization: Double?
+
+    private enum Keys: String, CodingKey { case status, resets_at, kind, utilization }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        status = (try? c.decode(String.self, forKey: .status)) ?? "allowed"
+        resetsAt = (try? c.decode(Double.self, forKey: .resets_at)).map { Date(timeIntervalSince1970: $0) }
+        kind = try? c.decode(String.self, forKey: .kind)
+        utilization = try? c.decode(Double.self, forKey: .utilization)
+    }
+
+    var reached: Bool { status == "rejected" }
+
+    /// "session limit", "weekly limit", …
+    var name: String {
+        switch kind {
+        case nil, "five_hour": "session limit"
+        case "seven_day": "weekly limit"
+        case "seven_day_opus": "weekly Opus limit"
+        case "seven_day_sonnet": "weekly Sonnet limit"
+        case "overage", "seven_day_overage_included": "extra usage limit"
+        case let k?: "\(k.replacingOccurrences(of: "_", with: " ")) limit"
+        }
     }
 }
 

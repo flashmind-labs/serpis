@@ -201,6 +201,49 @@ struct ChatView: View {
         }
     }
 
+    /// Stopped at a usage limit: until when, what happens then, and a way to change that.
+    @ViewBuilder private var limitCard: some View {
+        if let limit = chat.state?.limit, limit.reached, chat.state?.running != true, chat.waiting == nil {
+            let continues = chat.state?.continuesAt != nil
+            HStack(spacing: 10) {
+                Image(systemName: "hourglass").foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(limit.name.prefix(1).uppercased() + limit.name.dropFirst() + " reached").font(.subheadline.weight(.semibold))
+                    Group {
+                        if let at = limit.resetsAt {
+                            Text("Resets ") + Text(at, format: .relative(presentation: .named, unitsStyle: .wide)) + Text(" · ") + Text(continues ? "goes on by itself then" : "waits for you")
+                        } else {
+                            Text(continues ? "Goes on by itself when it resets" : "Waits for you")
+                        }
+                    }
+                    .font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button(continues ? "Don't go on" : "Go on at reset") {
+                    Task { await chat.setContinueAfterLimit(!continues) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .lineLimit(1)
+                .accessibilityIdentifier(continues ? "limit-wait" : "limit-go")
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("limit")
+        }
+    }
+
+    /// Close to a usage limit: how close.
+    @ViewBuilder private var limitWarning: some View {
+        if let limit = chat.state?.limit, limit.status == "allowed_warning" {
+            Text("⚠ \(Int(((limit.utilization ?? 0) * 100).rounded()))% of \(limit.name)")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("limit-warning")
+        }
+    }
+
     /// What runs on in the background, and a way to stop it.
     @ViewBuilder private var backgroundWork: some View {
         let running = chat.background
@@ -256,14 +299,16 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if chat.state?.permissionMode != nil || !chat.background.isEmpty {
+            if chat.state?.permissionMode != nil || !chat.background.isEmpty || chat.state?.limit != nil {
                 HStack(spacing: 10) {
                     permissionMode
+                    limitWarning
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 6)
             }
             backgroundWork
+            limitCard
             approval
             if !images.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {

@@ -1017,6 +1017,10 @@ impl Node {
                 self.with_chat(&chat, |c, h| c.set_permission_mode(h, &mode))??;
                 Response::Ok
             }
+            Request::SetContinueAfterLimit { chat, on } => {
+                self.with_chat(&chat, |c, h| c.set_continue_after_limit(h, on))??;
+                Response::Ok
+            }
             Request::StopTask { chat, task } => {
                 if !self.with_chat(&chat, |c, _| c.stop_task(&task))? {
                     return Err("Nothing runs that task: the chat's Claude Code has stopped".into());

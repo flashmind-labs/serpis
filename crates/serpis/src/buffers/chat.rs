@@ -533,6 +533,8 @@ impl ChatBuffer {
             keep_going: s.keep_going,
             permission_mode: s.permission_mode.clone(),
             background: self.background_tasks().len(),
+            limit: self.held_at_limit().map(|(l, _)| l).or_else(|| self.limit_warning()),
+            continues_at: self.held_at_limit().and_then(|(_, c)| c),
         }
     }
 
@@ -1288,12 +1290,50 @@ pub fn permission_mode_label(mode: &str, t: &crate::theme::Theme) -> (String, Co
 
 impl ChatBuffer {
     /// Switch Claude Code's permission mode for this chat.
+    /// Stopped at a usage limit (until it resets): the limit, and when the chat goes on by
+    /// itself (None: it waits for you).
+    pub fn held_at_limit(&self) -> Option<(serpis_proto::Limit, Option<i64>)> {
+        let s = &self.node.state;
+        let now = unix_now();
+        s.limit.clone().filter(|l| l.reached() && !s.running && l.resets_at.is_none_or(|t| t > now)).map(|l| (l, s.continues_at))
+    }
+
+    /// Close to a usage limit (Claude Code warned), until it resets.
+    pub fn limit_warning(&self) -> Option<serpis_proto::Limit> {
+        let now = unix_now();
+        self.node.state.limit.clone().filter(|l| l.status == "allowed_warning" && l.resets_at.is_none_or(|t| t > now))
+    }
+
+    /// Whether the chat, stopped at a usage limit, goes on by itself when it resets.
+    pub fn set_continue_after_limit(&mut self, on: bool) {
+        self.node.post(Request::SetContinueAfterLimit { chat: self.node.chat.clone(), on });
+        // Shown at once (roughly: the node adds its delay); its state confirms it.
+        self.node.state.continues_at = if on { self.node.state.limit.as_ref().and_then(|l| l.resets_at) } else { None };
+        self.dirty = true;
+    }
+
     pub fn set_permission_mode(&mut self, mode: &str) {
         self.node.post(Request::SetPermissionMode { chat: self.node.chat.clone(), mode: mode.to_string() });
         // Shown at once; the node's state confirms it.
         self.node.state.permission_mode = Some(mode.to_string());
         self.dirty = true;
     }
+}
+
+/// The bar of a chat stopped at a usage limit: "Session limit reached · resets in 1h 12m ·
+/// goes on by itself then".
+fn limit_line(limit: &serpis_proto::Limit, continues: Option<i64>, now: i64) -> String {
+    let name = limit.name();
+    let mut s = format!("{}{} reached", name[..1].to_uppercase(), &name[1..]);
+    if let Some(t) = limit.resets_at {
+        s.push_str(&format!(" · resets in {}", crate::claude_usage::until(t as u64, now as u64)));
+    }
+    s.push_str(if continues.is_some() { " · goes on by itself then" } else { " · waits for you" });
+    s
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// What a tool call started on the side: the work's state, and a subagent's steps.
@@ -1749,9 +1789,12 @@ impl Buffer for ChatBuffer {
         let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
         // A tool call waiting for the person: a bar above the composer to answer it.
         let waiting = self.waiting();
-        let ask_h = if waiting.is_some() { (40.0 * k).round() } else { 0.0 };
+        // Else stopped at a usage limit: a bar that says until when, and what happens then.
+        let held = if waiting.is_none() { self.held_at_limit() } else { None };
+        let barred = waiting.is_some() || held.is_some();
+        let ask_h = if barred { (40.0 * k).round() } else { 0.0 };
         let ask_bar = Rect::from_min_max(egui::pos2(left, card.top() - 8.0 * k - ask_h), egui::pos2(left + col_w, card.top() - 8.0 * k));
-        let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k - if waiting.is_some() { ask_h + 8.0 * k } else { 0.0 }));
+        let transcript_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), card.top() - 6.0 * k - if barred { ask_h + 8.0 * k } else { 0.0 }));
 
         // Transcript.
         let t_focus = focused && self.focus == Focus::Transcript;
@@ -1914,6 +1957,55 @@ impl Buffer for ChatBuffer {
             if clicked {
                 run = Some("chat-stop-task");
             }
+        }
+        // Close to a usage limit: how close, until it resets.
+        if let Some(l) = self.limit_warning() {
+            let label = format!("⚠ {}% of {}", (l.utilization.unwrap_or(0.0) * 100.0).round(), l.name());
+            let tip = match l.resets_at {
+                Some(t) => format!("Claude Code says this chat's account is close to its {}: it resets in {}. claude-code-usage shows all its limits", l.name(), crate::claude_usage::until(t as u64, unix_now() as u64)),
+                None => format!("Claude Code says this chat's account is close to its {}. claude-code-usage shows all its limits", l.name()),
+            };
+            let w = crate::chrome::text_width(&painter, &label, small.clone()) + 20.0 * k;
+            let r = Rect::from_min_size(egui::pos2(kr.right() + 2.0 * k, cy - 13.0 * k), egui::vec2(w, 26.0 * k));
+            let resp = ui.interact(r, id.with("limit"), egui::Sense::click()).on_hover_text(tip);
+            if resp.hovered() {
+                painter.rect_filled(r, 8.0 * k, crate::chrome::hover_bg(&theme));
+            }
+            crate::chrome::text(&painter, egui::pos2(r.left() + 10.0 * k, cy), &label, small.clone(), theme.yellow, w);
+            hits.push(("limit", r));
+            kr = r;
+            if resp.clicked() {
+                run = Some("claude-code-usage");
+            }
+        }
+        if let Some((limit, continues)) = &held {
+            let r = ask_bar;
+            painter.rect_filled(r, 10.0 * k, theme.bg_elevated);
+            painter.rect_stroke(r, 10.0 * k, Stroke::new(1.0, crate::chrome::tint(theme.red, 0.7)), egui::StrokeKind::Inside);
+            let cy = r.center().y;
+            let mut x = r.right() - 8.0 * k;
+            let (key, label, tip, main) = if continues.is_some() {
+                ("limit-wait", "Don't go on", "Wait for you instead of going on by itself when the limit resets (chat-toggle-continue-after-limit)", false)
+            } else {
+                ("limit-go", "Go on at reset", "Go on by itself when the limit resets (chat-toggle-continue-after-limit; default: claude-code-continue-after-limit)", true)
+            };
+            let w = crate::chrome::text_width(&painter, label, small.clone()) + 22.0 * k;
+            let b = Rect::from_min_size(egui::pos2(x - w, cy - 13.0 * k), egui::vec2(w, 26.0 * k));
+            x = b.left() - 6.0 * k;
+            let resp = ui.interact(b, id.with(key), egui::Sense::click()).on_hover_text(tip);
+            let (bg, fg) = if main { (theme.accent, crate::chrome::on(theme.accent, &theme)) } else { (if resp.hovered() { crate::chrome::hover_bg(&theme) } else { theme.chip() }, theme.fg) };
+            painter.rect_filled(b, 8.0 * k, if main && resp.hovered() { theme.accent.gamma_multiply(1.15) } else { bg });
+            crate::chrome::text(&painter, egui::pos2(b.left() + 11.0 * k, cy), label, small.clone(), fg, w);
+            hits.push((key, b));
+            if resp.clicked() {
+                run = Some("chat-toggle-continue-after-limit");
+            }
+            let label = limit_line(limit, *continues, unix_now());
+            let lx = r.left() + 14.0 * k;
+            crate::chrome::text(&painter, egui::pos2(lx, cy), &label, small.clone(), theme.fg, (x - lx - 8.0 * k).max(0.0));
+            hits.push(("limit-bar", r));
+            // Its countdown moves on.
+            ui.ctx().request_repaint_after(Duration::from_secs(20));
         }
         if let Some((_, name, args, always)) = &waiting {
             let r = ask_bar;

@@ -462,6 +462,39 @@ fn chats_run_on_claude_code() {
     }
     assert!(!alive(pid), "the command claude started, in a process group of its own, ended with it");
 
+    // Near a usage limit, the chat says how near (until the window resets).
+    let mut lim = w.chat();
+    w.send(&mut lim, "near the limit");
+    let l = lim.state().limit.expect("the warning shows");
+    assert_eq!((l.status.as_str(), l.kind.as_deref(), l.utilization), ("allowed_warning", Some("five_hour"), Some(0.85)));
+    assert_eq!(last_text(lim.entries()), "echo: near the limit");
+    // At it, the turn stops, and goes on by itself once the limit resets.
+    w.host.vars.insert("claude-code-limit-continue-delay".into(), json!(0));
+    w.send(&mut lim, "hit the limit");
+    let s = lim.state();
+    assert!(s.limit.as_ref().is_some_and(|l| l.reached()), "{s:?}");
+    assert!(s.continues_at.is_some(), "it waits for the reset");
+    w.until(&mut lim, |c| !c.running() && last_text(c.entries()) == format!("echo: {}", serpis_chat::LIMIT_CONTINUE_PROMPT));
+    assert!(lim.state().continues_at.is_none() && lim.state().limit.is_none());
+    // Told not to, it waits for the person; told to again, it goes on at the reset. A resumed
+    // chat still does.
+    w.send(&mut lim, "hit the limit for an hour");
+    let at = lim.state().continues_at.unwrap();
+    lim.set_continue_after_limit(&mut w.host, false).unwrap();
+    assert!(lim.state().continues_at.is_none());
+    lim.set_continue_after_limit(&mut w.host, true).unwrap();
+    assert_eq!(lim.state().continues_at, Some(at));
+    let path = lim.session.as_ref().map(|s| s.path.clone()).unwrap();
+    let mut held = w.chat();
+    held.restore(&mut w.host, &serpis_chat::session::load(&path).unwrap());
+    assert_eq!(held.state().continues_at, Some(at));
+    assert!(held.state().limit.is_some_and(|l| l.reached()));
+    // Something sent before it resets goes now instead.
+    w.send(&mut held, "hello again");
+    assert!(held.state().continues_at.is_none());
+    assert!(held.set_continue_after_limit(&mut w.host, true).is_err(), "no longer stopped at the limit");
+    drop((lim, held));
+
     assert!(w.host.notices.is_empty(), "{:?}", w.host.notices);
     let _ = std::fs::remove_dir_all(&w.home);
 }

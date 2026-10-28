@@ -43,6 +43,10 @@ pub struct ChatInfo {
     pub permission_mode: Option<String>,
     /// How many tasks run in the background (Claude Code's shells and agents).
     pub background: usize,
+    /// Its usage limits, while Claude Code warns of one or refuses at one.
+    pub limit: Option<serpis_proto::Limit>,
+    /// When it goes on by itself after the usage limit it stopped at resets (unix seconds).
+    pub continues_at: Option<i64>,
 }
 
 pub fn usage_json(u: &Usage) -> Value {
@@ -73,6 +77,8 @@ impl ChatInfo {
             "keep_going": self.keep_going,
             "permission_mode": self.permission_mode,
             "background": self.background,
+            "limit": self.limit,
+            "continues_at": self.continues_at,
             "context": {
                 "used": self.context.0.unwrap_or(0),
                 "window": self.context.1,

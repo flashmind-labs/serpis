@@ -115,6 +115,15 @@ final class ChatModel: Identifiable {
         }
     }
 
+    /// Whether the chat, stopped at a usage limit, goes on by itself when it resets.
+    func setContinueAfterLimit(_ on: Bool) async {
+        do {
+            _ = try await app?.call(machine, ["op": "set_continue_after_limit", "chat": chat, "on": on])
+        } catch {
+            notice = AppModel.describe(error)
+        }
+    }
+
     /// Ask the agent to stop the work `tool` started.
     func stopTask(_ tool: Tool) async {
         guard let task = tool.side.task?.id else { return }

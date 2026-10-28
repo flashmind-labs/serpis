@@ -323,8 +323,12 @@ Next:
 - *Done*: `claude-code-usage` (and `serpis.agent.claude_code_usage`): the CLI's `get_usage`
   control request (its `/usage`, experimental there: plan windows, extra usage, advice), asked
   of the chat's machine (proto `ClaudeCodeUsage`) or this one; the stand-in answers made-up
-  numbers. Next there: the session's share in the header from `rate_limit_event`s, and the
-  phone (a usage sheet from the model menu).
+  numbers. Next there: the phone (a usage sheet from the model menu).
+- *Done*: usage limits from `rate_limit_event` (and a refused reply's
+  `api_error_params.rate_limit_info`): `ChatState::limit`, a warning in the composer, and at a
+  limit a bar (phone: a card) with its reset; the chat goes on by itself after it
+  (`continues_at`, a timer in the chat, kept as a `claude-code-limit` entry so a restarted node
+  re-arms it), `SetContinueAfterLimit` to wait instead.
 - The account (`initialize`'s `account`) in the model picker and header.
 - Claude Code's `system/compact_boundary` and its context use in the header.
 

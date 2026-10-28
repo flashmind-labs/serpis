@@ -10,7 +10,9 @@
 //! real `sleep`, in a process group of its own, logged as `{"spawned": pid}`) that finishes
 //! after the turn ("forever": never), "monitor" a Monitor that runs until stopped; work
 //! finished after a turn gets a turn of its own, as
-//! Claude Code does. Anything else is echoed after a thought.
+//! Claude Code does. "hit the limit" is refused at the session limit, which resets 2s later
+//! ("for an hour": an hour later); "near the limit" warns that it is 85% used, then echoes.
+//! Anything else is echoed after a thought.
 
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
@@ -217,6 +219,20 @@ fn main() {
         }
         let text = msg["message"]["content"].as_array().and_then(|b| b.iter().rev().find_map(|b| b["text"].as_str())).unwrap_or("").to_string();
         n += 1;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        if text.contains("hit the limit") {
+            // Refused at the session limit: the event, then the reply that says so.
+            let resets = now + if text.contains("for an hour") { 3600 } else { 2 };
+            let info = json!({"status": "rejected", "resetsAt": resets, "rateLimitType": "five_hour", "utilization": 1.0});
+            out(json!({"type": "rate_limit_event", "rate_limit_info": info, "uuid": format!("r{n}"), "session_id": session}));
+            let said = "You've hit your session limit · resets soon";
+            out(json!({"type": "assistant", "message": {"id": format!("m{n}"), "model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": said}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true, "api_error": "usage_limit_reached", "api_error_params": {"rate_limit_info": info}}));
+            result(&session, Some(said));
+            continue;
+        }
+        if text.contains("near the limit") {
+            out(json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": now + 3600, "rateLimitType": "five_hour", "utilization": 0.85}, "uuid": format!("r{n}"), "session_id": session}));
+        }
         if text.contains("make a plan") {
             // A plan to approve (ExitPlanMode): approved, it goes on in the mode it is given;
             // refused, it says what it heard.

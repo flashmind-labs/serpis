@@ -409,6 +409,62 @@ local steps = {
     T.check("the chat's session is Claude Code's", log:find('"--session-id"', 1, true) ~= nil, true)
   end,
   function(go)
+    -- Close to a usage limit: the composer says how close.
+    d.text("near the limit")
+    T.press("RET")
+    when(function() return idle_with("echo: near the limit")() and d.composer()["limit"] ~= nil end, go)
+    return false
+  end,
+  function()
+    local l = (serpis.chat.info() or {}).limit or {}
+    T.check("the composer warns of the limit", d.composer()["limit"] ~= nil, true)
+    T.check("chat.info says which and how full", (l.status or "") .. " " .. (l.kind or "") .. " " .. tostring(l.utilization), "allowed_warning five_hour 0.85")
+  end,
+  function(go)
+    -- At it: a bar says until when, and that the chat goes on by itself then.
+    serpis.var.set("claude-code-limit-continue-delay", 0)
+    d.text("hit the limit for an hour")
+    T.press("RET")
+    when(function() return not serpis.chat.running() and d.composer()["limit-wait"] ~= nil end, go)
+    return false
+  end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      serpis.defer(1000, function() d.screenshot(shots .. "/claude-code-limit.png"); serpis.defer(500, go) end)
+      return false
+    end
+  end,
+  function(go)
+    local info = serpis.chat.info() or {}
+    T.check("stopped at the limit", (info.limit or {}).status, "rejected")
+    T.check("it goes on by itself in an hour", info.continues_at ~= nil and info.continues_at > os.time() + 3500, true)
+    T.check("the warning gives way to the bar", d.composer()["limit"], nil)
+    -- Told to wait instead, it does; told again, it goes on at the reset.
+    click("limit-wait")
+    when(function() return (serpis.chat.info() or {}).continues_at == nil and d.composer()["limit-go"] ~= nil end, go)
+    return false
+  end,
+  function(go)
+    T.check("Don't go on makes it wait for you", (serpis.chat.info() or {}).continues_at, nil)
+    serpis.command.run("chat-toggle-continue-after-limit")
+    when(function() return (serpis.chat.info() or {}).continues_at ~= nil and d.composer()["limit-wait"] ~= nil end, go)
+    return false
+  end,
+  function(go)
+    T.check("chat-toggle-continue-after-limit has it go on again", (serpis.chat.info() or {}).continues_at ~= nil, true)
+    -- A limit that resets in moments: the chat goes on by itself.
+    d.text("hit the limit")
+    T.press("RET")
+    when(function() return idle_with("echo: Your usage limit has reset. Continue where you left off.")() and d.composer()["limit-wait"] == nil end, go)
+    return false
+  end,
+  function()
+    T.check("it went on after the reset", has("echo: Your usage limit has reset. Continue where you left off."), true)
+    T.check("and the bar is gone", d.composer()["limit-bar"], nil)
+    T.check("as is the limit", (serpis.chat.info() or {}).limit, nil)
+  end,
+  function(go)
     -- Its /usage: the stand-in's made-up plan, asked through M-x.
     T.press("M-x")
     when(function() return d.minibuffer() ~= nil end, function()

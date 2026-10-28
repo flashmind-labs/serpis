@@ -141,6 +141,42 @@ impl Task {
     }
 }
 
+/// Where an agent's account stands against its usage limits (Claude Code's subscription
+/// windows), as last reported.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Limit {
+    /// `allowed`, `allowed_warning` (close to a limit) or `rejected` (at it: requests are
+    /// refused until it resets).
+    pub status: String,
+    /// When the window resets, in unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    /// Which window: `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// How full it is, 0 to 1 (past 1 when usage ran over).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<f64>,
+}
+
+impl Limit {
+    pub fn reached(&self) -> bool {
+        self.status == "rejected"
+    }
+
+    /// The window in words: "session limit", "weekly limit", "weekly Opus limit".
+    pub fn name(&self) -> String {
+        match self.kind.as_deref() {
+            Some("five_hour") | None => "session limit".into(),
+            Some("seven_day") => "weekly limit".into(),
+            Some("seven_day_opus") => "weekly Opus limit".into(),
+            Some("seven_day_sonnet") => "weekly Sonnet limit".into(),
+            Some("overage" | "seven_day_overage_included") => "extra usage limit".into(),
+            Some(k) => format!("{} limit", k.replace('_', " ")),
+        }
+    }
+}
+
 /// A tool call waiting for the person's go-ahead (Claude Code's permission prompts).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ask {
@@ -261,6 +297,14 @@ pub struct ChatState {
     /// How much the reply being written has thought so far (an estimate), while it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_tokens: Option<u64>,
+    /// Its usage limits, as Claude Code last reported them (while that still applies: until
+    /// the window resets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<Limit>,
+    /// When the chat goes on by itself, in unix seconds: it stopped at a usage limit, and
+    /// continues once that resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues_at: Option<i64>,
 }
 
 fn yes() -> bool {
@@ -288,6 +332,8 @@ impl Default for ChatState {
             keep_going: true,
             permission_mode: None,
             thinking_tokens: None,
+            limit: None,
+            continues_at: None,
         }
     }
 }

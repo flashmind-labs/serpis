@@ -1103,6 +1103,22 @@ pub fn install(ed: &mut Editor) {
         ed.message(if now { "This chat keeps going after its node restarts" } else { "This chat waits for you after its node restarts" });
         Ok(())
     });
+    ed.define_command("chat-toggle-continue-after-limit", "Whether this chat, stopped at a Claude Code usage limit, goes on by itself when the limit resets, or waits for you (param: true or false; default: claude-code-continue-after-limit).", o, |ed, a| {
+        let on = a.params.first().and_then(Value::as_bool);
+        let now = with_chat(ed, |c, _| {
+            c.held_at_limit().map(|(_, continues)| {
+                let on = on.unwrap_or(continues.is_none());
+                c.set_continue_after_limit(on);
+                on
+            })
+        })?;
+        match now {
+            Some(true) => ed.message("This chat goes on by itself when the limit resets"),
+            Some(false) => ed.message("This chat waits for you after the limit resets"),
+            None => anyhow::bail!("This chat isn't stopped at a usage limit"),
+        }
+        Ok(())
+    });
     ed.define_command("chat-select-thinking", "Choose the thinking level from a picker (param: level, e.g. \"high\").", o, |ed, a| {
         if let Some(level) = a.str(0).map(str::to_string) {
             let id = ed.chat_id(None)?;

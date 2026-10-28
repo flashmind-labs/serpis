@@ -412,6 +412,16 @@ went, and Claude Code's advice from the machine's last week of transcripts
 machine, else this one (or the machine you name), and nothing reaches a model. Scripts get the
 same answer from `serpis.agent.claude_code_usage(function(usage, err) ... end, {machine = ...})`.
 
+Usage limits show where you work. When Claude Code warns that the account is close to one, the
+composer says how close (`⚠ 85% of session limit`; a click opens `claude-code-usage`). When a
+turn is refused at one, a bar above the composer says which limit, when it resets, and that the
+chat goes on by itself then: its machine's node sends `claude-code-limit-continue-prompt`
+(`claude-code-limit-continue-delay` seconds after the reset), so this machine can sleep, and a
+node restarted meanwhile still does it. The bar's button, or `chat-toggle-continue-after-limit`,
+makes it wait for you instead (`claude-code-continue-after-limit` = `false` makes that the
+default); anything you send before the reset goes at once. The phone shows the same. Scripts
+see it in `serpis.chat.info()` (`limit`, `continues_at`) and the `usage-limit` hook.
+
 ## Terminals on any machine
 
 A terminal on this machine is a child of the window, on a PTY of its own: the quickest it can

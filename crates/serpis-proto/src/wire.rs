@@ -107,6 +107,9 @@ pub enum Request {
     Answer { chat: String, tool: String, decision: crate::Decision },
     /// Switch a Claude Code chat's permission mode (`ChatState::permission_mode`), at once.
     SetPermissionMode { chat: String, mode: String },
+    /// Whether a chat stopped at a usage limit goes on by itself when it resets
+    /// (`ChatState::continues_at`).
+    SetContinueAfterLimit { chat: String, on: bool },
     /// Stop work the chat's agent runs on the side (a tool entry's `task`, by its id).
     StopTask { chat: String, task: String },
     Compact {
