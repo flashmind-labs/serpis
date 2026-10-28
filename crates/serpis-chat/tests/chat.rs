@@ -97,6 +97,8 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     for (dir, text) in [
         (agent.join("skills/eng/review"), "---\nname: review\ndescription: Review a change. Use when asked to review.\n---\nRead the whole diff first.\n"),
         (work.join(".pi/skills/deploy"), "---\ndescription: Deploy the project.\n---\nRun the deploy script.\n"),
+        // Claude Code's own: not for serpis's agent.
+        (home.join(".claude/skills/pdf"), "---\ndescription: Work with PDFs.\n---\nUse the pdf tools.\n"),
     ] {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), text).unwrap();
@@ -169,6 +171,7 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     let system = mock.log()[0].body["messages"][0]["content"].to_string();
     assert!(system.contains("<available_skills>") && system.contains("<name>review</name>") && system.contains("<name>deploy</name>"), "{system}");
     assert!(system.contains("Use the read tool to load a skill's file"), "{system}");
+    assert!(!system.contains("<name>pdf</name>"), "Claude Code's skills stay Claude Code's");
     assert_eq!(chat.skills(&host).iter().map(|s| (s.name.as_str(), s.source.as_str())).collect::<Vec<_>>(), [("review", "user"), ("deploy", "project")]);
     // /skill:name sends its instructions with what follows; the transcript shows it as typed.
     chat.submit(&mut host, "/skill:review the last commit".into(), vec![], false, None).unwrap();

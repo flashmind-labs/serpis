@@ -79,6 +79,16 @@ pub fn discover(p: &Places) -> Vec<Skill> {
     found
 }
 
+/// The names of Claude Code's own skills (`~/.claude/skills`, the project's `.claude/skills`):
+/// what a Claude Code chat has already.
+pub fn claude_names(home: &Path, cwd: &Path) -> HashSet<String> {
+    let mut out = Vec::new();
+    for dir in [home.join(".claude").join("skills"), cwd.join(".claude").join("skills")] {
+        walk(&dir, "claude", true, &mut out);
+    }
+    out.into_iter().map(|s| s.name).collect()
+}
+
 /// A directory's skills: itself when it holds `SKILL.md`, else what its subdirectories hold
 /// (and, at its top, Markdown files that describe themselves).
 fn walk(dir: &Path, source: &str, top: bool, out: &mut Vec<Skill>) {

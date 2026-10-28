@@ -151,6 +151,11 @@ fn setup() -> World {
     for d in [&work, &agent, &sessions] {
         std::fs::create_dir_all(d).unwrap();
     }
+    // serpis's skills (pi's folder), one of them also among Claude Code's own.
+    for (dir, name) in [(agent.join("skills/deploy"), "deploy"), (agent.join("skills/review"), "review"), (home.join(".claude/skills/review"), "review"), (home.join(".claude/skills/pdf"), "pdf")] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: The {name} skill.\n---\nDo {name}.\n")).unwrap();
+    }
     let log = home.join("claude.log");
     // SAFETY: set once, before any thread of ours starts; the only test in this binary.
     unsafe {
@@ -193,6 +198,11 @@ fn chats_run_on_claude_code() {
     assert_eq!(starts.len(), 1);
     assert!(w.log_lines().iter().any(|l| l["agent_env"] == "1"), "claude runs with SERPIS_AGENT, as its commands then do");
     assert_eq!(after(&starts[0], "--thinking-display"), Some("summarized"), "its thinking is asked for");
+    // It is offered serpis's skills to load as its own; those it has already aren't repeated,
+    // and its own stay its own.
+    let offered = after(&starts[0], "--append-system-prompt").unwrap_or("");
+    assert!(offered.contains("<name>deploy</name>") && offered.contains("Use the Read tool"), "{offered}");
+    assert!(!offered.contains("<name>review</name>") && !offered.contains("<name>pdf</name>"), "{offered}");
 
     // While it thinks, the chat says how much (its estimate), and forgets it after.
     chat.submit(&mut w.host, "think it over".into(), vec![], false, None).unwrap();

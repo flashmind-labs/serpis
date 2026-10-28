@@ -168,8 +168,13 @@ Claude Code's (`~/.claude/skills`), `agent-skills` = `false` turns them off.
 
 `/skill:name what to do` sends a skill's instructions with the message, for when it should apply
 for sure (the transcript shows what you typed); `C-c /` (`chat-select-skill`) picks one and starts
-the message with it. In a Claude Code chat, `/skill:name` sends pi's skills the same way; Claude
-Code's own you call as it does, `/name`.
+the message with it.
+
+Claude Code chats have both: Claude Code's own skills (`~/.claude/skills`, its plugins), which
+`claude` loads itself, and serpis's, listed in its system prompt the same way for it to load when
+a task matches (`claude-code-skills`; those it already has under the same name are left out). In
+them, `/skill:name` sends one of serpis's, and Claude Code's own you call as it does, `/name`.
+serpis's own agent doesn't see Claude Code's skills (`agent-skills-claude` adds them).
 
 ## Notifications
 
