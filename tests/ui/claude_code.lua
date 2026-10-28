@@ -478,6 +478,26 @@ local steps = {
     T.check("as is the limit", (serpis.chat.info() or {}).limit, nil)
   end,
   function(go)
+    -- A command it waits on: its card says C-c C-b moves it to the background, which does.
+    d.text("long command")
+    T.press("RET")
+    when(function() return has("C-c C-b moves it to the background") end, go)
+    return false
+  end,
+  function(go)
+    T.check("the running command's card offers to move it", has("Running · ") or has("C-c C-b moves it to the background"), true)
+    T.press("C-c C-b")
+    when(function() return idle_with("Moved it to the background; going on.")() and (serpis.chat.info() or {}).background == 1 end, go)
+    return false
+  end,
+  function(go)
+    T.check("C-c C-b moved it, and the turn went on", has("Moved it to the background; going on."), true)
+    T.check("it runs on in the background", (serpis.chat.info() or {}).background, 1)
+    T.press("C-c C-k")
+    when(function() return (serpis.chat.info() or {}).background == 0 end, go)
+    return false
+  end,
+  function(go)
     -- How full its context is, as Claude Code counts it; compacting by itself, noted where it did.
     d.text("compact yourself")
     T.press("RET")

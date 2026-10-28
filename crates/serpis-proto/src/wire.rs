@@ -112,6 +112,9 @@ pub enum Request {
     SetContinueAfterLimit { chat: String, on: bool },
     /// Stop work the chat's agent runs on the side (a tool entry's `task`, by its id).
     StopTask { chat: String, task: String },
+    /// Move what a running tool call does (a command, a subagent) to the background, by the
+    /// tool entry's id: the call returns and the turn goes on.
+    BackgroundTask { chat: String, tool: String },
     Compact {
         chat: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

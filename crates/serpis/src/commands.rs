@@ -999,6 +999,36 @@ pub fn install(ed: &mut Editor) {
         },
     );
     ed.define_command(
+        "chat-background-task",
+        "Move what Claude Code waits on (a command, a subagent) to the background, as Ctrl+B in its TUI: the call returns and the turn goes on while it runs. The only one, or the one you pick. Param: its tool call's id.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            let running = with_chat(ed, |c, _| c.foreground_tasks())?;
+            let send = move |ed: &mut Editor, tool: String| {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.background_task(&tool));
+                ed.message("Moved to the background");
+            };
+            if let Some(t) = a.str(0) {
+                send(ed, t.to_string());
+                return Ok(());
+            }
+            match running.len() {
+                0 => ed.message("Nothing runs in the foreground (only Claude Code chats move commands to the background)"),
+                1 => send(ed, running[0].0.clone()),
+                _ => {
+                    let cands = running.iter().map(|(tool, t)| Candidate::new(&t.description).value(tool.clone()).detail(t.kind.clone())).collect();
+                    ed.completing_read("Move to the background: ", cands, true, move |ed, c, _| {
+                        if let Some(c) = c {
+                            send(ed, c.value);
+                        }
+                    });
+                }
+            }
+            Ok(())
+        },
+    );
+    ed.define_command(
         "chat-stop-task",
         "Stop work the agent left running in the background (Claude Code's background commands and agents): the only one, or the one you pick. Param: its task id.",
         o,

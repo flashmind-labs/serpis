@@ -278,6 +278,49 @@ fn main() {
         if text.contains("near the limit") {
             out(json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": now + 3600, "rateLimitType": "five_hour", "utilization": 0.85}, "uuid": format!("r{n}"), "session_id": session}));
         }
+        if text.contains("long command") {
+            // A command it waits for, until moved to the background (`background_tasks`, its
+            // Ctrl+B): then the call returns and the turn goes on.
+            let id = format!("t{n}");
+            let task = format!("b{n}");
+            start(&format!("m{n}a"));
+            call(0, &id, "Bash", &json!({"command": "cargo build --release", "description": "build it"}));
+            stop("tool_use");
+            system("task_started", json!({"task_id": task, "tool_use_id": id, "description": "build it", "task_type": "local_bash", "is_backgrounded": false}));
+            started.insert(task.clone(), Instant::now());
+            loop {
+                let Ok(l) = rx.recv() else { return };
+                let v: Value = serde_json::from_str(&l).unwrap_or_default();
+                log(json!({"got": v}));
+                if v["request"]["subtype"] == "get_task_output" || v["request"]["subtype"] == "get_context_usage" {
+                    let r = if v["request"]["subtype"] == "get_task_output" {
+                        json!({"output": "Compiling serpis\n", "total_bytes": 17, "truncated": false})
+                    } else {
+                        json!({"totalTokens": context, "maxTokens": 200_000, "autoCompactThreshold": 184_000, "isAutoCompactEnabled": true})
+                    };
+                    out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": v["request_id"], "response": r}}));
+                    continue;
+                }
+                if v["request"]["subtype"] == "background_tasks" && v["request"]["tool_use_id"] == json!(id) {
+                    out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": v["request_id"], "response": {"backgrounded": true}}}));
+                    system("task_updated", json!({"task_id": task, "patch": {"is_backgrounded": true}}));
+                    tool_result(&id, &format!("Command running in background with ID: {task}. Output is being written to: /tmp/out"), None);
+                    start(&format!("m{n}b"));
+                    text_block(0, "Moved it to the background; going on.");
+                    stop("end_turn");
+                    result(&session, None);
+                    let child = std::process::Command::new("sleep").arg("300").process_group(0).spawn().expect("sleep");
+                    running.push((task.clone(), id.clone(), child));
+                    break;
+                }
+                if v["request"]["subtype"] == "interrupt" {
+                    out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": v["request_id"]}}));
+                    result(&session, Some("interrupted"));
+                    break;
+                }
+            }
+            continue;
+        }
         if text.contains("make a plan") {
             // A plan to approve (ExitPlanMode): approved, it goes on in the mode it is given;
             // refused, it says what it heard.

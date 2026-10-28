@@ -103,7 +103,21 @@ final class ChatModel: Identifiable {
 
     /// Tool calls whose work runs on in the background (Claude Code's commands, agents).
     var background: [Tool] {
-        entries.compactMap(Tool.init).filter(\.working)
+        entries.compactMap(Tool.init).filter { $0.working && $0.side.task?.background == true }
+    }
+
+    /// What it waits on now: a command or subagent that can move to the background.
+    var foreground: [Tool] {
+        entries.compactMap(Tool.init).filter { $0.result == nil && $0.side.task?.running == true && $0.side.task?.background == false }
+    }
+
+    /// Move what `tool` runs to the background (Claude Code's Ctrl+B): the turn goes on.
+    func backgroundTask(_ tool: Tool) async {
+        do {
+            _ = try await app?.call(machine, ["op": "background_task", "chat": chat, "tool": tool.id])
+        } catch {
+            notice = AppModel.describe(error)
+        }
     }
 
     /// Switch Claude Code's permission mode for this chat.

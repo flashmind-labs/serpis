@@ -347,6 +347,22 @@ impl ChatBuffer {
     }
 
     /// Ask the agent to stop task `task` (one of [`Self::background_tasks`]).
+    /// What runs in the foreground now: tool calls waiting on a command or subagent (Claude
+    /// Code's), which can move to the background. (tool id, task.)
+    pub fn foreground_tasks(&self) -> Vec<(String, serpis_proto::Task)> {
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Tool { id, result: None, task: Some(t), .. } if t.running() && !t.background => Some((id.clone(), (**t).clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn background_task(&mut self, tool: &str) {
+        self.node.post(Request::BackgroundTask { chat: self.node.chat.clone(), tool: tool.to_string() });
+    }
+
     pub fn stop_task(&mut self, task: &str) {
         self.node.post(Request::StopTask { chat: self.node.chat.clone(), task: task.to_string() });
     }
@@ -1543,9 +1559,10 @@ fn tool_lines(
         printed(&mut body, task);
     } else if body.is_empty()
         && result.is_none()
-        && let Some(task) = side.task.filter(|t| t.running() && t.kind == "bash" && t.output.is_some())
+        && let Some(task) = side.task.filter(|t| t.running() && t.kind == "bash")
     {
         // A command it waits for, printing as it goes (its result replaces this).
+        body.push((StyledLine::new(format!("Running{} · C-c C-b moves it to the background", size(task)), Face::Meta), None));
         printed(&mut body, task);
     } else if body.is_empty() && side.task.is_some_and(|t| t.running() && t.kind == "agent") {
         body.push((StyledLine::new(side.task.and_then(|t| t.summary.clone()).unwrap_or_else(|| "Starting…".into()), Face::Meta), None));

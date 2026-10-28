@@ -244,6 +244,25 @@ struct ChatView: View {
         }
     }
 
+    /// What it waits on (a command, a subagent), and a way to move it to the background.
+    @ViewBuilder private var foregroundWork: some View {
+        if let t = chat.foreground.first {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.mini)
+                Text(t.side.task?.description.isEmpty == false ? t.side.task!.description : t.command)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("running").font(.footnote).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Background") { Task { await chat.backgroundTask(t) } }
+                    .font(.footnote)
+                    .accessibilityIdentifier("move-to-background")
+            }
+            .padding(.horizontal, 6)
+        }
+    }
+
     /// What runs on in the background, and a way to stop it.
     @ViewBuilder private var backgroundWork: some View {
         let running = chat.background
@@ -307,6 +326,7 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, 6)
             }
+            foregroundWork
             backgroundWork
             limitCard
             approval
@@ -366,6 +386,7 @@ struct ChatView: View {
                     .foregroundStyle(Color(.systemBackground))
             }
             .accessibilityLabel("Stop")
+            .accessibilityIdentifier("abort")
         } else {
             Button(action: send) {
                 Image(systemName: "arrow.up")

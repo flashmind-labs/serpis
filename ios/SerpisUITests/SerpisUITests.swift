@@ -288,10 +288,32 @@ final class SerpisUITests: XCTestCase {
         item.tap()
         XCTAssertTrue(running.waitForNonExistence(timeout: 30), "stopped, it shows no more")
 
+        // A command it waits on moves to the background from the phone; the turn goes on.
+        XCTAssertTrue(app.buttons["abort"].waitForNonExistence(timeout: 30), "the chat is idle")
+        composer.tap()
+        composer.typeText("long command")
+        app.buttons["Send"].tap()
+        let move = app.buttons["move-to-background"]
+        XCTAssertTrue(move.waitForExistence(timeout: 30), "what it waits on offers to move to the background")
+        shot("15b-foreground")
+        // (The keyboard away first: as it goes, it moves what is above it.)
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(move.waitForExistence(timeout: 5))
+        move.tap()
+        let movedOn = app.staticTexts["Moved it to the background; going on."].waitForExistence(timeout: 30)
+        if !movedOn {
+            XCTFail("not moved; alerts: \(app.alerts.allElementsBoundByIndex.map { $0.staticTexts.allElementsBoundByIndex.map(\.label) }); on screen: \(app.debugDescription.components(separatedBy: "\n").filter { $0.contains("Button") || $0.contains("StaticText") }.suffix(25).joined(separator: " | "))")
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["background"].waitForExistence(timeout: 10), "and it runs in the background")
+        app.descendants(matching: .any)["background"].buttons["Stop"].tap()
+        let built = app.buttons["build it"]
+        if built.waitForExistence(timeout: 5) { built.tap() }
+        XCTAssertTrue(app.descendants(matching: .any)["background"].waitForNonExistence(timeout: 30))
+
         // Close to a usage limit, it says how close; stopped at one, until when, and that it
         // goes on by itself then (or, told so, waits). Sent once the chat is idle, so it isn't
         // taken in by the turn still ending.
-        XCTAssertTrue(app.buttons["Stop"].waitForNonExistence(timeout: 30), "the chat is idle")
+        XCTAssertTrue(app.buttons["abort"].waitForNonExistence(timeout: 30), "the chat is idle")
         composer.tap()
         composer.typeText("near the limit")
         app.buttons["Send"].tap()

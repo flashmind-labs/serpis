@@ -138,6 +138,14 @@ impl ClaudeCode {
 
     /// Ask Claude Code to stop background task `task` (a command, a subagent). False when
     /// there is no process to ask.
+    /// Move the command (or subagent) tool call `tool` runs to the background, as Ctrl+B in its
+    /// TUI does: the call returns at once, and the turn goes on while it runs. False when it
+    /// has no process to ask.
+    pub fn background_task(&self, tool: &str) -> bool {
+        let line = json!({"type": "control_request", "request_id": format!("serpis-background-{tool}"), "request": {"subtype": "background_tasks", "tool_use_id": tool}});
+        self.writer.lock().unwrap().as_ref().is_some_and(|w| w.send(format!("{line}\n")).is_ok())
+    }
+
     pub fn stop_task(&self, task: &str) -> bool {
         let line = json!({"type": "control_request", "request_id": format!("serpis-stop-{task}"), "request": {"subtype": "stop_task", "task_id": task}});
         self.writer.lock().unwrap().as_ref().is_some_and(|w| w.send(format!("{line}\n")).is_ok())

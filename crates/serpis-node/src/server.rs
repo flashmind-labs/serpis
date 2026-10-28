@@ -1034,6 +1034,12 @@ impl Node {
                 self.with_chat(&chat, |c, h| c.set_continue_after_limit(h, on))??;
                 Response::Ok
             }
+            Request::BackgroundTask { chat, tool } => {
+                if !self.with_chat(&chat, |c, _| c.background_task(&tool))? {
+                    return Err("Nothing runs it: the chat's Claude Code has stopped".into());
+                }
+                Response::Ok
+            }
             Request::StopTask { chat, task } => {
                 if !self.with_chat(&chat, |c, _| c.stop_task(&task))? {
                     return Err("Nothing runs that task: the chat's Claude Code has stopped".into());

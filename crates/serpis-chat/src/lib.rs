@@ -405,6 +405,12 @@ impl Chat {
 
     /// Ask Claude Code to stop its background task `task` (a command, a subagent: the `id` of
     /// a tool entry's `task`). False when it has no process to ask.
+    /// Move what tool call `tool` runs (a command, a subagent) to the background: its call
+    /// returns and the turn goes on. False when Claude Code has no process to ask.
+    pub fn background_task(&mut self, tool: &str) -> bool {
+        self.claude.background_task(tool)
+    }
+
     pub fn stop_task(&mut self, task: &str) -> bool {
         self.claude.stop_task(task)
     }

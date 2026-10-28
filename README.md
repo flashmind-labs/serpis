@@ -457,6 +457,10 @@ A subagent's steps (its commands, edits and answer) show inside its Agent card, 
 when it runs in the background. Stopping or closing a chat ends everything its `claude`
 started: what it runs is sent SIGTERM (so scripts clean up), then SIGKILL after a moment.
 
+A command (or subagent) it waits on can move to the background, as Ctrl+B does in its TUI:
+`C-c C-b` (`chat-background-task`; its card says so) returns its call and the turn goes on while
+it runs, as any background shell. The phone has a Background button for it.
+
 What its commands print shows on their cards as they run, background ones and those it waits
 for: the last `chat-task-output-lines` lines (8; open the card for the last 40), as plain text,
 with how much it printed in all. serpis reads it every `claude-code-task-output-interval`

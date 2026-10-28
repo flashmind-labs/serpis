@@ -134,6 +134,10 @@ fn after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
 
+fn tool_of(c: &Chat, id: &str) -> Entry {
+    serpis_proto::find_tool(c.entries(), id).cloned().unwrap()
+}
+
 fn last_text(entries: &[Entry]) -> String {
     entries
         .iter()
@@ -381,7 +385,7 @@ fn chats_run_on_claude_code() {
     w.send(&mut again, "back");
     let (starts, got) = w.log();
     assert_eq!(after(starts.last().unwrap(), "--resume"), Some(id.as_str()));
-    assert_eq!(got.last().unwrap()["message"]["content"].as_array().unwrap().len(), 1, "nothing to catch up on");
+    assert_eq!(got.iter().rev().find(|g| g["type"] == "user").unwrap()["message"]["content"].as_array().unwrap().len(), 1, "nothing to catch up on");
 
     // On a machine without that session (the chat moved), a new one is told the conversation.
     drop(again);
@@ -530,6 +534,23 @@ fn chats_run_on_claude_code() {
     assert!(held.state().continues_at.is_none());
     assert!(held.set_continue_after_limit(&mut w.host, true).is_err(), "no longer stopped at the limit");
     drop((lim, held));
+
+    // A command it waits on moves to the background (its Ctrl+B): the call returns, the turn
+    // goes on, and the command keeps running there.
+    let mut fg = w.chat();
+    fg.submit(&mut w.host, "long command".into(), vec![], false, None).unwrap();
+    let waiting_on = |c: &Chat| c.entries().iter().find_map(|e| match e {
+        Entry::Tool { id, task: Some(t), result: None, .. } if t.running() && !t.background => Some(id.clone()),
+        _ => None,
+    });
+    w.until(&mut fg, |c| waiting_on(c).is_some());
+    let tool = waiting_on(&fg).unwrap();
+    assert!(fg.background_task(&tool));
+    w.until(&mut fg, |c| !c.running() && last_text(c.entries()) == "Moved it to the background; going on.");
+    assert!(w.log().1.iter().any(|g| g["request"]["subtype"] == "background_tasks" && g["request"]["tool_use_id"] == json!(tool)));
+    let Entry::Tool { task: Some(t), result: Some(_), .. } = tool_of(&fg, &tool) else { panic!("{:#?}", fg.entries()) };
+    assert!(t.background && t.running(), "{t:?}");
+    fg.clear();
 
     // Told to, it restarts for changed skills (resuming), and sees them.
     w.host.vars.insert("claude-code-skills-restart".into(), json!(true));
