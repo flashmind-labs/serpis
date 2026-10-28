@@ -169,7 +169,9 @@ fn main() {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         log(json!({"got": msg}));
         if msg["type"] == "control_request" && msg["request"]["subtype"] == "initialize" {
-            let models = [json!({"value": "default", "displayName": "Default"}), json!({"value": "fake", "displayName": "Fake 5", "supportedEffortLevels": ["low", "high"], "supportsThinkingOff": true})];
+            // FAKE_CLAUDE_DEMO (the promo video): names and edits that read like real ones.
+            let name = if demo() { "Opus 5.5" } else { "Fake 5" };
+            let models = [json!({"value": "default", "displayName": "Default"}), json!({"value": "fake", "displayName": name, "supportedEffortLevels": ["low", "high"], "supportsThinkingOff": true})];
             out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"models": models, "account": {"email": "test@example.com", "subscriptionType": "Claude Test"}}}}));
             out(json!({"type": "system", "subtype": "init", "session_id": session, "permissionMode": after("--permission-mode").unwrap_or_else(|| "default".into())}));
             continue;
@@ -498,13 +500,17 @@ fn main() {
             stop("end_turn");
             result(&session, None);
         } else if text.contains("edit") {
+            let (file, old, new, done) = if demo() {
+                ("src/limiter.rs", "let elapsed = now - self.last;", "let elapsed = now.saturating_duration_since(self.last);", "Done: `refill` can't panic on a clock that steps back anymore.")
+            } else {
+                ("notes.txt", "two", "TWO", "Edited.")
+            };
+            let input = json!({"file_path": file, "old_string": old, "new_string": new});
             start(&format!("m{n}a"));
             ev(json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": format!("t{n}"), "name": "Edit", "input": {}}}));
-            ev(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"file_path\": \"notes.txt\", "}}));
-            ev(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "\"old_string\": \"two\", \"new_string\": \"TWO\"}"}}));
+            ev(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}));
             ev(json!({"type": "content_block_stop", "index": 0}));
             stop("tool_use");
-            let input = json!({"file_path": "notes.txt", "old_string": "two", "new_string": "TWO"});
             out(json!({"type": "control_request", "request_id": format!("perm{n}"), "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": input, "tool_use_id": format!("t{n}"), "permission_suggestions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}}));
             let answer = loop {
                 let Some(l) = lines.next() else { return };
@@ -520,14 +526,18 @@ fn main() {
                 system("status", json!({"status": null, "permissionMode": mode}));
             }
             if behavior == "allow" {
-                let patch = json!([{"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3, "lines": [" one", "-two", "+TWO", " three"]}]);
-                out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": "The file notes.txt has been updated."}]}, "parent_tool_use_id": null, "tool_use_result": {"filePath": "notes.txt", "structuredPatch": patch}}));
+                let patch = if demo() {
+                    json!([{"oldStart": 17, "oldLines": 3, "newStart": 17, "newLines": 3, "lines": ["         let now = Instant::now();", format!("-        {old}"), format!("+        {new}"), "         self.tokens = (self.tokens + elapsed.as_secs_f64() * self.rate).min(self.capacity as f64);"]}])
+                } else {
+                    json!([{"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3, "lines": [" one", "-two", "+TWO", " three"]}])
+                };
+                out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": format!("The file {file} has been updated.")}]}, "parent_tool_use_id": null, "tool_use_result": {"filePath": file, "structuredPatch": patch}}));
             } else {
                 let why = answer["response"]["response"]["message"].as_str().unwrap_or("denied").to_string();
                 out(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": why, "is_error": true}]}, "parent_tool_use_id": null}));
             }
             start(&format!("m{n}b"));
-            text_block(0, if behavior == "allow" { "Edited." } else { "Not allowed." });
+            text_block(0, if behavior == "allow" { done } else { "Not allowed." });
             stop("end_turn");
             result(&session, None);
         } else if text.contains("slow") {
@@ -559,4 +569,9 @@ fn main() {
             result(&session, None);
         }
     }
+}
+
+/// The promo video's mode (FAKE_CLAUDE_DEMO set): real-looking names and edits.
+fn demo() -> bool {
+    std::env::var_os("FAKE_CLAUDE_DEMO").is_some()
 }

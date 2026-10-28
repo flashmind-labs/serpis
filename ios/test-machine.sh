@@ -28,7 +28,10 @@ for _ in $(seq 50); do [ -s "$dir/mock.port" ] && break; sleep 0.1; done
 cat > "$dir/agent/models.json" <<JSON
 {"providers":{"mock":{"name":"Mock","baseUrl":"http://127.0.0.1:$(cat "$dir/mock.port")/api/v1","api":"openai-completions","apiKey":"x","compat":{"openRouter":true},"models":[{"id":"m","name":"Mock model","contextWindow":200000}]}}}
 JSON
-printf '{"session-directory":"%s/sessions","agent-model":"mock/m"}' "$dir" > "$dir/node/settings.json"
+# SERPIS_TEST_MODELS / SERPIS_TEST_MODEL: other models instead (the promo's), in place before
+# anything starts the node.
+[ -n "${SERPIS_TEST_MODELS:-}" ] && cp "$SERPIS_TEST_MODELS" "$dir/agent/models.json"
+printf '{"session-directory":"%s/sessions","agent-model":"%s"}' "$dir" "${SERPIS_TEST_MODEL:-mock/m}" > "$dir/node/settings.json"
 
 # What the server runs commands with: the machine's environment.
 export HOME="$dir/home" SERPIS_NODE_DIR="$dir/node" SERPIS_NODE_SOCKET="$dir/node/node.sock" SERPIS_AGENT_DIR="$dir/agent" \
