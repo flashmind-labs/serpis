@@ -510,6 +510,12 @@ impl ChatBuffer {
         Some((i["tokens"].as_u64()?, i["cost"].as_f64()?))
     }
 
+    /// Put the cursor in the composer.
+    pub fn focus_prompt(&mut self) {
+        self.focus = Focus::Prompt;
+        self.dirty = true;
+    }
+
     /// Attach an image file to the next message.
     pub fn attach_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
         let (image, encoded) = crate::images::load_file(path).ok_or_else(|| anyhow::anyhow!("{} isn't an image serpis can read", path.display()))?;

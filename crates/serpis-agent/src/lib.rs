@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod claude_code;
 pub mod compaction;
+pub mod skills;
 pub mod system_prompt;
 pub mod tools;
 

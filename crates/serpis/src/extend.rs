@@ -71,7 +71,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.buffer.process", "(id?): nil, or {running = false} or {running = true, program} for terminals and chats."),
     ("serpis.buffer.activity", "(id?): what the sidebar shows: {state, detail, program, attention, seconds}."),
     ("serpis.buffer.set_activity", "(id?, {state, detail} | nil): override that (state: \"idle\", \"working\", \"waiting\", \"error\", \"done\")."),
-    ("serpis.buffer.text", "(): the focused buffer's text (for a chat, the focused part: prompt or transcript)."),
+    ("serpis.buffer.text", "(): the focused buffer's text (a chat's: its transcript, then its composer)."),
     ("serpis.buffer.line", "(n): line n (1-based) of the focused buffer."),
     ("serpis.buffer.cursor", "(): line, col (1-based) of the focused buffer's cursor."),
     ("serpis.buffer.set_cursor", "(line, col): move it."),

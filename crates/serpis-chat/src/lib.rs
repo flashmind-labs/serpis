@@ -490,9 +490,26 @@ impl Chat {
         if self.title.is_empty() {
             self.title = if text.is_empty() { "Image".into() } else { title_from(&text) };
         }
+        // `/skill:name args`: the skill's instructions go with the message (shown as typed).
+        let sent = match text.strip_prefix("/skill:") {
+            Some(rest) => {
+                let skills = self.skills(host);
+                let name = rest.split_whitespace().next().unwrap_or("");
+                match skills.iter().find(|s| s.name == name) {
+                    // Claude Code's own skill: it loads it itself.
+                    Some(s) if self.is_claude_code() && s.source == "claude" => format!("/{}", rest.trim()),
+                    Some(_) => match serpis_agent::skills::expand(&text, &skills) {
+                        Some(x) => x,
+                        None => return refuse(host, Level::Error, format!("Couldn't read the skill {name}")),
+                    },
+                    None => return refuse(host, Level::Error, format!("No skill named {name} (chat-select-skill lists them)")),
+                }
+            }
+            None => text.clone(),
+        };
         let mut content = Vec::new();
-        if !text.is_empty() {
-            content.push(UserContent::Text { text: text.clone() });
+        if !sent.is_empty() {
+            content.push(UserContent::Text { text: sent });
         }
         for i in &images {
             content.push(UserContent::Image { data: i.data.clone(), mime_type: i.mime.clone() });
@@ -812,6 +829,34 @@ impl Chat {
         prompt
     }
 
+    /// Where this chat's skills are looked for: the agent directory's `skills`, the project's
+    /// (`.pi/skills`, `.agents/skills`), `agent-skill-paths` and pi's `skills` setting, and
+    /// Claude Code's skill folders (`agent-skills-claude`).
+    fn skill_places(&self, host: &dyn Host) -> serpis_agent::skills::Places {
+        let agent_dir = host.registry().paths().agent_dir.clone();
+        let mut paths: Vec<PathBuf> = match host.var("agent-skill-paths") {
+            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(expand_home).collect(),
+            _ => Vec::new(),
+        };
+        // pi's own `skills` setting: paths from its agent directory.
+        let pi: Option<Value> = std::fs::read_to_string(agent_dir.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(Value::Array(a)) = pi.as_ref().and_then(|v| v.get("skills")) {
+            paths.extend(a.iter().filter_map(Value::as_str).filter(|p| !p.starts_with('!') && !p.starts_with('-')).map(|p| {
+                let p = expand_home(p.trim_start_matches('+'));
+                if p.is_absolute() { p } else { agent_dir.join(p) }
+            }));
+        }
+        serpis_agent::skills::Places { agent_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default() }
+    }
+
+    /// The skills this chat has (none with `agent-skills` off).
+    pub fn skills(&self, host: &dyn Host) -> Vec<serpis_agent::skills::Skill> {
+        if !host.var_bool("agent-skills", true) {
+            return Vec::new();
+        }
+        serpis_agent::skills::discover(&self.skill_places(host))
+    }
+
     /// The system prompt as the project's instructions and settings make it now.
     fn build_system_prompt(&self, host: &dyn Host, tools: &[ToolRef]) -> String {
         let agent_dir = host.registry().paths().agent_dir.clone();
@@ -822,6 +867,14 @@ impl Chat {
         };
         if let Some(Value::Array(g)) = host.var("agent-guidelines") {
             opts.guidelines = g.iter().filter_map(Value::as_str).map(str::to_string).collect();
+        }
+        // The skills it may load: named and described, read when a task matches (as pi does).
+        let reader = ["read", "bash"].into_iter().find(|r| tools.iter().any(|t| t.name() == *r));
+        if let Some(reader) = reader {
+            let s = serpis_agent::skills::for_prompt(&self.skills(host), reader);
+            if !s.is_empty() {
+                opts.sections.insert("skills".into(), s);
+            }
         }
         serpis_agent::system_prompt::build_system_prompt(tools, &self.cwd, &opts)
     }
@@ -1139,6 +1192,7 @@ impl Chat {
         match ev {
             AgentEvent::MessageStart(Message::User { content, .. }) => {
                 let (text, images) = user_parts(&content);
+                let text = as_typed(text);
                 // A queued (steering) message is already shown; un-queue it.
                 if let Some(Entry::User { queued, .. }) = self.entries.find_mut(|e| matches!(e, Entry::User { text: t, queued: true, .. } if *t == text)) {
                     *queued = false;
@@ -1529,6 +1583,7 @@ impl Chat {
             match m {
                 Message::User { content, .. } => {
                     let (text, images) = user_parts(content);
+                    let text = as_typed(text);
                     first_prompt.get_or_insert_with(|| text.clone());
                     self.entries.push(Entry::User { text, queued: false, images });
                 }
@@ -1677,6 +1732,11 @@ impl Chat {
 /// The custom entry a stop at a usage limit is kept in: `{limit, at = messages before it,
 /// continue = bool}` (a resumed chat still goes on when it resets).
 pub const CLAUDE_LIMIT: &str = "claude-code-limit";
+
+/// A user message as typed: `/skill:name args` for one a skill was sent in.
+fn as_typed(text: String) -> String {
+    serpis_agent::skills::as_typed(&text).unwrap_or(text)
+}
 
 /// What a chat stopped at a usage limit says when it goes on after it resets.
 pub const LIMIT_CONTINUE_PROMPT: &str = "Your usage limit has reset. Continue where you left off.";

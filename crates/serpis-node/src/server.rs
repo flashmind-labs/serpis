@@ -1017,6 +1017,15 @@ impl Node {
                 self.with_chat(&chat, |c, h| c.set_permission_mode(h, &mode))??;
                 Response::Ok
             }
+            Request::Skills { chat } => {
+                let skills = self.with_chat(&chat, |c, h| c.skills(h))?;
+                Response::Skills {
+                    skills: skills
+                        .into_iter()
+                        .map(|s| serpis_proto::wire::SkillInfo { name: s.name, description: s.description, source: s.source, path: s.file.to_string_lossy().into_owned(), explicit_only: s.explicit_only })
+                        .collect(),
+                }
+            }
             Request::Logs { after } => {
                 let (records, dropped) = crate::logs::since(after);
                 Response::Logs { records, dropped }

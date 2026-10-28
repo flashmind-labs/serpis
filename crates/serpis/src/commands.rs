@@ -952,6 +952,56 @@ pub fn install(ed: &mut Editor) {
         },
     );
     ed.define_command(
+        "chat-select-skill",
+        "Pick one of the chat's skills (where it runs: pi's skill folders, the project's, Claude Code's) and start a message with it: /skill:name, then what you type. Param: a skill's name.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            let (machine, chat) = with_chat(ed, |c, _| (c.node.machine.clone(), c.node.chat.clone()))?;
+            let given = a.str(0).map(str::to_string);
+            let start = move |ed: &mut Editor, name: String| {
+                ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| {
+                    c.prompt.set_text(&format!("/skill:{name} "));
+                    c.prompt.move_to_end();
+                });
+                // Once the minibuffer has handed focus back (to the part it was taken from).
+                ed.defer(move |ed| {
+                    ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.focus_prompt());
+                });
+            };
+            crate::remote::request(ed, &machine, serpis_proto::wire::Request::Skills { chat }, move |ed, r| match r {
+                Ok(serpis_proto::wire::Response::Skills { skills }) if skills.is_empty() => {
+                    ed.message("This chat has no skills (pi's skill folders, the project's .pi/skills or .agents/skills, agent-skill-paths)");
+                }
+                Ok(serpis_proto::wire::Response::Skills { skills }) => match given {
+                    Some(n) if skills.iter().any(|s| s.name == n) => start(ed, n),
+                    Some(n) => ed.error(format!("No skill named {n}")),
+                    None => {
+                        let cands = skills
+                            .iter()
+                            .map(|s| {
+                                let from = match s.source.as_str() {
+                                    "project" => " (project)",
+                                    "claude" => " (Claude Code's)",
+                                    _ => "",
+                                };
+                                Candidate::new(&s.name).detail(format!("{}{from}", s.description))
+                            })
+                            .collect();
+                        ed.completing_read("Skill: ", cands, true, move |ed, c, _| {
+                            if let Some(c) = c {
+                                start(ed, c.value);
+                            }
+                        });
+                    }
+                },
+                Ok(_) => ed.error("Its machine's serpis-node is older and doesn't list skills: update it"),
+                Err(e) => ed.error(e),
+            });
+            Ok(())
+        },
+    );
+    ed.define_command(
         "chat-stop-task",
         "Stop work the agent left running in the background (Claude Code's background commands and agents): the only one, or the one you pick. Param: its task id.",
         o,

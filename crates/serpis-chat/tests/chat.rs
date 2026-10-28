@@ -93,6 +93,14 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     std::fs::create_dir_all(&agent).unwrap();
     std::fs::write(work.join("f0.txt"), "zero\n").unwrap();
     std::fs::write(work.join("f1.txt"), "one\n").unwrap();
+    // A skill of the user's (pi's folder) and one of the project's.
+    for (dir, text) in [
+        (agent.join("skills/eng/review"), "---\nname: review\ndescription: Review a change. Use when asked to review.\n---\nRead the whole diff first.\n"),
+        (work.join(".pi/skills/deploy"), "---\ndescription: Deploy the project.\n---\nRun the deploy script.\n"),
+    ] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), text).unwrap();
+    }
     // SAFETY: the only test in this binary, before any thread of ours starts.
     unsafe { std::env::set_var("HOME", &home) };
 
@@ -156,6 +164,25 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     finish(&mut chat, &mut host, &woken, &mut mirror);
     let out = chat.entries().iter().rev().find_map(|e| if let Entry::Tool { name, result: Some(r), .. } = e { (name == "bash").then(|| format!("{:?}", r.content)) } else { None }).expect("the command ran");
     assert!(out.contains("agent=1"), "{out}");
+
+    // Skills, as pi has them: named and described in the system prompt, read when they apply.
+    let system = mock.log()[0].body["messages"][0]["content"].to_string();
+    assert!(system.contains("<available_skills>") && system.contains("<name>review</name>") && system.contains("<name>deploy</name>"), "{system}");
+    assert!(system.contains("Use the read tool to load a skill's file"), "{system}");
+    assert_eq!(chat.skills(&host).iter().map(|s| (s.name.as_str(), s.source.as_str())).collect::<Vec<_>>(), [("review", "user"), ("deploy", "project")]);
+    // /skill:name sends its instructions with what follows; the transcript shows it as typed.
+    chat.submit(&mut host, "/skill:review the last commit".into(), vec![], false, None).unwrap();
+    finish(&mut chat, &mut host, &woken, &mut mirror);
+    let sent = serpis_testkit::mock::last_user_text(mock.log().last().unwrap().wire, &mock.log().last().unwrap().body).unwrap_or_default();
+    assert!(sent.starts_with("<skill name=\"review\"") && sent.contains("Read the whole diff first.") && sent.ends_with("</skill>\n\nthe last commit"), "{sent}");
+    assert!(chat.entries().iter().any(|e| matches!(e, Entry::User { text, .. } if text == "/skill:review the last commit")), "{:#?}", chat.entries());
+    assert!(chat.submit(&mut host, "/skill:nope".into(), vec![], false, None).is_err(), "an unknown skill is refused, not sent");
+    host.notices.clear();
+    // Resumed, it still reads as typed.
+    let path = chat.session.as_ref().map(|w| w.path.clone()).unwrap();
+    let mut back = Chat::new(ChatInit { cwd: home.join("project"), model: None, thinking: serpis_ai::ThinkingLevel::Medium }, Arc::new(|| {}));
+    back.restore(&mut host, &serpis_chat::session::load(&path).unwrap());
+    assert!(back.entries().iter().any(|e| matches!(e, Entry::User { text, .. } if text == "/skill:review the last commit")));
     let _ = std::fs::remove_dir_all(&home);
 }
 

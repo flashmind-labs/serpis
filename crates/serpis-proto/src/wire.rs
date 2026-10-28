@@ -137,6 +137,8 @@ pub enum Request {
         #[serde(default)]
         advice: bool,
     },
+    /// The skills a chat has there (`/skill:name` sends one).
+    Skills { chat: String },
     /// What the node has logged since record `after` (0: all it keeps), oldest first.
     Logs {
         #[serde(default)]
@@ -299,6 +301,7 @@ pub enum Response {
     Models { models: Vec<ModelInfo> },
     /// The machine's `claude` answer to `get_usage`, as it gave it.
     ClaudeCodeUsage { usage: serde_json::Value },
+    Skills { skills: Vec<SkillInfo> },
     /// Its log since the record asked after; `dropped` older ones it no longer keeps.
     Logs { records: Vec<LogRecord>, dropped: u64 },
     Sessions { sessions: Vec<SessionInfo> },
@@ -572,4 +575,18 @@ pub struct LogRecord {
     /// What else it said: (name, value).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<(String, String)>,
+}
+
+/// A skill a chat can use: `/skill:name` sends its instructions, and the model may load it by
+/// itself unless `explicit_only`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// `user`, `project`, `path` or `claude` (Claude Code's skill folders).
+    pub source: String,
+    /// Its file, on the chat's machine.
+    pub path: String,
+    #[serde(default)]
+    pub explicit_only: bool,
 }

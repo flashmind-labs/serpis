@@ -14,8 +14,9 @@ models.json). What it says depends on the last user message:
   anything else   reply "ok"
 
 After a tool result it replies "done". Each request is logged as one JSON line to the file
-given as the second argument: {"n", "last_role", "tool_content", "tools", "images"} (images: how
-many the last message carries).
+given as the second argument: {"n", "last_role", "tool_content", "tools", "images", "text",
+"skills"} (images: how many the last message carries; text: its text; skills: whether the system
+prompt lists skills).
 
   python3 mock_llm.py <port-file> <log-file>    (listens on a free port, written to port-file)
 """
@@ -51,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
                 "tool_content": text_of(last.get("content")) if last.get("role") == "tool" else None,
                 "tools": [t["function"]["name"] for t in body.get("tools", [])],
                 "images": sum(1 for p in (last.get("content") if isinstance(last.get("content"), list) else []) if isinstance(p, dict) and p.get("type") == "image_url"),
+                "text": text_of(last.get("content"))[:4000],
+                "skills": "<available_skills>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
             }) + "\n")
 
         delta, finish = {"role": "assistant", "content": "ok"}, "stop"
