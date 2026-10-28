@@ -1338,20 +1338,30 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     let debug = lua.create_table()?;
     debug.set(
         "screenshot",
-        lua.create_function(|_, path: String| {
+        // `quiet`: no message when saved (frames for a recording).
+        lua.create_function(|_, (path, quiet): (String, Option<bool>)| {
             ed(|e| {
                 let main = e.main_sender();
+                let quiet = quiet.unwrap_or(false);
                 e.ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |img| {
                     let [w, h] = img.size;
                     let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
                     let r = image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|i| i.save(&path));
                     main.send(move |e| match r {
+                        Some(Ok(())) if quiet => {}
                         Some(Ok(())) => e.message(format!("Screenshot saved to {path}")),
                         _ => e.error(format!("Screenshot failed: {path}")),
                     });
                 })));
                 e.ctx.request_repaint();
             })
+        })?,
+    )?;
+    // Resize the window (points), as for a recording.
+    debug.set(
+        "resize",
+        lua.create_function(|_, (w, h): (f32, f32)| {
+            ed(|e| e.ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h))))
         })?,
     )?;
     // Inject raw platform input: key name as egui names it ("A", "Enter", "Backslash"),
