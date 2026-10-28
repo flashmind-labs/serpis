@@ -298,5 +298,12 @@ final class SerpisUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Session limit reached"].exists)
         wait.tap()
         XCTAssertTrue(app.buttons["limit-go"].waitForExistence(timeout: 20), "told not to, it waits for you")
+        // The chat list says so too.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = app.staticTexts["row-limit"]
+        let listed = row.waitForExistence(timeout: 20)
+        shot("17-limit-list")
+        XCTAssertTrue(listed, "its row says it stopped at the limit")
+        XCTAssertEqual(row.label, "Session limit · waits for you")
     }
 }

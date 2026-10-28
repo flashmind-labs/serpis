@@ -135,6 +135,16 @@ struct ChatRowView: View {
                     if row.running {
                         Pulse()
                         Text(row.step?.isEmpty == false ? row.step! : "Working")
+                    } else if let limit = row.limit {
+                        Image(systemName: "hourglass").foregroundStyle(.orange)
+                        Group {
+                            if let at = row.continuesAt {
+                                Text(limit.name.prefix(1).uppercased() + limit.name.dropFirst() + " · goes on ") + Text(at, format: .relative(presentation: .named, unitsStyle: .abbreviated))
+                            } else {
+                                Text(limit.name.prefix(1).uppercased() + limit.name.dropFirst() + " · waits for you")
+                            }
+                        }
+                        .accessibilityIdentifier("row-limit")
                     } else {
                         Text(row.folder.isEmpty ? machine : "\(row.folder) · \(machine)")
                     }

@@ -1332,6 +1332,19 @@ fn limit_line(limit: &serpis_proto::Limit, continues: Option<i64>, now: i64) -> 
     s
 }
 
+/// A chat stopped at a usage limit, in the sidebar: "Session limit · goes on in 59m",
+/// "Weekly limit · resets in 2d 3h · waits for you".
+fn limit_status(limit: &serpis_proto::Limit, continues: Option<i64>, now: i64) -> String {
+    let name = limit.name();
+    let name = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
+    let until = |t: i64| crate::claude_usage::until(t as u64, now as u64);
+    match (continues, limit.resets_at) {
+        (Some(at), _) => format!("{name} · goes on in {}", until(at)),
+        (None, Some(t)) => format!("{name} · resets in {} · waits for you", until(t)),
+        (None, None) => format!("{name} · waits for you"),
+    }
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -2189,6 +2202,10 @@ impl Buffer for ChatBuffer {
         }
         if !self.node.online {
             return Activity::new(ActivityState::Error, "offline");
+        }
+        // Stopped at a usage limit isn't a failure: it says until when, and what then.
+        if let Some((limit, continues)) = self.held_at_limit() {
+            return Activity::new(ActivityState::Idle, limit_status(&limit, continues, unix_now()));
         }
         match &s.last_error {
             Some(e) => Activity::new(ActivityState::Error, e.lines().next().unwrap_or("")),

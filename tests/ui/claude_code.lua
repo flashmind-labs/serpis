@@ -440,6 +440,9 @@ local steps = {
     T.check("stopped at the limit", (info.limit or {}).status, "rejected")
     T.check("it goes on by itself in an hour", info.continues_at ~= nil and info.continues_at > os.time() + 3500, true)
     T.check("the warning gives way to the bar", d.composer()["limit"], nil)
+    local a = serpis.buffer.activity() or {}
+    T.check("the sidebar says it stopped at the limit, not that it failed", a.state, "idle")
+    T.check("and when it goes on", (a.detail or ""):match("^Session limit · goes on in %d+m$") ~= nil, true)
     -- Told to wait instead, it does; told again, it goes on at the reset.
     click("limit-wait")
     when(function() return (serpis.chat.info() or {}).continues_at == nil and d.composer()["limit-go"] ~= nil end, go)
@@ -447,6 +450,7 @@ local steps = {
   end,
   function(go)
     T.check("Don't go on makes it wait for you", (serpis.chat.info() or {}).continues_at, nil)
+    T.check("as the sidebar says", ((serpis.buffer.activity() or {}).detail or ""):match("^Session limit · resets in %d+m · waits for you$") ~= nil, true)
     serpis.command.run("chat-toggle-continue-after-limit")
     when(function() return (serpis.chat.info() or {}).continues_at ~= nil and d.composer()["limit-wait"] ~= nil end, go)
     return false

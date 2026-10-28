@@ -41,6 +41,9 @@ struct ChatRow: Identifiable, Hashable {
     var modified: Date
     var running: Bool
     var step: String?
+    /// Stopped at a usage limit (Claude Code's): which, and when it goes on by itself.
+    var limit: Limit?
+    var continuesAt: Date?
     /// The session file there, to open it again when it isn't open.
     var path: String?
     var id: String { machine + "/" + chat }
@@ -239,6 +242,8 @@ final class AppModel {
                 var row = rows[c.chat] ?? ChatRow(machine: m.id, chat: c.chat, title: c.state.title, cwd: c.state.cwd, modified: .distantPast, running: false)
                 row.running = c.state.running
                 row.step = c.state.step
+                row.limit = c.state.limit.flatMap { $0.reached && !c.state.running ? $0 : nil }
+                row.continuesAt = c.state.continuesAt
                 if !c.state.title.isEmpty { row.title = c.state.title }
                 rows[c.chat] = row
             }
