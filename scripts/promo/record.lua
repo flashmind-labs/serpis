@@ -66,7 +66,7 @@ local steps = {
   function(go) mark("windows"); serpis.defer(400, go) end,
   function(go) key("s-\\", "⌘\\"); serpis.defer(500, go) end,
   function(go) key("s-t", "⌘T"); serpis.defer(1400, go) end,
-  function(go) type_text("git diff --stat && git diff | head -20", go) end,
+  function(go) type_text("git diff --stat && git diff", go) end,
   function(go) T.press("RET"); serpis.defer(1600, go) end,
   function(go) key("s-|", "⌘|"); serpis.defer(400, go) end,
   function(go) key("s-n", "⌘N"); serpis.defer(1600, go) end,

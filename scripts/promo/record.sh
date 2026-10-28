@@ -12,6 +12,9 @@ home="$tmp/home"; mkdir -p "$home" "$tmp/agent"; echo "PROMPT='%F{blue}%1~%f %# 
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; done
 
+# git as a user has it: colors (its default on a terminal), and no pager to get stuck in.
+printf '[core]\n\tpager = cat\n[color]\n\tui = auto\n' > "$home/.gitconfig"
+
 # The demo project.
 proj="$home/code/ratelimit"; mkdir -p "$proj/src" "$proj/tests"
 cat > "$proj/Cargo.toml" <<'EOF'
