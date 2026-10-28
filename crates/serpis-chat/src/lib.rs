@@ -622,26 +622,20 @@ impl Chat {
         // Its commands run for an agent, as serpis's own agent's do (a shell config can tell).
         env.push((serpis_agent::AGENT_ENV.0.into(), serpis_agent::AGENT_ENV.1.into()));
         env.push(("SERPIS_SESSION_ID".into(), self.session_id.clone()));
-        let mut args: Vec<String> = match host.var("claude-code-args") {
+        let args: Vec<String> = match host.var("claude-code-args") {
             Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
             _ => Vec::new(),
         };
         // serpis's skills (pi's), for it to load as its own: those it has already (its
-        // ~/.claude/skills) left out. Said once: with what claude-code-args appends, if anything.
-        if host.var_bool("claude-code-skills", true) {
+        // ~/.claude/skills) left out.
+        let skills = host.var_bool("claude-code-skills", true).then(|| {
             let mut places = self.skill_places(host);
             places.claude = false;
             let theirs = serpis_agent::skills::claude_names(&places.home, &self.cwd);
             let ours: Vec<_> = if host.var_bool("agent-skills", true) { serpis_agent::skills::discover(&places) } else { Vec::new() };
             let ours: Vec<_> = ours.into_iter().filter(|s| !theirs.contains(&s.name)).collect();
-            let text = serpis_agent::skills::for_prompt(&ours, "Read");
-            if !text.is_empty() {
-                match args.iter().position(|a| a == "--append-system-prompt").filter(|i| *i + 1 < args.len()) {
-                    Some(i) => args[i + 1] = format!("{}\n\n{text}", args[i + 1]),
-                    None => args.extend(["--append-system-prompt".to_string(), text]),
-                }
-            }
-        }
+            serpis_agent::skills::for_prompt(&ours, "Read")
+        });
         let launch = serpis_agent::claude_code::Launch {
             binary,
             cwd: self.cwd.clone(),
@@ -650,6 +644,8 @@ impl Chat {
             permission_mode: self.permission_mode.clone().or_else(|| host.var_str("claude-code-permission-mode")).unwrap_or_else(|| "default".into()),
             thinking_display: Some(host.var_str("claude-code-thinking-display").unwrap_or_else(|| "summarized".into())).filter(|d| !d.is_empty()),
             args,
+            skills,
+            skills_restart: host.var_bool("claude-code-skills-restart", false),
             env,
         };
         let cfg = serpis_agent::claude_code::RunConfig {

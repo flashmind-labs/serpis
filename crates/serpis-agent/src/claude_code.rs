@@ -43,6 +43,12 @@ pub struct Launch {
     pub thinking_display: Option<String>,
     /// More arguments (`claude-code-args`).
     pub args: Vec<String>,
+    /// What its system prompt is told of serpis's skills (appended with `--append-system-prompt`,
+    /// after any of `args`). Read when it starts: a running `claude` keeps the list it started
+    /// with, unless `skills_restart`.
+    pub skills: Option<String>,
+    /// A changed `skills` restarts it (resuming its session) with the next run.
+    pub skills_restart: bool,
     pub env: Vec<(String, String)>,
 }
 
@@ -205,7 +211,12 @@ impl ClaudeCode {
         let mut fresh = !resume;
         let stale = self.stale.swap(false, std::sync::atomic::Ordering::SeqCst);
         // A new permission mode is switched to, not restarted for.
-        let same = |l: &Launch| Launch { permission_mode: cfg.launch.permission_mode.clone(), ..l.clone() } == cfg.launch;
+        // Its mode is switched in place; serpis's skills are read once, when it starts (unless
+        // told to restart for them).
+        let same = |l: &Launch| {
+            let skills = if cfg.launch.skills_restart { l.skills.clone() } else { cfg.launch.skills.clone() };
+            Launch { permission_mode: cfg.launch.permission_mode.clone(), skills, ..l.clone() } == cfg.launch
+        };
         if stale || guard.as_mut().is_none_or(|p| !same(&p.launch) || p.exited()) {
             if let Some(old) = guard.take() {
                 *self.writer.lock().unwrap() = None;
@@ -508,7 +519,15 @@ impl Process {
         if let Some(d) = &l.thinking_display {
             cmd.args(["--thinking-display", d]);
         }
-        cmd.args(&l.args).envs(l.env.iter().cloned()).current_dir(&l.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        let mut args = l.args.clone();
+        if let Some(text) = l.skills.as_ref().filter(|t| !t.is_empty()) {
+            // Said once: with what `args` appends, if anything.
+            match args.iter().position(|a| a == "--append-system-prompt").filter(|i| *i + 1 < args.len()) {
+                Some(i) => args[i + 1] = format!("{}\n\n{text}", args[i + 1]),
+                None => args.extend(["--append-system-prompt".to_string(), text.clone()]),
+            }
+        }
+        cmd.args(&args).envs(l.env.iter().cloned()).current_dir(&l.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd.spawn().with_context(|| format!("starting Claude Code ({})", l.binary.display()))?;

@@ -172,7 +172,9 @@ the message with it.
 
 Claude Code chats have both: Claude Code's own skills (`~/.claude/skills`, its plugins), which
 `claude` loads itself, and serpis's, listed in its system prompt the same way for it to load when
-a task matches (`claude-code-skills`; those it already has under the same name are left out). In
+a task matches (`claude-code-skills`; those it already has under the same name are left out). The
+list is read when a chat's `claude` starts: a running one keeps it, so a change to your skills
+costs no restart (`claude-code-skills-restart` = `true` restarts it, resuming, to see them). In
 them, `/skill:name` sends one of serpis's, and Claude Code's own you call as it does, `/name`.
 serpis's own agent doesn't see Claude Code's skills (`agent-skills-claude` adds them).
 

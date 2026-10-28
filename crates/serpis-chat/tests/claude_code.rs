@@ -216,7 +216,11 @@ fn chats_run_on_claude_code() {
     assert_eq!(after(&starts[0], "--effort"), Some("high"));
     assert_eq!(after(&starts[0], "--permission-mode"), Some("default"));
 
-    // The next turn goes to the same process.
+    // The next turn goes to the same process, even with a skill added meanwhile (read when it
+    // starts: no restart for it).
+    let added = w.home.join("agent/skills/added");
+    std::fs::create_dir_all(&added).unwrap();
+    std::fs::write(added.join("SKILL.md"), "---\ndescription: Added later.\n---\nx\n").unwrap();
     w.send(&mut chat, "again");
     assert_eq!(last_text(chat.entries()), "echo: again");
     assert_eq!(w.log().0.len(), 1, "one claude process per chat");
@@ -526,6 +530,25 @@ fn chats_run_on_claude_code() {
     assert!(held.state().continues_at.is_none());
     assert!(held.set_continue_after_limit(&mut w.host, true).is_err(), "no longer stopped at the limit");
     drop((lim, held));
+
+    // Told to, it restarts for changed skills (resuming), and sees them.
+    w.host.vars.insert("claude-code-skills-restart".into(), json!(true));
+    let mut sk = w.chat();
+    w.send(&mut sk, "hello");
+    let id = sk.session_id.clone();
+    let starts_of = |w: &World| w.log().0.into_iter().filter(|s| s.iter().any(|a| *a == id)).collect::<Vec<_>>();
+    let before = starts_of(&w).len();
+    w.send(&mut sk, "same skills");
+    assert_eq!(starts_of(&w).len(), before, "nothing changed: no restart");
+    let later = w.home.join("agent/skills/later");
+    std::fs::create_dir_all(&later).unwrap();
+    std::fs::write(later.join("SKILL.md"), "---\ndescription: Added at the end.\n---\nx\n").unwrap();
+    w.send(&mut sk, "new skills");
+    let starts = starts_of(&w);
+    assert_eq!(starts.len(), before + 1, "it restarted for them");
+    assert!(after(starts.last().unwrap(), "--append-system-prompt").is_some_and(|t| t.contains("<name>later</name>")));
+    w.host.vars.remove("claude-code-skills-restart");
+    drop(sk);
 
     assert!(w.host.notices.is_empty(), "{:?}", w.host.notices);
     let _ = std::fs::remove_dir_all(&w.home);
