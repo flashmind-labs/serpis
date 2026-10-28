@@ -78,8 +78,9 @@ local steps = {
   function(go) T.press("ESC"); serpis.defer(50, function() serpis.message(""); serpis.defer(550, go) end) end,
   -- The agent reshapes serpis itself.
   function(go) mark("extend"); serpis.defer(300, go) end,
-  function(go) type_text("Make the font a bit bigger", go) end,
-  function(go) T.press("RET"); serpis.defer(800, function() when(idle, go) end) end,
+  -- A pause before sending, for the camera to move in and the viewer to read the prompt.
+  function(go) type_text("Make the font a bit bigger", function() serpis.defer(2000, go) end) end,
+  function(go) mark("send"); T.press("RET"); serpis.defer(800, function() when(idle, go) end) end,
   wait(3000),
   function(go) mark("end"); recording = false; serpis.defer(1500, go) end,
   function() marks:close(); d.quit() end,

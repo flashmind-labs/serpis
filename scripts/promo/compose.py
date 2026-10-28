@@ -80,6 +80,12 @@ def footage(ms):
     return _last[1]
 
 
+def at(seg, before_send):
+    """Where in the extend segment (a fraction) `before_send` seconds from its send mark falls."""
+    s0, s1 = marks[seg], marks["end"] - 600
+    return (marks["send"] + before_send * 1000 - s0) / (s1 - s0)
+
+
 # Footage segments: (name, src start, src end, speed, title, subtitle, camera keys)
 # camera keys: [(fraction of segment, scale, focus x, focus y)], focus in window fractions.
 SEGMENTS = [
@@ -91,10 +97,11 @@ SEGMENTS = [
      [(0, 1.0, .5, .5), (1, 1.04, .62, .5)]),
     ("palette", marks["palette"], marks["extend"], 0.8,
      "Every action is a keystroke away.", "One palette for every command, fuzzy-searched.",
-     [(0, 1.04, .55, .4), (0.4, 1.04, .55, .4), (0.6, 1.2, .5, .3), (0.88, 1.2, .5, .3), (1, 1.0, .5, .5)]),
-    ("extend", marks["extend"], marks["end"] - 600, 1.1,
+     [(0, 1.04, .55, .4), (0.5, 1.04, .55, .4), (0.68, 1.2, .5, .3), (0.88, 1.2, .5, .3), (1, 1.0, .5, .5)]),
+    # In on the chat while the prompt is typed, settled before it is sent (the "send" mark).
+    ("extend", marks["extend"], marks["end"] - 600, 1.0,
      "Reshape it by asking.", "Agents read serpis's own Lua API and change it, live.",
-     [(0, 1.0, .5, .5), (0.25, 1.0, .5, .5), (0.5, 1.32, .8, .93), (1, 1.36, .8, .93)]),
+     [(0, 1.0, .5, .5), (at("extend", -2.0), 1.0, .5, .5), (at("extend", -0.5), 1.32, .8, .93), (1, 1.36, .8, .93)]),
 ]
 
 INTRO, GRID, OUTRO = 3.4, 6.5, 4.0
@@ -328,7 +335,9 @@ def draw_segment(img, t, start, end, seg, idx):
         dy -= k * 30
     place_card(img, footage(src), sc, fx, fy, alpha, dy)
     # Headline: in, out when the camera pushes in (it would cover it), or at the segment's end.
-    zoomed = clamp((sc - 1.06) / 0.08)
+    # Once a push in has hidden it, it stays hidden (zooming back out doesn't bring it back).
+    peak = max(camera(cam, x * i / 12)[0] for i in range(13))
+    zoomed = clamp((peak - 1.06) / 0.08)
     ha = ramp(local, 0.15, 0.6) * (1 - ramp(local, dur - 0.35, dur)) * (1 - zoomed)
     hdy = (1 - ease_out((local - 0.15) / 0.6)) * 18
     if ha > 0:
