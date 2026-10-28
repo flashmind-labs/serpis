@@ -250,7 +250,7 @@ local steps = {
     -- A command left running: the composer says so, and C-c C-k stops it.
     d.text("background forever")
     T.press("RET")
-    when(function() return idle_with("Started it in the background.")() and d.composer()["background"] ~= nil end, go)
+    when(function() return idle_with("Started it in the background.")() and d.composer()["background"] ~= nil and has("line 3") end, go)
     return false
   end,
   function(go)
@@ -262,13 +262,15 @@ local steps = {
   end,
   function(go)
     T.check("the composer shows what runs in the background", d.composer()["background"] ~= nil, true)
-    T.check("its card says it runs on", has("Running in the background · C-c C-k stops it"), true)
+    T.check("its card says it runs on, and how much it printed", has("Running in the background · ") and has(" printed · C-c C-k stops it"), true)
+    T.check("and shows what it prints, live", has("line 3") and has("progress 100%"), true)
+    T.check("as plain text", has("\27["), false)
     T.press("C-c C-k")
-    when(function() return d.composer()["background"] == nil and has("Stopped.") end, go)
+    when(function() return d.composer()["background"] == nil and has("Stopped") end, go)
     return false
   end,
   function(go)
-    T.check("C-c C-k stopped it", has("Stopped."), true)
+    T.check("C-c C-k stopped it", has("Stopped"), true)
     -- Several at once: a shell and a monitor.
     d.text("background forever too")
     T.press("RET")
@@ -449,7 +451,7 @@ local steps = {
     T.check("the warning gives way to the bar", d.composer()["limit"], nil)
     local a = serpis.buffer.activity() or {}
     T.check("the sidebar says it stopped at the limit, not that it failed", a.state, "idle")
-    T.check("and when it goes on", (a.detail or ""):match("^Session limit · goes on in %d+m$") ~= nil, true)
+    T.check("and when it goes on", (a.detail or ""):match("^Session limit · goes on in [%dhm ]+$") ~= nil, true)
     -- Told to wait instead, it does; told again, it goes on at the reset.
     click("limit-wait")
     when(function() return (serpis.chat.info() or {}).continues_at == nil and d.composer()["limit-go"] ~= nil end, go)
@@ -474,6 +476,24 @@ local steps = {
     T.check("it went on after the reset", has("echo: Your usage limit has reset. Continue where you left off."), true)
     T.check("and the bar is gone", d.composer()["limit-bar"], nil)
     T.check("as is the limit", (serpis.chat.info() or {}).limit, nil)
+  end,
+  function(go)
+    -- How full its context is, as Claude Code counts it; compacting by itself, noted where it did.
+    d.text("compact yourself")
+    T.press("RET")
+    when(function() return idle_with("echo: compact yourself")() and has("Compacted by itself") end, go)
+    return false
+  end,
+  function(go)
+    local shots = os.getenv("SERPIS_TEST_SHOTS")
+    if shots then
+      serpis.defer(800, function() d.screenshot(shots .. "/claude-code-context.png"); serpis.defer(300, go) end)
+      return false
+    end
+  end,
+  function()
+    T.check("its compaction shows where it happened", has("Compacted by itself: ") and has(" → 21.0k tokens"), true)
+    T.check("the composer shows how full its context is", d.composer()["context"] ~= nil, true)
   end,
   function(go)
     -- Its /usage: the stand-in's made-up plan, asked through M-x.

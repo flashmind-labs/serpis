@@ -97,6 +97,18 @@ pub fn activity_changed(ed: &mut Editor, id: BufferId, prev: ActivityState, now:
             _ => "Command finished".to_string() + &format!(" in {took}"),
         }
     };
+    // The same thing again soon (a state flipping back and forth): once is enough.
+    static LAST: Mutex<Vec<(BufferId, String, std::time::Instant)>> = Mutex::new(Vec::new());
+    {
+        let key = format!("{event}\n{body}");
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        last.retain(|(_, _, at)| at.elapsed() < Duration::from_secs(30));
+        if last.iter().any(|(b, k, _)| *b == id && *k == key) {
+            tracing::debug!(target: "serpis::notify", "not notifying \"{event}\": just did");
+            return;
+        }
+        last.push((id, key, std::time::Instant::now()));
+    }
     send(ed, title, body, event, Some(id));
 }
 

@@ -133,6 +133,16 @@ pub struct Task {
     /// How long it has run (or ran).
     #[serde(default)]
     pub duration_ms: u64,
+    /// The end of what a command has printed so far (plain text, its last lines), and the size
+    /// of all of it in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub output_bytes: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Task {
@@ -272,6 +282,12 @@ pub struct ChatState {
     pub usage: Usage,
     /// Context the conversation fills, and the model's window.
     pub context: (Option<u64>, u64),
+    /// Where the agent compacts its context by itself, in tokens (Claude Code's), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacts_at: Option<u64>,
+    /// How many times its context was compacted.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub compactions: u64,
     /// `cache 94% · warm 41m`, when anything was cached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<String>,
@@ -324,6 +340,8 @@ impl Default for ChatState {
             session_id: String::new(),
             usage: Default::default(),
             context: (None, 0),
+            compacts_at: None,
+            compactions: 0,
             cache: None,
             last_error: None,
             session: None,

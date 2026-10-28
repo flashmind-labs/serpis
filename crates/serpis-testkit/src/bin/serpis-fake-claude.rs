@@ -133,6 +133,10 @@ fn main() {
     let mut later: Vec<(Instant, Later)> = Vec::new();
     // Running in the background: task id to its command (stop_task ends it).
     let mut running: Vec<(String, String, std::process::Child)> = Vec::new();
+    // When each command started: what it "printed" grows with it (get_task_output).
+    let mut started: std::collections::HashMap<String, Instant> = Default::default();
+    // Its context, in tokens: more with each message, less after compacting.
+    let mut context: u64 = 20_000;
     loop {
         if let Some(i) = later.iter().position(|(at, _)| Instant::now() >= *at) {
             match later.remove(i).1 {
@@ -197,6 +201,30 @@ fn main() {
             out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": usage}}));
             continue;
         }
+        if msg["type"] == "control_request" && msg["request"]["subtype"] == "get_context_usage" {
+            let usage = json!({"totalTokens": context, "maxTokens": 200_000, "rawMaxTokens": 200_000, "percentage": context as f64 / 2000.0, "autoCompactThreshold": 184_000, "isAutoCompactEnabled": true, "categories": [], "apiUsage": null});
+            out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": usage}}));
+            continue;
+        }
+        // What a command printed: a colored first line, then a line per quarter second it has
+        // run, with a progress line rewritten in place.
+        if msg["type"] == "control_request" && msg["request"]["subtype"] == "get_task_output" {
+            let task = msg["request"]["task_id"].as_str().unwrap_or("").to_string();
+            let response = match started.get(&task) {
+                Some(at) => {
+                    let n = (at.elapsed().as_millis() / 250) as usize + 1;
+                    let mut output = "\u{1b}[32mstarting\u{1b}[0m\n".to_string();
+                    for i in 1..=n {
+                        output.push_str(&format!("line {i}\n"));
+                    }
+                    output.push_str("progress 10%\rprogress 100%\n");
+                    json!({"subtype": "success", "request_id": msg["request_id"], "response": {"output": output, "total_bytes": output.len(), "truncated": false}})
+                }
+                None => json!({"subtype": "error", "request_id": msg["request_id"], "error": "get_task_output: no shell or Monitor task with that task_id in this session"}),
+            };
+            out(json!({"type": "control_response", "response": response}));
+            continue;
+        }
         if msg["type"] == "control_request" && msg["request"]["subtype"] == "stop_task" {
             let task = msg["request"]["task_id"].as_str().unwrap_or("").to_string();
             if let Some(i) = running.iter().position(|(t, ..)| *t == task) {
@@ -219,6 +247,23 @@ fn main() {
         }
         let text = msg["message"]["content"].as_array().and_then(|b| b.iter().rev().find_map(|b| b["text"].as_str())).unwrap_or("").to_string();
         n += 1;
+        context += 15_000;
+        // Compacting: by itself ("compact yourself": its status says so first), or asked to.
+        let manual = text.starts_with("/compact");
+        if manual || text.contains("compact yourself") {
+            if !manual {
+                system("status", json!({"status": "compacting"}));
+                std::thread::sleep(Duration::from_millis(600));
+            }
+            let before = context;
+            context = 21_000;
+            system("compact_boundary", json!({"compact_metadata": {"trigger": if manual { "manual" } else { "auto" }, "pre_tokens": before, "post_tokens": context}}));
+            system("status", json!({"status": null}));
+            if manual {
+                result(&session, None);
+                continue;
+            }
+        }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         if text.contains("hit the limit") {
             // Refused at the session limit: the event, then the reply that says so.
@@ -329,6 +374,7 @@ fn main() {
             text_block(0, "Watching the log.");
             stop("end_turn");
             result(&session, None);
+            started.insert(task.clone(), Instant::now());
             running.push((task, id, child));
         } else if text.contains("background") && !text.contains("agent") {
             let id = format!("t{n}");
@@ -344,6 +390,7 @@ fn main() {
             text_block(0, "Started it in the background.");
             stop("end_turn");
             result(&session, None);
+            started.insert(task.clone(), Instant::now());
             running.push((task, id, child));
             if !text.contains("forever") {
                 later.push((Instant::now() + Duration::from_millis(700), Later::Command { n }));

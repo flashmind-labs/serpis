@@ -56,6 +56,8 @@ pub struct RunConfig {
     pub hooks: Option<Arc<dyn ToolHooks>>,
     /// Who answers a permission prompt no hook blocked.
     pub prompts: Prompts,
+    /// How often what its commands print is read while they run (None: not read).
+    pub task_output_every: Option<Duration>,
 }
 
 /// Who answers Claude Code's permission prompts (`claude-code-permission-prompts`).
@@ -483,6 +485,11 @@ struct Process {
     /// it says it took them in (`command_lifecycle` started).
     steers: Vec<(String, Message)>,
     launch: Launch,
+    /// It said it is compacting its context.
+    compacting: bool,
+    /// Its commands whose output is read (by task id), and whether each has ended (read once
+    /// more, then dropped).
+    watched: Arc<Mutex<HashMap<String, bool>>>,
     /// The end of what it wrote to stderr, for when it dies.
     stderr: Arc<Mutex<String>>,
     next_request: u64,
@@ -537,7 +544,30 @@ impl Process {
                 }
             }
         });
-        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), steers: Vec::new(), launch: l.clone(), stderr, next_request: 0 };
+        // What its commands print, read as they run (as its own /tasks view does); the answers
+        // come back among its lines (`aside`).
+        let watched: Arc<Mutex<HashMap<String, bool>>> = Default::default();
+        if let Some(every) = cfg.task_output_every {
+            let (watched, out) = (watched.clone(), writer.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    let ids: Vec<String> = {
+                        let mut w = watched.lock().unwrap();
+                        let ids = w.keys().cloned().collect();
+                        w.retain(|_, ended| !*ended);
+                        ids
+                    };
+                    for id in ids {
+                        let line = json!({"type": "control_request", "request_id": format!("{TASK_OUTPUT}{id}"), "request": {"subtype": "get_task_output", "task_id": id}});
+                        if out.send(format!("{line}\n")).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), steers: Vec::new(), launch: l.clone(), compacting: false, watched, stderr, next_request: 0 };
         p.initialize().await?;
         Ok(p)
     }
@@ -605,10 +635,49 @@ impl Process {
             }
             return true;
         }
+        // How full its context is, as asked (`get_context_usage`).
+        if v["type"] == "control_response" && v.pointer("/response/request_id").and_then(Value::as_str) == Some(CONTEXT) {
+            if let Some(r) = v.pointer("/response/response").filter(|_| v.pointer("/response/subtype").and_then(Value::as_str) == Some("success"))
+                && let (Some(used), Some(window)) = (r["totalTokens"].as_u64(), r["maxTokens"].as_u64())
+            {
+                let compacts_at = r["autoCompactThreshold"].as_u64().filter(|_| r["isAutoCompactEnabled"] != false);
+                emit(AgentEvent::Context { used, window, compacts_at });
+            }
+            return true;
+        }
+        // It compacted its context (by itself, or asked with /compact): how full it is now.
+        if v["type"] == "system" && sub == "compact_boundary" {
+            let m = &v["compact_metadata"];
+            emit(AgentEvent::Compacting(false));
+            emit(AgentEvent::Compacted { auto: m["trigger"] != "manual", before: m["pre_tokens"].as_u64().unwrap_or(0), after: m["post_tokens"].as_u64() });
+            self.ask_context();
+            return true;
+        }
+        // What a command printed, as asked (`get_task_output`).
+        if v["type"] == "control_response"
+            && let Some(task) = v.pointer("/response/request_id").and_then(Value::as_str).and_then(|r| r.strip_prefix(TASK_OUTPUT))
+        {
+            let r = v.pointer("/response/response").filter(|_| v.pointer("/response/subtype").and_then(Value::as_str) == Some("success"));
+            if let (Some(r), Some((tool, _))) = (r, self.tasks.get(task))
+                && !tool.is_empty()
+            {
+                let output = plain_tail(r["output"].as_str().unwrap_or(""), r["truncated"].as_bool().unwrap_or(false));
+                emit(AgentEvent::TaskOutput { tool: tool.clone(), output, bytes: r["total_bytes"].as_u64().unwrap_or(0) });
+            }
+            return true;
+        }
         // Where the account stands against its usage limits, when that changes.
         if v["type"] == "rate_limit_event" {
             emit(AgentEvent::Limit(limit_of(&v["rate_limit_info"])));
             return true;
+        }
+        // Compacting by itself, and done.
+        if v["type"] == "system" && sub == "status" {
+            let now = v["status"] == "compacting";
+            if now != self.compacting {
+                self.compacting = now;
+                emit(AgentEvent::Compacting(now));
+            }
         }
         // It says what mode it is in when it starts, and when that changes.
         if v["type"] == "system"
@@ -716,6 +785,10 @@ impl Process {
             }
             _ => return,
         }
+        // A command's output is read while it runs, and once more when it ends.
+        if t.kind == "bash" {
+            self.watched.lock().unwrap().insert(id.to_string(), !t.running());
+        }
         if !tool.is_empty() {
             emit(AgentEvent::Task { tool: tool.clone(), task: t.clone() });
         }
@@ -733,6 +806,13 @@ impl Process {
     }
 
     /// Send a control request; its id.
+    /// Ask how full its context is (answered among its lines: `aside`), cheaply: from its last
+    /// response's usage, not counted anew.
+    fn ask_context(&self) {
+        let line = json!({"type": "control_request", "request_id": CONTEXT, "request": {"subtype": "get_context_usage", "detail": "summary"}});
+        let _ = self.out.send(format!("{line}\n"));
+    }
+
     async fn request(&mut self, request: Value) -> Result<String> {
         self.next_request += 1;
         let id = format!("serpis-{}", self.next_request);
@@ -826,6 +906,8 @@ impl Process {
                 "user" => t.results(&v),
                 "control_request" => self.respond(&v, cfg, h, emit, interrupted).await?,
                 "result" => {
+                    // How full its context is now (answered after the turn, to the watcher).
+                    self.ask_context();
                     let aborted = interrupted || h.cancel.is_cancelled();
                     t.close_open(if aborted { StopReason::Aborted } else { StopReason::Error }, None);
                     let cost = v["total_cost_usd"].as_f64().unwrap_or(0.0);
@@ -962,6 +1044,69 @@ fn always_label(suggestions: &Value) -> Option<String> {
         })
         .collect();
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The request id of `get_context_usage` requests (answers to one are all alike).
+const CONTEXT: &str = "serpis-context";
+
+/// The request id prefix of `get_task_output` requests (then the task's id).
+const TASK_OUTPUT: &str = "serpis-task-output:";
+
+/// Lines of a command's output kept to show.
+const OUTPUT_LINES: usize = 40;
+
+/// What a command printed, as it would read on a terminal, plain: escape sequences (colors,
+/// cursor moves) dropped, a line rewritten with `\r` (a progress bar) as it ended up, and its
+/// last [`OUTPUT_LINES`] lines. `truncated`: the text starts mid-line (the first is dropped).
+pub fn plain_tail(raw: &str, truncated: bool) -> String {
+    let mut text = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: parameters, then a final byte.
+                Some('[') => {
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ST.
+                Some(']') => {
+                    while let Some(n) = chars.next() {
+                        if n == '\u{7}' || (n == '\u{1b}' && chars.peek() == Some(&'\\')) {
+                            if n == '\u{1b}' {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\t' | '\n' | '\r' => text.push(c),
+            c if c.is_control() => {}
+            c => text.push(c),
+        }
+    }
+    let mut lines: Vec<&str> = text
+        .split('\n')
+        .map(|l| {
+            // A line rewritten in place reads as its last version.
+            let l = l.trim_end_matches('\r');
+            l.rsplit('\r').next().unwrap_or(l)
+        })
+        .collect();
+    if truncated && lines.len() > 1 {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let from = lines.len().saturating_sub(OUTPUT_LINES);
+    lines[from..].join("\n")
 }
 
 /// A `rate_limit_info`: how the account stands against its usage limits.
@@ -1164,6 +1309,18 @@ fn tool_results(v: &Value, calls: &HashMap<String, String>) -> Vec<ToolResultMes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_reads_as_plain_text() {
+        // Colors and a title (OSC) go; a progress line shows as it ended up.
+        assert_eq!(plain_tail("\u{1b}[1;32mok\u{1b}[0m\n\u{1b}]0;title\u{7}50%\r100%\n\n", false), "ok\n100%");
+        // Cut off mid-line: that line goes.
+        assert_eq!(plain_tail("ial line\nnext\n", true), "next");
+        // Only the last lines.
+        let many: String = (1..=100).map(|i| format!("{i}\n")).collect();
+        let tail = plain_tail(&many, false);
+        assert_eq!((tail.lines().count(), tail.lines().next()), (OUTPUT_LINES, Some("61")));
+    }
 
     #[test]
     fn tools_take_serpis_names_and_back() {

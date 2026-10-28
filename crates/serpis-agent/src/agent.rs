@@ -46,6 +46,17 @@ pub enum AgentEvent {
     /// The reply being written has thought about `tokens` more tokens (an estimate, while its
     /// thinking streams or is left out of the stream).
     ThinkingTokens(u64),
+    /// What the command a tool call started has printed so far (its end, as plain text), and
+    /// how much in all.
+    TaskOutput { tool: String, output: String, bytes: u64 },
+    /// How full its context window is, as the agent counts it: tokens in it, the window, and
+    /// where it compacts by itself (None: it doesn't).
+    Context { used: u64, window: u64, compacts_at: Option<u64> },
+    /// It is compacting its context by itself (true), or done (false).
+    Compacting(bool),
+    /// It compacted its context: by itself (`auto`) or asked to, from `before` tokens to
+    /// `after`.
+    Compacted { auto: bool, before: u64, after: Option<u64> },
     /// Where the account stands against its usage limits (it changed, or a request was refused
     /// at one).
     Limit(serpis_proto::Limit),

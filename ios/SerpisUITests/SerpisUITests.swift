@@ -269,6 +269,19 @@ final class SerpisUITests: XCTestCase {
         app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
         shot("15-background")
         XCTAssertTrue(shown, "what runs in the background shows")
+        // Its card shows what it prints, live: opened from the turn's "Worked" row.
+        let worked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Worked'")).allElementsBoundByIndex.last
+        worked?.tap()
+        let command = app.buttons.matching(NSPredicate(format: "label CONTAINS 'sleep 300'")).firstMatch
+        if command.waitForExistence(timeout: 5) { command.tap() }
+        // (Below the screen's edge, and the list makes only what is on screen.)
+        app.scrollViews["transcript"].swipeUp()
+        let printed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'progress 100%'")).firstMatch
+        let live = printed.waitForExistence(timeout: 15)
+        shot("15a-background-output")
+        if !live {
+            XCTFail("its output shows; on screen: \(app.debugDescription.components(separatedBy: "\n").filter { $0.contains("Button") || $0.contains("StaticText") }.suffix(30).joined(separator: " | "))")
+        }
         running.buttons["Stop"].tap()
         let item = app.buttons["sleep then echo bg-done"]
         XCTAssertTrue(item.waitForExistence(timeout: 5))

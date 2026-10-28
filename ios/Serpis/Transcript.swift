@@ -515,14 +515,22 @@ struct ToolStep: View {
                     }
                 }
             }
-        } else if let t = tool.side.task, t.kind == "bash", t.background {
-            Text(t.running ? "Running in the background." : (t.summary ?? t.statusLine))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        } else if let t = tool.side.task, t.kind == "bash" || t.kind == "monitor", t.background {
+            // A command in the background: how it is going, and the end of what it printed.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(t.running ? "Running in the background." : (t.summary ?? t.statusLine))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if let out = t.lastLines(8) {
+                    TerminalCard(command: tool.command, output: out, failed: t.status == "failed")
+                        .accessibilityIdentifier("task-output")
+                }
+            }
         } else if let diff = tool.result?.diff, !diff.isEmpty {
             DiffView(diff: diff)
         } else if tool.name == "bash" {
-            TerminalCard(command: tool.command, output: tool.result?.text ?? tool.partial ?? "", failed: tool.result?.isError == true)
+            // Printing as it runs (Claude Code's commands), until its result.
+            TerminalCard(command: tool.command, output: tool.result?.text ?? tool.partial ?? tool.side.task?.lastLines(8) ?? "", failed: tool.result?.isError == true)
         } else if let text = tool.result?.text ?? tool.partial, !text.isEmpty {
             OutputCard(text: text, failed: tool.result?.isError == true)
         }

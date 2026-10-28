@@ -482,10 +482,6 @@ impl ChatBuffer {
             parts.push(format!("W{}", fmt_tokens(u.cache_write)));
         }
         parts.push(format!("${:.3}", u.cost.total));
-        let (used, window) = self.context();
-        if window > 0 {
-            parts.push(format!("{:.1}%/{}", used.unwrap_or(0) as f64 * 100.0 / window as f64, fmt_tokens(window)));
-        }
         parts.join(" ")
     }
 
@@ -583,6 +579,7 @@ impl ChatBuffer {
     fn rebuild(&mut self, ed: &Editor) {
         let t = &ed.theme;
         let show_thinking = ed.var_bool("chat-show-thinking");
+        let output_lines = ed.var("chat-task-output-lines").and_then(Value::as_u64).unwrap_or(8) as usize;
         let mut thinking_lines = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
@@ -731,7 +728,7 @@ impl ChatBuffer {
                 }
                 Entry::Tool { name, args, partial, result, elapsed_ms, ask, task, steps, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
-                    let side = Side { task: task.as_deref(), steps };
+                    let side = Side { task: task.as_deref(), steps, output_lines };
                     for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), ask.as_ref(), side, v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
@@ -1331,6 +1328,15 @@ impl ChatBuffer {
     }
 }
 
+/// `812 B`, `12.4 KB`, `3.1 MB`.
+fn fmt_bytes(n: u64) -> String {
+    match n {
+        0..1000 => format!("{n} B"),
+        1000..1_000_000 => format!("{:.1} KB", n as f64 / 1000.0),
+        _ => format!("{:.1} MB", n as f64 / 1_000_000.0),
+    }
+}
+
 /// The bar of a chat stopped at a usage limit: "Session limit reached · resets in 1h 12m ·
 /// goes on by itself then".
 fn limit_line(limit: &serpis_proto::Limit, continues: Option<i64>, now: i64) -> String {
@@ -1365,6 +1371,8 @@ fn unix_now() -> i64 {
 struct Side<'a> {
     task: Option<&'a serpis_proto::Task>,
     steps: &'a [Entry],
+    /// Lines of a command's output its card shows (`chat-task-output-lines`; opened: all kept).
+    output_lines: usize,
 }
 
 /// How work on the side is going, in a few words: "in background · 12s", "3 tools · 1.2k
@@ -1499,19 +1507,40 @@ fn tool_lines(
     let mut body: Vec<(StyledLine, Option<Color32>)> = Vec::new();
     // A subagent: what it does, as it goes (its own words close it).
     step_rows(side.steps, 0, &mut body);
+    // What a command has printed so far (read as it runs): its last lines, all kept when the
+    // card is opened.
+    let printed = |body: &mut Vec<(StyledLine, Option<Color32>)>, task: &serpis_proto::Task| {
+        let Some(out) = task.output.as_deref().filter(|o| !o.is_empty()) else { return };
+        let lines: Vec<&str> = out.lines().collect();
+        let n = if expanded { lines.len() } else { side.output_lines.min(lines.len()) };
+        if n < lines.len() {
+            body.push((StyledLine::new(format!("⋯ {} earlier lines (open the card for them)", lines.len() - n), Face::Meta), None));
+        }
+        for l in &lines[lines.len() - n..] {
+            body.push((StyledLine::new(*l, Face::ToolOutput), None));
+        }
+    };
+    let size = |task: &serpis_proto::Task| if task.output_bytes > 0 { format!(" · {} printed", fmt_bytes(task.output_bytes)) } else { String::new() };
     if body.is_empty()
         && let Some(task) = side.task
         && (task.kind == "bash" || task.kind == "monitor")
         && task.background
     {
-        // A command in the background: how it is going instead of where its output goes.
+        // A command in the background: how it is going, then the end of what it printed.
         let (line, face) = match task.status.as_str() {
-            "running" => ("Running in the background · C-c C-k stops it".to_string(), Face::Meta),
+            "running" => (format!("Running in the background{} · C-c C-k stops it", size(task)), Face::Meta),
             "failed" => (task.summary.clone().unwrap_or_else(|| "It failed.".into()), Face::Error),
-            "stopped" => ("Stopped.".to_string(), Face::Meta),
+            "stopped" => (format!("Stopped{}.", size(task)), Face::Meta),
             _ => (task.summary.clone().unwrap_or_else(|| "Finished.".into()), Face::ToolOutput),
         };
         body.push((StyledLine::new(line, face), None));
+        printed(&mut body, task);
+    } else if body.is_empty()
+        && result.is_none()
+        && let Some(task) = side.task.filter(|t| t.running() && t.kind == "bash" && t.output.is_some())
+    {
+        // A command it waits for, printing as it goes (its result replaces this).
+        printed(&mut body, task);
     } else if body.is_empty() && side.task.is_some_and(|t| t.running() && t.kind == "agent") {
         body.push((StyledLine::new(side.task.and_then(|t| t.summary.clone()).unwrap_or_else(|| "Starting…".into()), Face::Meta), None));
     }
@@ -2132,7 +2161,46 @@ impl Buffer for ChatBuffer {
             }
             ui.ctx().request_repaint_after(Duration::from_millis(60));
         }
-        // Session usage and context, like pi's footer.
+        // How full the context is: a small meter, yellow as it nears where it compacts.
+        let (used, window) = self.context();
+        if window > 0 {
+            let used = used.unwrap_or(0);
+            let s = &self.node.state;
+            let frac = used as f64 / window as f64;
+            let near = match s.compacts_at {
+                Some(at) => used as f64 >= at as f64 * 0.85,
+                None => frac >= 0.85,
+            };
+            let color = if near { theme.yellow } else { theme.fg_faint };
+            let label = format!("{:.0}%", frac * 100.0);
+            let lw = crate::chrome::text_width(&painter, &label, small.clone());
+            let bar_w = 26.0 * k;
+            let w = bar_w + 6.0 * k + lw;
+            if right - w - 14.0 * k > tr.right() {
+                let r = Rect::from_min_max(egui::pos2(right - w, cy - 10.0 * k), egui::pos2(right, cy + 10.0 * k));
+                let mut tip = format!("Context: {} of {} tokens ({:.0}%)", fmt_tokens(used), fmt_tokens(window), frac * 100.0);
+                if let Some(at) = s.compacts_at {
+                    tip.push_str(&format!("\nCompacts by itself at {} ({:.0}%)", fmt_tokens(at), at as f64 * 100.0 / window as f64));
+                }
+                if s.compactions > 0 {
+                    tip.push_str(&format!("\nCompacted {} in this chat", if s.compactions == 1 { "once".to_string() } else { format!("{} times", s.compactions) }));
+                }
+                tip.push_str("\nchat-compact compacts it now");
+                ui.interact(r, id.with("context"), egui::Sense::hover()).on_hover_text(tip);
+                let bar = Rect::from_min_size(egui::pos2(r.left(), cy - 2.5 * k), egui::vec2(bar_w, 5.0 * k));
+                painter.rect_filled(bar, 2.5 * k, theme.chip());
+                painter.rect_filled(Rect::from_min_size(bar.min, egui::vec2((bar_w * frac.min(1.0) as f32).max(2.0 * k), bar.height())), 2.5 * k, if near { theme.yellow } else { crate::chrome::tint(theme.fg, 0.35) });
+                // Where it compacts: a tick on the bar.
+                if let Some(at) = s.compacts_at.filter(|a| *a < window) {
+                    let x = bar.left() + bar_w * (at as f64 / window as f64) as f32;
+                    painter.vline(x, (bar.top() - 2.0 * k)..=(bar.bottom() + 2.0 * k), Stroke::new(1.0, theme.fg_dim));
+                }
+                crate::chrome::text(&painter, egui::pos2(bar.right() + 6.0 * k, cy), &label, small.clone(), color, lw + 1.0);
+                hits.push(("context", r));
+                right -= w + 14.0 * k;
+            }
+        }
+        // Session usage, like pi's footer.
         if ed.var("chat-show-usage").and_then(Value::as_bool).unwrap_or(true) {
             let label = self.usage_label();
             let w = crate::chrome::text_width(&painter, &label, small.clone());

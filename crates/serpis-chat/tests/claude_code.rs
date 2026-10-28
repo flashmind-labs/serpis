@@ -345,6 +345,16 @@ fn chats_run_on_claude_code() {
     chat.compact(&mut w.host, serpis_chat::CompactReason::Manual, Some("keep the plan".into()));
     w.finish(&mut chat);
     assert!(w.log().1.iter().any(|g| g["message"]["content"][0]["text"] == "/compact keep the plan"));
+    // Its context as it counts it (its window, where it compacts by itself), and each
+    // compaction where it happened: asked for, or by itself (compacting meanwhile).
+    w.until(&mut chat, |c| c.entries().iter().any(|e| matches!(e, Entry::Info { text, .. } if text.starts_with("Compacted: ") && text.ends_with(" → 21.0k tokens"))) && c.state().context.0 == Some(21_000));
+    assert_eq!((chat.state().context.1, chat.state().compacts_at), (200_000, Some(184_000)));
+    chat.submit(&mut w.host, "compact yourself".into(), vec![], false, None).unwrap();
+    w.until(&mut chat, |c| c.state().compacting);
+    w.finish(&mut chat);
+    assert!(chat.entries().iter().any(|e| matches!(e, Entry::Info { text, .. } if text.starts_with("Compacted by itself: "))), "{:#?}", chat.entries());
+    w.until(&mut chat, |c| !c.state().compacting && c.state().context.0 == Some(21_000));
+    assert_eq!(chat.state().compactions, 2);
 
     // Restored from its session file, the chat resumes Claude Code's session.
     let path = chat.session.as_ref().map(|s| s.path.clone()).unwrap();
@@ -353,6 +363,7 @@ fn chats_run_on_claude_code() {
     let mut again = w.chat();
     again.restore(&mut w.host, &serpis_chat::session::load(&path).unwrap());
     assert_eq!(again.model.as_ref().map(|m| m.id.as_str()), Some("sonnet"));
+    assert!(again.entries().iter().any(|e| matches!(e, Entry::Info { text, .. } if text.starts_with("Compacted by itself: "))), "a resumed chat shows its compactions");
     w.send(&mut again, "back");
     let (starts, got) = w.log();
     assert_eq!(after(starts.last().unwrap(), "--resume"), Some(id.as_str()));
@@ -403,7 +414,18 @@ fn chats_run_on_claude_code() {
 
     // Stopping one: Claude Code is asked to.
     w.send(&mut bg, "background forever");
+    // What it prints shows as it runs, read every second: plain text (no color codes), a line
+    // rewritten in place as it ended up, more as it goes.
+    let printed = |c: &Chat| match tool(c, "bash") {
+        Entry::Tool { task: Some(t), .. } => t.output.clone().unwrap_or_default(),
+        _ => String::new(),
+    };
+    w.until(&mut bg, |c| printed(c).contains("line 2"));
+    let first = printed(&bg);
+    assert!(first.starts_with("starting\nline 1\n") && first.ends_with("\nprogress 100%"), "{first:?}");
+    w.until(&mut bg, |c| printed(c).lines().count() > first.lines().count());
     let Entry::Tool { task: Some(task), .. } = tool(&bg, "bash") else { panic!() };
+    assert!(task.output_bytes > 0);
     assert!(bg.stop_task(&task.id));
     w.until(&mut bg, |c| matches!(c.entries().iter().rev().find(|e| matches!(e, Entry::Tool { name, .. } if name == "bash")), Some(Entry::Tool { task: Some(t), .. }) if t.status == "stopped"));
     assert!(!bg.running(), "a stopped task takes no turn");

@@ -89,8 +89,10 @@ struct TaskInfo: Decodable, Hashable {
     var lastTool: String?
     var toolUses: Int
     var tokens: Int
+    /// The end of what a command has printed so far, as plain text.
+    var output: String?
 
-    private enum Keys: String, CodingKey { case id, kind, description, status, background, summary, last_tool, tool_uses, tokens }
+    private enum Keys: String, CodingKey { case id, kind, description, status, background, summary, last_tool, tool_uses, tokens, output }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -103,6 +105,13 @@ struct TaskInfo: Decodable, Hashable {
         lastTool = try? c.decode(String.self, forKey: .last_tool)
         toolUses = (try? c.decode(Int.self, forKey: .tool_uses)) ?? 0
         tokens = (try? c.decode(Int.self, forKey: .tokens)) ?? 0
+        output = try? c.decode(String.self, forKey: .output)
+    }
+
+    /// Its output's last `n` lines.
+    func lastLines(_ n: Int) -> String? {
+        guard let o = output, !o.isEmpty else { return nil }
+        return o.split(separator: "\n", omittingEmptySubsequences: false).suffix(n).joined(separator: "\n")
     }
 
     var running: Bool { status == "running" }

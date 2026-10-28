@@ -239,6 +239,10 @@ pub struct Chat {
     thinking_tokens: Option<u64>,
     /// Where its account stands against its usage limits, as Claude Code last said.
     limit: Option<serpis_proto::Limit>,
+    /// How full Claude Code says its context is: (tokens, window, where it compacts by itself).
+    claude_context: Option<(u64, u64, Option<u64>)>,
+    /// Claude Code is compacting its context.
+    claude_compacting: bool,
     /// It stopped at a usage limit, and goes on by itself at this time (unix seconds); the
     /// token cancels the wait.
     continues: Option<(i64, CancellationToken)>,
@@ -310,6 +314,8 @@ impl Chat {
             thinking_tokens: None,
             limit: None,
             continues: None,
+            claude_context: None,
+            claude_compacting: false,
             default_mode: "default".into(),
             tx,
             rx,
@@ -355,7 +361,12 @@ impl Chat {
     }
 
     pub fn compacting(&self) -> bool {
-        self.compacting.is_some()
+        self.compacting.is_some() || self.claude_compacting
+    }
+
+    /// Where the chat's agent compacts its context by itself, in tokens (Claude Code's).
+    pub fn compacts_at(&self) -> Option<u64> {
+        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_claude_code())
     }
 
     /// The running agent (aborting through it takes effect at once).
@@ -614,6 +625,7 @@ impl Chat {
             model,
             hooks: host.tool_hooks(),
             prompts: host.var_str("claude-code-permission-prompts").and_then(|p| serpis_agent::claude_code::Prompts::parse(&p)).unwrap_or_default(),
+            task_output_every: Some(Duration::from_millis(host.var_u64("claude-code-task-output-interval", 1000))).filter(|d| !d.is_zero()),
         };
         // Prompt cache bookkeeping is Claude Code's own: what it sends isn't serpis's to know.
         self.sent = None;
@@ -768,6 +780,10 @@ impl Chat {
     /// Context the conversation fills: the last response's tokens (what the next request sends,
     /// roughly), and the model's window. None before any response.
     pub fn context(&self) -> (Option<u64>, u64) {
+        // Claude Code's own count (its window, what its system prompt and tools take).
+        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_claude_code()) {
+            return (Some(used), window);
+        }
         let used = self.history.iter().rev().find_map(|m| match m {
             Message::Assistant(a) if !matches!(a.stop_reason, StopReason::Aborted | StopReason::Error) => Some(a.usage.input + a.usage.cache_read + a.usage.cache_write + a.usage.output),
             _ => None,
@@ -1301,6 +1317,13 @@ impl Chat {
                     if name == "Monitor" && task.kind == "bash" {
                         task.kind = "monitor".into();
                     }
+                    // What it printed is read apart (TaskOutput): kept as it changes.
+                    if let Some(old) = t.as_deref()
+                        && task.output.is_none()
+                    {
+                        task.output = old.output.clone();
+                        task.output_bytes = old.output_bytes;
+                    }
                     if !task.running() {
                         ended = Some(json!({"id": tool, "task": task, "steps": steps}));
                     }
@@ -1318,6 +1341,36 @@ impl Chat {
             }
             AgentEvent::ThinkingTokens(d) => *self.thinking_tokens.get_or_insert(0) += d,
             AgentEvent::Limit(l) => self.limit = Some(l),
+            AgentEvent::Context { used, window, compacts_at } => self.claude_context = Some((used, window, compacts_at)),
+            AgentEvent::Compacting(on) => self.claude_compacting = on,
+            AgentEvent::Compacted { auto, before, after } => {
+                self.claude_compacting = false;
+                self.compactions += 1;
+                let how = if auto { "Compacted by itself" } else { "Compacted" };
+                let text = match after {
+                    Some(a) => format!("{how}: {} → {} tokens", fmt_tokens(before), fmt_tokens(a)),
+                    None => format!("{how}: {} tokens summarized", fmt_tokens(before)),
+                };
+                // Kept where it happened: a resumed chat shows it there.
+                self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len()}));
+                self.entries.push(Entry::Info { text, tone: Tone::Meta });
+            }
+            AgentEvent::TaskOutput { tool, output, bytes } => {
+                let mut ended = None;
+                if let Some(Entry::Tool { task: Some(t), steps, .. }) = self.tool_entry(&tool)
+                    && (t.output.as_deref() != Some(output.as_str()) || t.output_bytes != bytes)
+                {
+                    t.output = (!output.is_empty()).then_some(output);
+                    t.output_bytes = bytes;
+                    // Read once more after it ended: kept with how it ended.
+                    if !t.running() {
+                        ended = Some(json!({"id": tool, "task": t, "steps": steps}));
+                    }
+                }
+                if let Some(e) = ended {
+                    self.append_entry(host, CLAUDE_TOOL, e);
+                }
+            }
             // Claude Code went on by itself (work it left running finished): a run of the
             // chat's, which it shows, records and can stop like any.
             AgentEvent::Adopted { handle, why } => {
@@ -1599,12 +1652,14 @@ impl Chat {
             model: self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
             thinking: self.thinking.as_str().to_string(),
             running: self.running(),
-            compacting: self.compacting.is_some(),
+            compacting: self.compacting(),
             step: self.running().then(|| self.current_step()),
             cwd: self.cwd.to_string_lossy().into_owned(),
             session_id: self.session_id.clone(),
             usage: self.totals.clone(),
             context: self.context(),
+            compacts_at: self.compacts_at(),
+            compactions: self.compactions,
             cache: self.cache_status(),
             last_error: self.last_error.clone(),
             session: self.session.as_ref().filter(|w| w.exists()).map(|w| w.path.to_string_lossy().into_owned()),

@@ -428,6 +428,18 @@ A subagent's steps (its commands, edits and answer) show inside its Agent card, 
 when it runs in the background. Stopping or closing a chat ends everything its `claude`
 started: what it runs is sent SIGTERM (so scripts clean up), then SIGKILL after a moment.
 
+What its commands print shows on their cards as they run, background ones and those it waits
+for: the last `chat-task-output-lines` lines (8; open the card for the last 40), as plain text,
+with how much it printed in all. serpis reads it every `claude-code-task-output-interval`
+milliseconds (1000; 0 turns it off), as Claude Code's own `/tasks` view does, and once more when
+the command ends; the phone shows the same.
+
+The composer's context meter (all chats) shows how full the context is, for a Claude Code chat as
+Claude Code counts it (its window, its system prompt and tools), with a tick where it compacts by
+itself; it turns yellow as it gets close, and its tooltip says by how much. Claude Code
+compacting (by itself, or with `/compact`) shows as compacting, then a note in the transcript
+where it happened (`Compacted by itself: 155.0k → 21.0k tokens`), kept when the chat is resumed.
+
 The commands an agent runs, serpis's own or Claude Code's (and `claude` itself), have
 `SERPIS_AGENT=1` in their environment, beside `SERPIS_SESSION_ID`; your own terminals don't. A
 shell config can tell them apart, e.g. in `~/.zshrc`:
