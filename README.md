@@ -160,10 +160,11 @@ begin with `/`, `~` or `.`; and Browse… opens the system's folder dialog.
 Chats on serpis's own agent have skills the way pi has them (the Agent Skills format,
 agentskills.io): a folder with a `SKILL.md` whose frontmatter names it and says when it applies.
 The system prompt lists each skill's name, description and file, and the agent reads the file
-when a task matches; `disable-model-invocation: true` keeps one out of that list. They come
-from the agent directory's `skills` (`~/.pi/agent/skills`, shared with pi), the project's
-`.pi/skills`, `~/.agents/skills` and `.agents/skills` up to the repository's root, pi's
-`skills` setting and `agent-skill-paths`; the first of a name wins. `agent-skills-claude` adds
+when a task matches; `disable-model-invocation: true` keeps one out of that list. serpis's own
+live in `~/.serpis/agent/skills`; pi's (`~/.pi/agent/skills`, and the paths its `skills` setting
+adds) come next, so skills you made for pi work as they are (`agent-skills-pi` = `false` leaves
+them out). Then the project's `.pi/skills`, `~/.agents/skills` and `.agents/skills` up to the
+repository's root, and `agent-skill-paths`; the first of a name wins. `agent-skills-claude` adds
 Claude Code's (`~/.claude/skills`), `agent-skills` = `false` turns them off.
 
 `/skill:name what to do` sends a skill's instructions with the message, for when it should apply

@@ -13,8 +13,8 @@ pub struct Skill {
     pub description: String,
     /// Its `SKILL.md` (or a standalone Markdown skill).
     pub file: PathBuf,
-    /// Where it was found: `user`, `project` or `path` (a configured one), or `claude` (Claude
-    /// Code's skill folders).
+    /// Where it was found: `user` (serpis's), `pi` (pi's), `project`, `path` (a configured one),
+    /// or `claude` (Claude Code's skill folders).
     pub source: String,
     /// Only for `/skill:name`: the model isn't offered it (`disable-model-invocation`).
     pub explicit_only: bool,
@@ -29,8 +29,11 @@ impl Skill {
 /// Where to look, in order (the first skill of a name wins).
 #[derive(Debug, Clone, Default)]
 pub struct Places {
-    /// The agent directory (`~/.pi/agent`): its `skills`.
+    /// serpis's agent directory (`~/.serpis/agent`): its `skills`.
     pub agent_dir: PathBuf,
+    /// pi's (`~/.pi/agent`), read after serpis's: its `skills`, and its project folder's
+    /// (`.pi/skills`).
+    pub pi_dir: Option<PathBuf>,
     /// The working directory: its `.pi/skills`, and `.agents/skills` up to the repository root.
     pub cwd: PathBuf,
     /// More files or directories (pi's `skills` setting, `agent-skill-paths`).
@@ -45,7 +48,11 @@ pub struct Places {
 pub fn discover(p: &Places) -> Vec<Skill> {
     let mut found = Vec::new();
     let home = &p.home;
-    let mut dirs: Vec<(PathBuf, &str)> = vec![(p.agent_dir.join("skills"), "user"), (p.cwd.join(".pi").join("skills"), "project"), (home.join(".agents").join("skills"), "user")];
+    let mut dirs: Vec<(PathBuf, &str)> = vec![(p.agent_dir.join("skills"), "user")];
+    if let Some(pi) = &p.pi_dir {
+        dirs.push((pi.join("skills"), "pi"));
+    }
+    dirs.extend([(p.cwd.join(".pi").join("skills"), "project"), (home.join(".agents").join("skills"), "user")]);
     // `.agents/skills` from the working directory up, stopping at the repository's root.
     for d in p.cwd.ancestors() {
         dirs.push((d.join(".agents").join("skills"), "project"));
@@ -285,9 +292,11 @@ mod tests {
         // The project's own, and one by a name already taken (the first wins).
         write(&cwd.join(".pi/skills/deploy/SKILL.md"), "---\ndescription: Deploy <it> & check.\n---\nRun ./deploy.sh.\n");
         write(&cwd.join(".agents/skills/review/SKILL.md"), "---\nname: review\ndescription: Another.\n---\n");
-        let skills = discover(&Places { agent_dir: agent.clone(), cwd: cwd.clone(), paths: vec![], claude: false, home: root.join("home") });
+        // pi's own folder, after serpis's.
+        write(&root.join("pi/skills/pi-only/SKILL.md"), "---\ndescription: From pi.\n---\n");
+        let skills = discover(&Places { agent_dir: agent.clone(), pi_dir: Some(root.join("pi")), cwd: cwd.clone(), paths: vec![], claude: false, home: root.join("home") });
         let names: Vec<(&str, &str)> = skills.iter().map(|s| (s.name.as_str(), s.source.as_str())).collect();
-        assert_eq!(names, [("review", "user"), ("quiet", "user"), ("deploy", "project")], "named by their folder when frontmatter doesn't");
+        assert_eq!(names, [("review", "user"), ("quiet", "user"), ("pi-only", "pi"), ("deploy", "project")], "named by their folder when frontmatter doesn't");
         let prompt = for_prompt(&skills, "read");
         assert!(prompt.contains("<name>review</name>") && prompt.contains("Deploy &lt;it&gt; &amp; check."), "{prompt}");
         assert!(!prompt.contains("quiet"), "an explicit-only skill isn't offered");

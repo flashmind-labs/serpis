@@ -856,15 +856,18 @@ impl Chat {
             Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(expand_home).collect(),
             _ => Vec::new(),
         };
-        // pi's own `skills` setting: paths from its agent directory.
-        let pi: Option<Value> = std::fs::read_to_string(agent_dir.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
-        if let Some(Value::Array(a)) = pi.as_ref().and_then(|v| v.get("skills")) {
-            paths.extend(a.iter().filter_map(Value::as_str).filter(|p| !p.starts_with('!') && !p.starts_with('-')).map(|p| {
-                let p = expand_home(p.trim_start_matches('+'));
-                if p.is_absolute() { p } else { agent_dir.join(p) }
-            }));
+        // pi's: its skills folder, and the paths its `skills` setting adds (from its directory).
+        let pi_dir = host.var_bool("agent-skills-pi", true).then(serpis_ai::Paths::pi_agent_dir);
+        if let Some(pi) = &pi_dir {
+            let settings: Option<Value> = std::fs::read_to_string(pi.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+            if let Some(Value::Array(a)) = settings.as_ref().and_then(|v| v.get("skills")) {
+                paths.extend(a.iter().filter_map(Value::as_str).filter(|p| !p.starts_with('!') && !p.starts_with('-')).map(|p| {
+                    let p = expand_home(p.trim_start_matches('+'));
+                    if p.is_absolute() { p } else { pi.join(p) }
+                }));
+            }
         }
-        serpis_agent::skills::Places { agent_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default() }
+        serpis_agent::skills::Places { agent_dir, pi_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default() }
     }
 
     /// The skills this chat has (none with `agent-skills` off).
