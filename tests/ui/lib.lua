@@ -19,7 +19,8 @@ end
 -- everything else as key events with modifiers. Unlike serpis.keys.feed, this goes through
 -- the platform input path, so it catches bindings real keys can't reach.
 local NAMED = { SPC = "Space", RET = "Enter", ESC = "Escape", TAB = "Tab", DEL = "Backspace",
-  ["<up>"] = "ArrowUp", ["<down>"] = "ArrowDown", ["<left>"] = "ArrowLeft", ["<right>"] = "ArrowRight" }
+  ["<up>"] = "ArrowUp", ["<down>"] = "ArrowDown", ["<left>"] = "ArrowLeft", ["<right>"] = "ArrowRight",
+  ["<pageup>"] = "PageUp", ["<pagedown>"] = "PageDown" }
 function T.press(seq)
   local d = serpis.debug
   for tok in seq:gmatch("%S+") do

@@ -31,7 +31,7 @@ serpis.defer(400, function()
     d.key("Escape")
     -- Another window takes focus; the pill in the chat's header still acts on the chat.
     serpis.window.split("below")
-    serpis.buffer.show(serpis.buffer.scratch())
+    serpis.buffer.show(serpis.buffer.create("text", "*notes*"))
     serpis.defer(400, function()
       T.check("focus moved away", serpis.buffer.current() ~= chat, true)
       click_pill(function()

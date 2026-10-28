@@ -30,20 +30,21 @@ fn order_key(name: &str) -> (u8, u64, String) {
 }
 
 impl Editor {
-    /// The buffer a new or emptied workspace shows (`workspace-initial-buffer`).
+    /// The buffer a new workspace shows: `workspace-initial-buffer`, else nothing (its empty
+    /// page).
     pub fn workspace_initial_buffer(&mut self) -> BufferId {
-        let name = self.var_str("workspace-initial-buffer").unwrap_or_else(|| "*scratch*".into());
-        match self.buffer_by_name(&name) {
+        let name = self.var_str("workspace-initial-buffer").unwrap_or_default();
+        match self.buffer_by_name(&name).filter(|_| !name.is_empty()) {
             Some(id) => id,
-            None => self.scratch_buffer(),
+            None => self.empty_buffer(),
         }
     }
 
-    /// A workspace is empty when it is a single window on the initial buffer.
+    /// A workspace is empty when it is a single window showing nothing (or the initial buffer).
     fn layout_is_empty(&self, layout: &LayoutTree) -> bool {
         let leaves = layout.leaves();
-        let initial = self.var_str("workspace-initial-buffer").unwrap_or_else(|| "*scratch*".into());
-        leaves.len() == 1 && self.meta(self.windows[leaves[0]].buffer).is_some_and(|m| m.name == initial)
+        let initial = self.var_str("workspace-initial-buffer").unwrap_or_default();
+        leaves.len() == 1 && self.meta(self.windows[leaves[0]].buffer).is_some_and(|m| m.major == crate::buffers::empty::KIND || (!initial.is_empty() && m.name == initial))
     }
 
     pub fn workspace_is_empty(&self, name: &str) -> bool {
@@ -249,7 +250,7 @@ fn candidates(ed: &Editor, all: bool) -> Vec<Candidate> {
 
 pub fn install(ed: &mut Editor) {
     let o = BUILTIN;
-    ed.defvar("workspace-initial-buffer", json!("*scratch*"), "Buffer shown by a new or emptied workspace.");
+    ed.defvar("workspace-initial-buffer", json!(""), "Buffer a new workspace shows (by name); \"\": none, its empty page (what you open fills it).");
     ed.defvar("workspace-keep-empty", json!(false), "Keep empty workspaces when switching away (i3 drops them).");
     ed.defvar("workspace-auto-back-and-forth", json!(false), "Switching to the current workspace goes back to the previous one (i3 workspace_auto_back_and_forth).");
     ed.defvar("workspace-move-follows", json!(false), "Moving a window to a workspace also switches to it.");

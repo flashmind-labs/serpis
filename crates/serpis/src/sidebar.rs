@@ -390,7 +390,7 @@ pub fn track(ed: &mut Editor) {
 pub fn items(ed: &mut Editor) -> Vec<Item> {
     let current = ed.current_buffer();
     let visible: HashSet<BufferId> = ed.layout.visible_leaves().iter().map(|w| ed.windows[*w].buffer).collect();
-    let ids: Vec<BufferId> = ed.buffers.keys().collect();
+    let ids: Vec<BufferId> = ed.listed_buffers();
     let mut out = Vec::new();
     for id in ids {
         let Some(meta) = ed.meta(id).cloned() else { continue };

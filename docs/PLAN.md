@@ -36,7 +36,7 @@ objects cross the boundary, and unloading succeeds.
 ### Core primitives (`serpis` crate)
 
 - **Editor**: the single mutable world, passed as `&mut Editor` to every command, hook, Lua call and plugin.
-- **Buffer** (`trait Buffer`): a named object with a major mode, a list of minor modes, buffer-local vars, `ui()` and `handle_key()`. Built-in kinds: `chat`, `terminal`, `text` (scratch/file), `messages`, `help`/describe.
+- **Buffer** (`trait Buffer`): a named object with a major mode, a list of minor modes, buffer-local vars, `ui()` and `handle_key()`. Built-in kinds: `chat`, `terminal`, `text` (files, pages), `messages`, `help`/describe.
 - **TextSurface** (`trait TextSurface`): the shared text view every buffer can expose: lines, cursor, selection, visible range, `screen_rect(pos)`, and insert/delete when the buffer is writable. Vim motions, search, yank and avy/flash-style jumping are written once against this trait, so they work in terminals, chats and text buffers alike.
 - **Windows**: a binary split tree. Each window shows a buffer and has its own point/scroll. Splits can be resized by dragging dividers or with commands; windows can be split, closed, maximized (`delete-other-windows`), swapped and cycled. Every window header has mouse controls (split, close, buffer menu).
 - **Keymaps**: Emacs `kbd` notation (`C-x C-f`, `M-x`, `s-p`, `<escape>`). Lookup order for the focused buffer: overriding map (minibuffer/palette) → for each minor mode M: `M:<major>` then `M` → `<major>` → `global`. Prefix keys show a which-key popup. Unbound keys go to the key interceptors (vim's operator parser), then to the buffer's self-insert or terminal passthrough.

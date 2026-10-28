@@ -27,12 +27,6 @@ impl TextBuffer {
         }
     }
 
-    pub fn scratch() -> Self {
-        Self::new(
-            ";; *scratch* — a plain text buffer.\n;; M-x (or s-P / : in vim) runs any command. Try `new-chat`, `new-terminal`,\n;; `set-keybinding-scheme`, `describe-keymap`, `open-config`.\n",
-        )
-    }
-
     /// A read-only page (help, messages).
     pub fn page(text: &str, major: &str) -> Self {
         let mut b = Self::new(text);

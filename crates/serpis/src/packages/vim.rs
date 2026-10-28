@@ -136,6 +136,7 @@ fn initial_state(ed: &Editor, major: &str) -> State {
 }
 
 pub fn enable(ed: &mut Editor) {
+    ed.defvar("vim-page-keys", json!("half"), "Page Up and Page Down in normal and visual state: \"half\" a page, as C-u and C-d, or a \"full\" one, as C-b and C-f.");
     ed.defvar("vim-display-lines", json!(false), "j/k move by screen rows (wrapped lines count as several) and gj/gk by whole lines, like `nnoremap j gj` and `nnoremap gj j` in vim. Operators (dj, yk) stay linewise.");
     ed.defvar("vim-g-commands", json!({"w": "jump-word"}), "Commands for g-prefixed keys vim doesn't define itself, e.g. {w = \"jump-word\"} for gw.");
     VIM.with(|v| {
@@ -791,7 +792,11 @@ fn handle(ed: &mut Editor, vm: &mut Vim, st: State, chord: &KeyChord) -> Step {
     // Control keys in normal/visual state.
     if ch.is_none() {
         let page = ed.with_surface(|s, _| s.page_lines()).unwrap_or(20);
+        // Page Up/Down: as C-u/C-d (half a page), or C-b/C-f with vim-page-keys "full".
+        let step = if ed.var("vim-page-keys").and_then(Value::as_str) == Some("full") { page } else { page / 2 };
         let delta: Option<isize> = match (&chord.key, chord.mods.ctrl) {
+            (Key::Named(n), false) if n == "pagedown" => Some(step as isize),
+            (Key::Named(n), false) if n == "pageup" => Some(-(step as isize)),
             (Key::Char('d'), true) => Some((page / 2) as isize),
             (Key::Char('u'), true) => Some(-((page / 2) as isize)),
             (Key::Char('f'), true) => Some(page as isize),

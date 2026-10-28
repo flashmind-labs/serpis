@@ -61,7 +61,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `s-r` / `C-c C-r` | resume a saved chat session (`chat-resume`) |
 | `s-\` / `s-\|` | split right / below |
 | `s-]` `s-[` `s-1..9` | move between windows |
-| `s-w` / `s-W` | close window (the buffer stays) / kill buffer |
+| `s-w` / `s-W` | close window (the buffer stays; the last leaves the workspace empty) / kill buffer (and its windows) |
 | `RET` / `S-RET` / `M-RET` | send / newline / queue follow-up |
 | `ESC` or `C-c C-c` | abort the agent |
 | `TAB` | fold/unfold the tool output at point |
@@ -90,7 +90,8 @@ terminals, where normal state navigates the scrollback and edits the command lin
 (`dw`, `ciw`, `A`, `p`, ...): edits are replayed to the program as keys, so they work in zsh, bash or
 Claude Code's prompt. zsh gets OSC 133 prompt marks automatically; other shells fall back to
 `terminal-prompt-regexp`. `<leader>` (`leader-key`, default `SPC`) starts vim normal-state
-bindings and `C-w` is the window prefix.
+bindings and `C-w` is the window prefix. Page Up and Page Down scroll half a page in normal and
+visual state, as `C-u` and `C-d` do (`vim-page-keys` = `"full"`: a page, as `C-b` and `C-f`).
 
 In terminals `C-c` is a prefix, as in Emacs: `C-c C-c` sends a real Ctrl-C, and a `C-c` followed by
 an unbound key goes to the program as both keys (`prefix-passthrough-modes`,
@@ -238,10 +239,15 @@ From Lua: `serpis.session.list(fn)`, `serpis.session.resume(path, {show})`, `ser
 ## Windows and workspaces
 
 Layout works like i3/sway. A window is a view onto a buffer, and closing it (`close-window`, `:q`)
-never kills the buffer: hidden buffers stay in `switch-to-hidden-buffer`. Killing is separate
-(`kill-current-buffer`) and asks first when a terminal runs a program other than its idle shell
-(`confirm-kill-processes` / `confirm-quit-processes`: `"running"`, `"always"`, `"never"`; the
-`kill-buffer-query` hook can veto or approve).
+closes it: the others take its space, and closing the last leaves the workspace empty (it offers
+what to open, and what you open fills it). Nothing is shown in its place, and the buffer isn't
+killed: hidden buffers stay in `switch-to-hidden-buffer`. Killing is separate
+(`kill-current-buffer`) and closes the windows that showed the buffer, in any workspace, as an
+app's do in i3 (`kill-buffer-closes-window` = `false` shows what they showed before instead). It
+asks first when a terminal runs a program other than its idle shell (`confirm-kill-processes` /
+`confirm-quit-processes`: `"running"`, `"always"`, `"never"`; the `kill-buffer-query` hook can
+veto or approve). serpis starts on an empty workspace; `workspace-initial-buffer` names a buffer
+new workspaces show instead.
 
 Each workspace is a tree of containers holding any number of windows, laid out `splith`, `splitv`,
 `tabbed` or `stacked`:

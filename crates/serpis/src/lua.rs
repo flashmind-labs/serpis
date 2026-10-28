@@ -389,7 +389,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         e.meta(id).map(|m| m.minor_modes.clone()).unwrap_or_default()
     }))?)?;
     buf.set("list", lua.create_function(|lua, ()| {
-        let list = ed(|e| e.buffers.iter().map(|(id, s)| json!({"id": buffer_id_to_u64(id), "name": s.meta.name, "kind": s.meta.major})).collect::<Vec<_>>())?;
+        let list = ed(|e| e.buffers.iter().filter(|(_, s)| s.meta.major != crate::buffers::empty::KIND).map(|(id, s)| json!({"id": buffer_id_to_u64(id), "name": s.meta.name, "kind": s.meta.major})).collect::<Vec<_>>())?;
         lua_of(lua, &list)
     })?)?;
     buf.set("create", lua.create_function(|lua, (kind, name, params): (String, Option<String>, Option<LuaValue>)| {
@@ -455,7 +455,6 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         e.set_buffer_title(id, title);
     }))?)?;
     buf.set("by_name", lua.create_function(|_, name: String| ed(|e| e.buffer_by_name(&name).map(buffer_id_to_u64)))?)?;
-    buf.set("scratch", lua.create_function(|_, ()| ed(|e| buffer_id_to_u64(e.scratch_buffer())))?)?;
     buf.set("exists", lua.create_function(|_, id: u64| ed(|e| e.buffers.contains_key(buffer_id_from_u64(id))))?)?;
     buf.set("directory", lua.create_function(|_, id: Option<u64>| ed(|e| {
         let id = id.map(buffer_id_from_u64).unwrap_or(e.current_buffer());

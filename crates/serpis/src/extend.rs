@@ -65,7 +65,6 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.buffer.exists", "(id): whether it is alive."),
     ("serpis.buffer.by_name", "(name): the id of the buffer called name, or nil."),
     ("serpis.buffer.hidden", "(): buffers no window shows."),
-    ("serpis.buffer.scratch", "(): the *scratch* buffer's id (created if needed)."),
     ("serpis.buffer.directory", "(id?): its working directory."),
     ("serpis.buffer.machine", "(id?): the machine its work runs on (a chat or terminal elsewhere), nil for this one."),
     ("serpis.buffer.process", "(id?): nil, or {running = false} or {running = true, program} for terminals and chats."),

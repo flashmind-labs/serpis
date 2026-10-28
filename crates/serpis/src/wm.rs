@@ -94,7 +94,7 @@ impl Editor {
                 out.push(*id);
             }
         }
-        for id in self.buffers.keys() {
+        for id in self.listed_buffers() {
             if !shown.contains(&id) && !out.contains(&id) {
                 out.push(id);
             }
@@ -107,18 +107,24 @@ impl Editor {
     pub fn bury_buffer(&mut self) {
         let cur = self.current_buffer();
         let hidden = self.hidden_buffers();
-        let next = hidden.into_iter().find(|b| *b != cur).unwrap_or_else(|| self.workspace_initial_buffer());
+        let next = hidden.into_iter().find(|b| *b != cur).unwrap_or_else(|| self.empty_buffer());
         if next != cur {
             self.show_buffer(next);
         }
     }
 
-    /// Close the focused window or selected container; the last window buries its buffer
-    /// instead. Buffers are never killed.
+    /// Close the focused window or selected container, as i3 does: the others take its space,
+    /// and closing the last leaves the workspace empty (its window shows nothing). Buffers
+    /// are never killed.
     pub fn close_window(&mut self) {
         let r = self.target_node();
         if !self.delete_node(r) {
-            self.bury_buffer();
+            // The last: everything in it goes, and it shows nothing.
+            if let NodeRef::Container(_) = r {
+                self.delete_other_windows();
+            }
+            let empty = self.empty_buffer();
+            self.show_buffer(empty);
         }
     }
 
@@ -191,7 +197,8 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("confirm-quit-processes", json!("running"), "Confirm quitting with process buffers: \"running\", \"always\" or \"never\".");
 
     // ------------------------------------------------------------ closing vs killing
-    ed.define_command("close-window", "Close the focused window or selected container (a view: buffers live on). The last window shows another buffer instead.", o, |ed, _| {
+    ed.defvar("kill-buffer-closes-window", json!(true), "Killing a buffer closes the windows that showed it, as an app's do in i3 (the last of a workspace leaves it empty). Off, they show what they showed before.");
+    ed.define_command("close-window", "Close the focused window or selected container (a view: buffers live on), as i3 does: closing the last leaves the workspace empty.", o, |ed, _| {
         ed.close_window();
         Ok(())
     });
@@ -218,7 +225,7 @@ pub fn install(ed: &mut Editor) {
             }
             return Ok(());
         }
-        let ids: Vec<BufferId> = ed.buffers.keys().collect();
+        let ids: Vec<BufferId> = ed.listed_buffers();
         let cands = ids.into_iter().map(|id| ed.buffer_candidate(id)).collect();
         ed.completing_read("Kill buffer: ", cands, true, |ed, c, _| {
             if let Some(c) = c {

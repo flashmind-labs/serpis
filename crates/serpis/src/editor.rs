@@ -268,17 +268,18 @@ impl Editor {
     pub fn new(ctx: egui::Context, rt: tokio::runtime::Handle) -> Self {
         let (main_tx, main_rx) = mpsc::channel();
         let mut buffers = SlotMap::with_key();
-        let scratch = buffers.insert(BufferSlot {
+        // An empty workspace to start (what is opened fills it).
+        let empty = buffers.insert(BufferSlot {
             meta: BufferMeta {
-                name: "*scratch*".into(),
-                major: "text".into(),
+                name: crate::buffers::empty::NAME.into(),
+                major: crate::buffers::empty::KIND.into(),
                 ..Default::default()
             },
-            buf: Some(Box::new(crate::buffers::text::TextBuffer::scratch()) as Box<dyn Buffer>),
+            buf: Some(Box::new(crate::buffers::empty::EmptyBuffer) as Box<dyn Buffer>),
         });
         let mut windows = SlotMap::with_key();
         let w = windows.insert(Window {
-            buffer: scratch,
+            buffer: empty,
             rect: Rect::NOTHING,
             history: Vec::new(),
         });
@@ -619,11 +620,15 @@ impl Editor {
 
     pub fn show_buffer(&mut self, id: BufferId) {
         let w = self.focused;
+        // An empty workspace's page isn't something to go back to.
+        let was_empty = self.is_empty_view(self.windows[w].buffer);
         let win = &mut self.windows[w];
         if win.buffer != id {
             let prev = win.buffer;
             win.history.retain(|b| *b != prev && *b != id);
-            win.history.push(prev);
+            if !was_empty {
+                win.history.push(prev);
+            }
             win.buffer = id;
         }
         let payload = serde_json::json!({"buffer": buffer_id_to_u64(id)});
@@ -636,6 +641,12 @@ impl Editor {
             self.focus_window(w);
             return;
         }
+        // A window with nothing in it (an empty workspace's) takes it, rather than a split.
+        if let Some(w) = self.layout.visible_leaves().into_iter().find(|w| self.is_empty_view(self.windows[*w].buffer)) {
+            self.focus_window(w);
+            self.show_buffer(id);
+            return;
+        }
         if self.layout.leaves().len() == 1 {
             self.split_window(false);
         } else {
@@ -644,8 +655,30 @@ impl Editor {
         self.show_buffer(id);
     }
 
+    /// What an empty workspace shows (made if needed).
+    pub fn empty_buffer(&mut self) -> BufferId {
+        match self.buffers.iter().find(|(_, s)| s.meta.major == crate::buffers::empty::KIND) {
+            Some((id, _)) => id,
+            None => self.add_buffer(crate::buffers::empty::NAME, Box::new(crate::buffers::empty::EmptyBuffer)),
+        }
+    }
+
+    /// Whether `id` is what an empty workspace shows (not a buffer of the user's: no list shows
+    /// it, and what is opened takes its place).
+    pub fn is_empty_view(&self, id: BufferId) -> bool {
+        self.meta(id).is_some_and(|m| m.major == crate::buffers::empty::KIND)
+    }
+
+    /// The user's buffers (what an empty workspace shows left out).
+    pub fn listed_buffers(&self) -> Vec<BufferId> {
+        self.buffers.iter().filter(|(_, s)| s.meta.major != crate::buffers::empty::KIND).map(|(id, _)| id).collect()
+    }
+
+    /// Kill `id`. The windows that showed it close, as an app's do in i3 (the last of a
+    /// workspace leaves it empty); with `kill-buffer-closes-window` off, they show what they
+    /// showed before (else nothing: the workspace's empty page).
     pub fn kill_buffer(&mut self, id: BufferId) {
-        if !self.buffers.contains_key(id) {
+        if !self.buffers.contains_key(id) || (self.is_empty_view(id) && !self.quit_requested) {
             return;
         }
         let payload = serde_json::json!({"buffer": buffer_id_to_u64(id)});
@@ -656,18 +689,42 @@ impl Editor {
                 b.on_kill(self);
             }
         }
-        if self.buffers.is_empty() {
-            self.add_buffer("*scratch*", Box::new(crate::buffers::text::TextBuffer::scratch()));
+        if self.quit_requested {
+            return;
         }
-        let fallback = self.buffers.keys().next().unwrap();
-        let ids: Vec<WindowId> = self.windows.keys().collect();
-        for w in ids {
-            let win = &mut self.windows[w];
+        let empty = self.empty_buffer();
+        let close = self.var("kill-buffer-closes-window").and_then(Value::as_bool).unwrap_or(true);
+        for win in self.windows.values_mut() {
             win.history.retain(|b| *b != id);
-            if win.buffer == id {
-                win.buffer = win.history.pop().unwrap_or(fallback);
-            }
         }
+        let showing: Vec<WindowId> = self.windows.iter().filter(|(_, w)| w.buffer == id).map(|(w, _)| w).collect();
+        for w in showing {
+            if close && self.close_window_anywhere(w) {
+                continue;
+            }
+            let win = &mut self.windows[w];
+            win.buffer = if close { empty } else { win.history.pop().unwrap_or(empty) };
+        }
+    }
+
+    /// Close window `w`, in whichever workspace holds it: false when it is the last there.
+    fn close_window_anywhere(&mut self, w: WindowId) -> bool {
+        if self.layout.contains(w) {
+            return self.delete_window(w);
+        }
+        let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.layout.contains(w)) else { return false };
+        if ws.layout.leaves().len() <= 1 {
+            return false;
+        }
+        ws.layout.remove(NodeRef::Window(w));
+        if ws.focused == w {
+            ws.focused = ws.layout.leaves()[0];
+        }
+        if ws.layout.fullscreen == Some(w) {
+            ws.layout.fullscreen = None;
+        }
+        self.windows.remove(w);
+        true
     }
 
     // ------------------------------------------------------------------
@@ -806,19 +863,11 @@ impl Editor {
         })
     }
 
-    /// The buffer named `*scratch*`, created if needed.
-    pub fn scratch_buffer(&mut self) -> BufferId {
-        match self.buffer_by_name("*scratch*") {
-            Some(id) => id,
-            None => self.add_buffer("*scratch*", Box::new(crate::buffers::text::TextBuffer::scratch())),
-        }
-    }
-
-    /// Restore a configuration from [`Self::window_configuration`]. Buffers that no longer
-    /// exist are replaced by `*scratch*`.
+    /// Restore a configuration from [`Self::window_configuration`]. Windows of buffers that no
+    /// longer exist show nothing (an empty workspace's page).
     pub fn set_window_configuration(&mut self, conf: &Value) -> anyhow::Result<()> {
         let tree = conf.get("tree").ok_or_else(|| anyhow::anyhow!("window configuration has no tree"))?;
-        let scratch = self.scratch_buffer();
+        let scratch = self.empty_buffer();
         // Build the new tree first so a malformed configuration leaves the layout intact.
         let mut created = Vec::new();
         let built = LayoutTree::from_json(tree, &mut |v| {

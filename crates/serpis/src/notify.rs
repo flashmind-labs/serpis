@@ -97,9 +97,9 @@ pub fn activity_changed(ed: &mut Editor, id: BufferId, prev: ActivityState, now:
             _ => "Command finished".to_string() + &format!(" in {took}"),
         }
     };
-    // The same thing again soon (a state flipping back and forth): once is enough.
+    // Waiting for the same thing again soon (a state flipping back and forth): once is enough.
     static LAST: Mutex<Vec<(BufferId, String, std::time::Instant)>> = Mutex::new(Vec::new());
-    {
+    if event == "waiting" {
         let key = format!("{event}\n{body}");
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         last.retain(|(_, _, at)| at.elapsed() < Duration::from_secs(30));

@@ -418,12 +418,14 @@ pub fn install(ed: &mut Editor) {
     // ---------------------------------------------------------------- buffers
     ed.define_command("switch-to-buffer", "Show a buffer in the focused window.", o, |ed, _| {
         let cur = ed.current_buffer();
-        let mut ids: Vec<BufferId> = ed.buffers.keys().collect();
+        let mut ids: Vec<BufferId> = ed.listed_buffers();
         // Most recently shown first, current last.
         let hist = ed.windows[ed.focused].history.clone();
         ids.sort_by_key(|id| std::cmp::Reverse(hist.iter().position(|h| h == id).map(|p| p + 1).unwrap_or(0)));
         ids.retain(|id| *id != cur);
-        ids.push(cur);
+        if !ed.is_empty_view(cur) {
+            ids.push(cur);
+        }
         let cands = ids.into_iter().map(|id| ed.buffer_candidate(id)).collect();
         ed.completing_read("Switch to buffer: ", cands, false, |ed, c, input| match c {
             Some(c) => {
@@ -494,11 +496,6 @@ pub fn install(ed: &mut Editor) {
                 ed.error(format!("{e:#}"));
             }
         });
-        Ok(())
-    });
-    ed.define_command("new-scratch", "Open a new scratch buffer.", o, |ed, _| {
-        let id = ed.add_buffer("*scratch*", Box::new(TextBuffer::new("")));
-        ed.show_buffer(id);
         Ok(())
     });
     ed.define_command("find-file", "Visit a file.", o, |ed, _| {
@@ -1385,7 +1382,10 @@ pub fn repeat_search(ed: &mut Editor, reverse: bool) {
 }
 
 fn cycle_buffer(ed: &mut Editor, d: isize) {
-    let ids: Vec<BufferId> = ed.buffers.keys().collect();
+    let ids: Vec<BufferId> = ed.listed_buffers();
+    if ids.is_empty() {
+        return;
+    }
     let cur = ed.current_buffer();
     let i = ids.iter().position(|b| *b == cur).unwrap_or(0) as isize;
     let n = ids.len() as isize;

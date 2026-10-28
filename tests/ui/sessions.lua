@@ -140,6 +140,11 @@ steps({
     return 800
   end,
   function()
+    -- Only what the search is about: the chat serpis started with (unseen now, its folder's
+    -- path matching too) goes first.
+    for _, b in ipairs(serpis.buffer.list()) do
+      if b.kind == "chat" and serpis.session.of(b.id) == nil then serpis.buffer.kill(b.id) end
+    end
     T.press("s-e")
     T.press("a g a i n")
     return 500
