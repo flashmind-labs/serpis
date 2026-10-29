@@ -74,6 +74,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.buffer.line", "(n): line n (1-based) of the focused buffer."),
     ("serpis.buffer.cursor", "(): line, col (1-based) of the focused buffer's cursor."),
     ("serpis.buffer.set_cursor", "(line, col): move it."),
+    ("serpis.buffer.region", "(): the focused buffer's selected text (a mouse selection, a vim visual one, an Emacs region), or nil."),
     ("serpis.buffer.insert", "(text): insert at the cursor, as if typed."),
     ("serpis.buffer.visible", "(): first and last line on screen (1-based)."),
     ("serpis.buffer.highlight", "({line, col}, {line, col}, {duration = ms, face = name}?): flash a range (end exclusive)."),

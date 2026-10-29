@@ -490,6 +490,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let c = e.with_surface(|s, _| s.cursor());
         (c.map(|c| c.line + 1), c.map(|c| c.col + 1))
     }))?)?;
+    buf.set("region", lua.create_function(|_, ()| ed(|e| e.with_surface(|s, _| s.selection().map(|(a, b)| s.text_range(a, b))).flatten()))?)?;
     buf.set("set_cursor", lua.create_function(|_, (line, col): (usize, usize)| ed(|e| {
         e.with_surface(|s, _| s.set_cursor(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1))));
     }))?)?;

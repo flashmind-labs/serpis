@@ -82,6 +82,9 @@ prompt's first line moves up into the transcript and `j` on its last line comes 
 jumps (`gw`), `C-k` / `C-j` and `C-c C-o` (`chat-toggle-focus`) switch too; `i`, `a`, `o` in the
 transcript go back to the prompt.
 
+With the mouse, in text, a chat's transcript and its prompt: drag to select, double-click for
+a word, triple-click for its line, and click four times for everything.
+
 `set-keybinding-scheme` switches to `emacs` or `vim` (or call `serpis.keys.scheme("vim")` in
 `init.lua`). Vim works everywhere: in the chat transcript and prompt, in text buffers, and in
 terminals, where normal state navigates the scrollback and edits the command line after the prompt

@@ -629,6 +629,10 @@ pub struct DocView {
     /// Where the scrollbar thumb was grabbed (offset from its top) during a drag.
     bar_grab: Option<f32>,
     drag_anchor: Option<Pos>,
+    /// Clicks in a row at about one place, and when and where the last was: two select a
+    /// word, three a line, four everything.
+    clicks: u32,
+    last_click: Option<(f64, Pos2)>,
     /// Where keyboard scrolling is heading; `scroll_y` follows on a spring.
     scroll_target: Option<f32>,
     /// The spring's velocity (points per second). Kept when the target moves again, so a held
@@ -682,6 +686,8 @@ impl Default for DocView {
             goal_col: None,
             bar_grab: None,
             drag_anchor: None,
+            clicks: 0,
+            last_click: None,
             scroll_target: None,
             scroll_vel: 0.0,
         }
@@ -1184,6 +1190,31 @@ impl DocView {
         if response.clicked() {
             resp.clicked = true;
             resp.clicked_line = response.interact_pointer_pos().and_then(|pt| self.pos_at(pt)).map(|p| p.line);
+            // Several clicks in a row: a word, its line, everything.
+            let now = ui.input(|i| i.time);
+            let at = response.interact_pointer_pos();
+            let again = matches!((self.last_click, at), (Some((t, last)), Some(p)) if now - t < 0.5 && last.distance(p) < 6.0);
+            self.clicks = if again { self.clicks + 1 } else { 1 };
+            self.last_click = at.map(|p| (now, p));
+            if let Some(p) = at.and_then(|pt| self.pos_at(pt)).filter(|_| self.clicks >= 2) {
+                let line = |l: usize| src.styled(l).text.clone();
+                let (from, to) = match self.clicks {
+                    2 => {
+                        let (a, b) = word_at(&line(p.line), p.col);
+                        (Pos::new(p.line, a), Pos::new(p.line, b))
+                    }
+                    3 => (Pos::new(p.line, 0), Pos::new(p.line, line(p.line).chars().count())),
+                    _ => {
+                        let last = src.len().saturating_sub(1);
+                        (Pos::ZERO, Pos::new(last, line(last).chars().count()))
+                    }
+                };
+                // Vim's visual selection includes the character under the cursor.
+                let to = if opts.selection == SelectionKind::Inclusive && to.col > 0 && to != from { Pos::new(to.line, to.col - 1) } else { to };
+                self.anchor = Some(from);
+                self.cursor = to;
+                self.drag_anchor = None;
+            }
         }
 
         // Scrollbar: a thin thumb that widens under the pointer.
@@ -1195,6 +1226,28 @@ impl DocView {
         }
         resp
     }
+}
+
+/// The word around char column `col` of `line` as a char range: letters, digits and `_`, or a
+/// run of spaces, or a run of the same punctuation.
+pub fn word_at(line: &str, col: usize) -> (usize, usize) {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let col = col.min(chars.len() - 1);
+    let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+    let k = class(chars[col]);
+    let same = |c: char| class(c) == k && (k != 2 || c == chars[col]);
+    let mut a = col;
+    while a > 0 && same(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = col + 1;
+    while b < chars.len() && same(chars[b]) {
+        b += 1;
+    }
+    (a, b)
 }
 
 fn paint_range(painter: &egui::Painter, g: &Galley, origin: Pos2, s: usize, e: usize, to_eol: bool, color: Color32) {
