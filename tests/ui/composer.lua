@@ -72,6 +72,9 @@ steps({
   end,
   function()
     T.check("send starts the agent", state(), "working")
+    -- What it has spent shows while it works, not only once it stops.
+    -- (With no room for both, the activity gives way: the usage stays.)
+    T.check("usage shows while it works", d.composer().usage ~= nil, true)
     T.check("prompt sent", (serpis.buffer.text() or ""):find("hello") ~= nil, true)
     -- The same button stops it.
     click("send")
@@ -79,7 +82,8 @@ steps({
   end,
   function()
     T.check("stop aborts the agent", state() ~= "working", true)
-    if not T.narrow then
+    -- (However wide the window manager made the window.)
+    if d.composer().card.w >= 520 then
       T.check("all its pills shown when there's room", d.composer()["keep-going"] ~= nil and d.composer().machine ~= nil, true)
     end
     -- A narrow window at a large font: what doesn't fit is left out, never under the send button.
@@ -95,8 +99,8 @@ steps({
     end
     T.check("pills stay clear of the send button", clear, true)
     T.check("keep-going left out first", hits["keep-going"], nil)
-    -- (Narrow, the split leaves room for none of them.)
-    if not T.narrow then T.check("the model shows while there's room for it", hits.model ~= nil, true) end
+    -- (A narrow window, split, can leave room for none of them.)
+    if hits.card.w >= 200 then T.check("the model shows while there's room for it", hits.model ~= nil, true) end
     serpis.var.set("font-size", 14.5)
   end,
 })

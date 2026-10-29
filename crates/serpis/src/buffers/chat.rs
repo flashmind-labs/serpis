@@ -2216,9 +2216,24 @@ impl Buffer for ChatBuffer {
             }
         }
 
-        // Activity or usage between the pills and the send button.
-        let right = send.left() - 12.0 * k;
-        let mut right = right;
+        // Usage, activity and the context meter between the pills and the send button.
+        let mut right = send.left() - 12.0 * k;
+        // Session usage, like pi's footer: first, so it shows while the agent works too. Short
+        // of room (with the activity and meter beside it), just what it cost.
+        if ed.var("chat-show-usage").and_then(Value::as_bool).unwrap_or(true) {
+            let full = self.usage_label();
+            let short = format!("${:.3}", self.node.state.usage.cost.total);
+            let others = if self.running() { 110.0 * k } else { 0.0 } + if self.context().1 > 0 { 70.0 * k } else { 0.0 };
+            let room = right - tr.right() - 8.0 * k;
+            let fw = crate::chrome::text_width(&painter, &full, small.clone());
+            let label = if fw + others <= room { full } else { short };
+            let w = crate::chrome::text_width(&painter, &label, small.clone());
+            if w <= room {
+                hits.push(("usage", Rect::from_min_max(egui::pos2(right - w, cy - 8.0 * k), egui::pos2(right, cy + 8.0 * k))));
+                crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
+                right -= w + 14.0 * k;
+            }
+        }
         if self.running() {
             let label = format!("Working {}", fmt_duration(self.started.map(|s| s.elapsed()).unwrap_or_default(), false));
             let w = crate::chrome::text_width(&painter, &label, small.clone());
@@ -2266,16 +2281,6 @@ impl Buffer for ChatBuffer {
                 }
                 crate::chrome::text(&painter, egui::pos2(bar.right() + 6.0 * k, cy), &label, small.clone(), color, lw + 1.0);
                 hits.push(("context", r));
-                right -= w + 14.0 * k;
-            }
-        }
-        // Session usage, like pi's footer.
-        if ed.var("chat-show-usage").and_then(Value::as_bool).unwrap_or(true) {
-            let label = self.usage_label();
-            let w = crate::chrome::text_width(&painter, &label, small.clone());
-            if right - w > tr.right() + 8.0 * k {
-                hits.push(("usage", Rect::from_min_max(egui::pos2(right - w, cy - 8.0 * k), egui::pos2(right, cy + 8.0 * k))));
-                crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.fg_faint, w + 1.0);
             }
         }
         hits.extend([("model", mr), ("thinking", think_r), ("machine", wr), ("keep-going", keep_r), ("send", send), ("card", card)].into_iter().filter(|(_, r)| r.width() > 0.0));
