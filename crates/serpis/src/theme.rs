@@ -13,6 +13,10 @@ pub enum Face {
     CodeDim,
     Dim,
     Bold,
+    /// Emphasis in reading text: *italic*, ***bold italic***, ~~struck through~~.
+    Italic,
+    BoldItalic,
+    Strike,
     Accent,
     UserLabel,
     UserText,
@@ -210,7 +214,7 @@ impl Theme {
     pub fn format(&self, face: Face) -> egui::TextFormat {
         let (font_id, color, background) = self.face(face);
         let weight = match face {
-            Face::Bold | Face::Heading | Face::CodeBold => Some(self.bold_weight),
+            Face::Bold | Face::BoldItalic | Face::Heading | Face::CodeBold => Some(self.bold_weight),
             Face::UserLabel | Face::ToolHeader | Face::Label => Some((self.bold_weight - 100.0).max(400.0)),
             _ => None,
         };
@@ -234,7 +238,8 @@ impl Theme {
             color,
             background,
             coords,
-            italics: matches!(face, Face::Thinking | Face::SynComment),
+            italics: matches!(face, Face::Thinking | Face::SynComment | Face::Italic | Face::BoldItalic),
+            strikethrough: if face == Face::Strike { egui::Stroke::new(1.0, self.fg_dim) } else { egui::Stroke::NONE },
             ..Default::default()
         }
     }
@@ -263,6 +268,8 @@ impl Theme {
             Face::CodeDim => (self.mono(), self.fg_faint, t),
             Face::Dim => (self.prop(), self.fg_dim, t),
             Face::Bold => (FontId::new(self.font_size, FontFamily::Proportional), self.fg, t),
+            Face::Italic | Face::BoldItalic => (self.prop(), self.fg, t),
+            Face::Strike => (self.prop(), self.fg_dim, t),
             Face::Accent => (self.prop(), self.accent, t),
             Face::UserLabel => (self.prop(), self.accent, t),
             Face::UserText => (self.prop(), self.fg, t),

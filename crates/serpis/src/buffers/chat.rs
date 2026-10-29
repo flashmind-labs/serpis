@@ -882,35 +882,189 @@ fn format_usage(u: &Usage) -> String {
     s
 }
 
-/// Inline markdown: `code` and **bold** become spans; markers are removed.
+/// Inline markdown, as CommonMark reads it: `code` (any run of backticks), **bold** and
+/// __bold__, *italic* and _italic_, ***both***, ~~struck~~, [a link](url) (its text), and
+/// backslash escapes. They nest: code in bold stays code, and its backticks go. Markers are
+/// removed. `_` never emphasizes inside a word (snake_case names stay whole), and a marker
+/// with nothing to close it stays as written.
 fn inline_spans(text: &str) -> (String, Vec<(Range<usize>, Face)>) {
     let mut out = String::with_capacity(text.len());
     let mut spans = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        if let Some(r) = rest.strip_prefix('`') {
-            if let Some(end) = r.find('`') {
-                let s = out.len();
-                out.push_str(&r[..end]);
-                spans.push((s..out.len(), Face::InlineCode));
-                rest = &r[end + 1..];
-                continue;
-            }
-        }
-        if let Some(r) = rest.strip_prefix("**") {
-            if let Some(end) = r.find("**") {
-                let s = out.len();
-                out.push_str(&r[..end]);
-                spans.push((s..out.len(), Face::Bold));
-                rest = &r[end + 2..];
-                continue;
-            }
-        }
-        let c = rest.chars().next().unwrap();
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
-    }
+    inline_into(text, Emphasis::default(), &mut out, &mut spans);
     (out, spans)
+}
+
+#[derive(Clone, Copy, Default)]
+struct Emphasis {
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    link: bool,
+}
+
+impl Emphasis {
+    fn face(self) -> Option<Face> {
+        Some(match self {
+            Emphasis { link: true, .. } => Face::Link,
+            Emphasis { strike: true, .. } => Face::Strike,
+            Emphasis { bold: true, italic: true, .. } => Face::BoldItalic,
+            Emphasis { bold: true, .. } => Face::Bold,
+            Emphasis { italic: true, .. } => Face::Italic,
+            _ => return None,
+        })
+    }
+}
+
+/// Append `s` in `face`, joining the span before it when it has the same face.
+fn emit(out: &mut String, spans: &mut Vec<(Range<usize>, Face)>, s: &str, face: Option<Face>) {
+    let start = out.len();
+    out.push_str(s);
+    let Some(face) = face else { return };
+    match spans.last_mut() {
+        Some((r, f)) if *f == face && r.end == start => r.end = out.len(),
+        _ => spans.push((start..out.len(), face)),
+    }
+}
+
+/// The length of the run of `c` at the start of `s`.
+fn run_of(s: &str, c: char) -> usize {
+    s.chars().take_while(|x| *x == c).count()
+}
+
+/// Where the code span opened by the `n` backticks at the start of `s` ends: (its text, the
+/// bytes it takes).
+fn code_span(s: &str) -> Option<(&str, usize)> {
+    let n = run_of(s, '`');
+    let body = &s[n..];
+    let mut at = 0;
+    while let Some(i) = body[at..].find('`') {
+        let i = at + i;
+        let m = run_of(&body[i..], '`');
+        if m == n {
+            let code = &body[..i];
+            // One space each side is padding (`` `x` ``), unless it's all spaces.
+            let code = if code.len() >= 2 && code.starts_with(' ') && code.ends_with(' ') && !code.trim().is_empty() { &code[1..code.len() - 1] } else { code };
+            return Some((code, n + i + m));
+        }
+        at = i + m;
+    }
+    None
+}
+
+/// Where the emphasis opened by `n` × `c` (just before `s`) closes: the byte offset in `s` of
+/// a closing run, skipping code spans and escapes.
+fn emphasis_close(s: &str, c: char, n: usize) -> Option<usize> {
+    let mut i = 0;
+    let mut prev: Option<char> = None;
+    while i < s.len() {
+        let rest = &s[i..];
+        let ch = rest.chars().next().unwrap();
+        if ch == '\\' && rest.len() > 1 {
+            let skip = 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+            prev = rest[1..].chars().next();
+            i += skip;
+            continue;
+        }
+        if ch == '`' {
+            if let Some((_, len)) = code_span(rest) {
+                i += len;
+                prev = Some('`');
+                continue;
+            }
+        }
+        if ch == c {
+            let m = run_of(rest, c);
+            let after = rest[m..].chars().next();
+            // Right-flanking: not after a space; `_` not inside a word.
+            let closes = i > 0 && prev.is_some_and(|p| !p.is_whitespace()) && (c != '_' || !after.is_some_and(char::is_alphanumeric));
+            if closes && (m == n || (m > n && n == 1 && m != 2) || (m >= 3 && n == 2)) {
+                return Some(i);
+            }
+            i += m * c.len_utf8();
+            prev = Some(c);
+            continue;
+        }
+        prev = Some(ch);
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn inline_into(text: &str, em: Emphasis, out: &mut String, spans: &mut Vec<(Range<usize>, Face)>) {
+    let mut i = 0;
+    let mut prev: Option<char> = None;
+    while i < text.len() {
+        let rest = &text[i..];
+        let ch = rest.chars().next().unwrap();
+        // An escaped punctuation mark is itself.
+        if ch == '\\' {
+            if let Some(n) = rest[1..].chars().next().filter(char::is_ascii_punctuation) {
+                emit(out, spans, &rest[1..1 + n.len_utf8()], em.face());
+                i += 1 + n.len_utf8();
+                prev = Some(n);
+                continue;
+            }
+        }
+        if ch == '`' {
+            if let Some((code, len)) = code_span(rest) {
+                emit(out, spans, code, Some(Face::InlineCode));
+                i += len;
+                prev = Some('`');
+                continue;
+            }
+            // Unmatched: the whole run as written.
+            let m = run_of(rest, '`');
+            emit(out, spans, &rest[..m], em.face());
+            i += m;
+            prev = Some('`');
+            continue;
+        }
+        if ch == '[' {
+            if let Some(close) = rest.find("](") {
+                if let Some(end) = rest[close + 2..].find(')') {
+                    if !rest[1..close].contains('[') {
+                        inline_into(&rest[1..close], Emphasis { link: true, ..em }, out, spans);
+                        i += close + 2 + end + 1;
+                        prev = Some(')');
+                        continue;
+                    }
+                }
+            }
+        }
+        if rest.starts_with("~~") {
+            if let Some(end) = rest[2..].find("~~").filter(|e| *e > 0) {
+                inline_into(&rest[2..2 + end], Emphasis { strike: true, ..em }, out, spans);
+                i += 2 + end + 2;
+                prev = Some('~');
+                continue;
+            }
+        }
+        if ch == '*' || ch == '_' {
+            let n = run_of(rest, ch);
+            let after = rest[n..].chars().next();
+            // Left-flanking: before something that isn't a space; `_` not inside a word.
+            let opens = after.is_some_and(|a| !a.is_whitespace()) && (ch != '_' || !prev.is_some_and(char::is_alphanumeric));
+            // The longest emphasis that closes: 3 markers both, 2 bold, 1 italic.
+            let found = if opens { (1..=n.min(3)).rev().find_map(|k| emphasis_close(&rest[k..], ch, k).map(|end| (k, end))) } else { None };
+            match found {
+                Some((k, end)) => {
+                    let inner = Emphasis { bold: em.bold || k >= 2, italic: em.italic || k != 2, ..em };
+                    inline_into(&rest[k..k + end], inner, out, spans);
+                    i += k + end + k;
+                }
+                // Not emphasis: the run as written.
+                None => {
+                    emit(out, spans, &rest[..n], em.face());
+                    i += n;
+                }
+            }
+            prev = Some(ch);
+            continue;
+        }
+        emit(out, spans, &rest[..ch.len_utf8()], em.face());
+        i += ch.len_utf8();
+        prev = Some(ch);
+    }
 }
 
 /// Cells of a markdown table row: `| a | b |` → `["a", "b"]` (`\|` stays a pipe).
@@ -2540,6 +2694,37 @@ pub fn cache_warning_applies(ed: &mut Editor, action: &str, cost: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Inline markdown as text and its faced parts.
+    fn md(s: &str) -> (String, Vec<(String, Face)>) {
+        let (text, spans) = inline_spans(s);
+        let parts = spans.iter().map(|(r, f)| (text[r.clone()].to_string(), *f)).collect();
+        (text, parts)
+    }
+
+    #[test]
+    fn inline_markdown_nests_and_emphasizes() {
+        use Face::*;
+        let p = |a: &str, f: Face| (a.to_string(), f);
+        // Code in bold: its backticks go, it stays code, and the rest is bold.
+        assert_eq!(md("**`node_tape.rs:129-403` — the book feed**"), ("node_tape.rs:129-403 — the book feed".into(), vec![p("node_tape.rs:129-403", InlineCode), p(" — the book feed", Bold)]));
+        assert_eq!(md("*Suggestion:* write it"), ("Suggestion: write it".into(), vec![p("Suggestion:", Italic)]));
+        assert_eq!(md("- **Suggestion**, ideally"), ("- Suggestion, ideally".into(), vec![p("Suggestion", Bold)]));
+        assert_eq!(md("_quietly_ and __loudly__"), ("quietly and loudly".into(), vec![p("quietly", Italic), p("loudly", Bold)]));
+        assert_eq!(md("***both*** and ~~gone~~"), ("both and gone".into(), vec![p("both", BoldItalic), p("gone", Strike)]));
+        assert_eq!(md("**bold with *italic* inside**"), ("bold with italic inside".into(), vec![p("bold with ", Bold), p("italic", BoldItalic), p(" inside", Bold)]));
+        assert_eq!(md("see [the docs](https://example.com) now"), ("see the docs now".into(), vec![p("the docs", Link)]));
+        // Code spans: any run of backticks, padding trimmed, no markdown inside.
+        assert_eq!(md("``a ` b`` and ` x `"), ("a ` b and x".into(), vec![p("a ` b", InlineCode), p("x", InlineCode)]));
+        assert_eq!(md("`**not bold**`"), ("**not bold**".into(), vec![p("**not bold**", InlineCode)]));
+        assert_eq!(md("**`a*b`**"), ("a*b".into(), vec![p("a*b", InlineCode)]));
+        // Left as written: names with underscores, lone markers, math, escapes, the unclosed.
+        assert_eq!(md("skip_unknown and is_known_key"), ("skip_unknown and is_known_key".into(), vec![]));
+        assert_eq!(md("a * b * c, 2*3"), ("a * b * c, 2*3".into(), vec![]));
+        assert_eq!(md(r"\*not italic\*"), ("*not italic*".into(), vec![]));
+        assert_eq!(md("**unclosed and `x"), ("**unclosed and `x".into(), vec![]));
+        assert_eq!(md("plain"), ("plain".into(), vec![]));
+    }
 
     #[test]
     fn diff_lines_find_their_code() {
