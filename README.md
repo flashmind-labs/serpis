@@ -39,8 +39,11 @@ and scan its code with the Camera.
 ## Run
 
 ```sh
-cargo run -p serpis-bin            # needs zig 0.16 on PATH (libghostty-vt is built from source)
+cargo run -p serpis-bin            # or `just run`; `just --list` shows the other tasks
 ```
+
+The build needs zig 0.16, and `brew install zig@0.16` keeps it out of PATH (the keg is not
+linked): `export PATH="$(brew --prefix zig@0.16)/bin:$PATH"`.
 
 Models, keys and defaults come from the same files as pi: `~/.serpis/agent/{models.json,auth.json}`,
 falling back to `~/.pi/agent/`, plus the usual `*_API_KEY` variables. Your pi default model and
@@ -573,6 +576,9 @@ scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, term
 scripts/ui-test.sh --narrow  # the same at 760x560, however big the window is
 scripts/promo/build.sh     # the promo video, from a scripted run (scripts/promo/README.md)
 ```
+
+Each of these is a `just` recipe too, with shorter names (`just test`, `just narrow`,
+`just promo`); `just --list` shows them all.
 
 Every UI test also checks that no controls overlap or spill out of their place. These are
 the composer's pills and labels and a window header's title, badges and buttons, checked in
