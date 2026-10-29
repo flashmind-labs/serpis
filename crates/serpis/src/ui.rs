@@ -665,13 +665,8 @@ fn draw_flashes(ui: &mut egui::Ui, ed: &mut Editor, id: crate::BufferId, clip: R
                     if l == f.end.line && e_col == 0 && l > f.start.line {
                         continue; // exclusive end at a line start
                     }
-                    let Some(a) = s.screen_rect(crate::Pos::new(l, s_col)) else { continue };
-                    let r = if e_col > s_col {
-                        s.screen_rect(crate::Pos::new(l, e_col - 1)).map(|b| a.union(b)).unwrap_or(a)
-                    } else {
-                        a
-                    };
-                    out.push((r, color));
+                    // As a selection is painted: each wrapped row its own part, to the character.
+                    out.extend(s.range_rects(l, s_col, e_col.max(s_col + 1)).into_iter().map(|r| (r, color)));
                 }
             }
             out

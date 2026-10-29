@@ -2664,6 +2664,12 @@ impl TextSurface for ChatBuffer {
             Focus::Prompt => self.prompt.screen_rect(p),
         }
     }
+    fn range_rects(&self, line: usize, s: usize, e: usize) -> Vec<Rect> {
+        match self.focus {
+            Focus::Transcript => self.view.range_rects(line, s, e),
+            Focus::Prompt => self.prompt.range_rects(line, s, e),
+        }
+    }
     fn code_spans(&self, i: usize) -> Vec<(usize, usize)> {
         let Some(l) = self.lines.get(i).filter(|_| self.focus == Focus::Transcript) else { return Vec::new() };
         let col = |b: usize| l.text[..b.min(l.text.len())].chars().count();

@@ -1320,10 +1320,17 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     let tx = search_r.left() + 28.0 * k;
     let query_font = FontId::proportional(t.font_size - 1.0);
     if ed.sidebar.query.is_empty() {
-        chrome::text(p, egui::pos2(tx, cy), if focused { "Search everything…" } else { "Search" }, query_font.clone(), t.fg_faint, search_r.width() - 70.0 * k);
-        if let Some(key) = keys.get("sidebar-focus").filter(|_| !focused) {
-            chrome::keycap(p, search_r.right() - 8.0 * k, cy, key, t);
+        let hint = if focused { "Search everything…" } else { "Search" };
+        // Its key, when it fits beside the hint (a long vim one can't in a narrow sidebar).
+        let hint_w = chrome::text_width(p, hint, query_font.clone());
+        let key = keys.get("sidebar-focus").filter(|_| !focused).filter(|key| tx + hint_w + 8.0 * k + chrome::keycap_width(p, key, t) <= search_r.right() - 8.0 * k);
+        let room = key.map_or(search_r.right() - 8.0 * k, |key| search_r.right() - 16.0 * k - chrome::keycap_width(p, key, t)) - tx;
+        let w = chrome::text(p, egui::pos2(tx, cy), hint, query_font.clone(), t.fg_faint, room);
+        let mut row = vec![("search-hint", Rect::from_min_size(egui::pos2(tx, cy - 8.0 * k), egui::vec2(w, 16.0 * k)))];
+        if let Some(key) = key {
+            row.push(("search-key", chrome::keycap(p, search_r.right() - 8.0 * k, cy, key, t)));
         }
+        ed.check_row("sidebar-search", search_r, &row);
     } else {
         let w = chrome::text(p, egui::pos2(tx, cy), &ed.sidebar.query, query_font, t.fg, search_r.width() - 40.0 * k);
         if focused && (time * 2.0) as i64 % 2 == 0 {
@@ -1342,10 +1349,17 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     let p = ui.painter();
     p.rect_filled(new_r, 8.0 * k, if nresp.hovered() { chrome::tint(t.accent, 0.22) } else { chrome::tint(t.accent, 0.13) });
     chrome::plus(p, Rect::from_center_size(egui::pos2(new_r.left() + 15.0 * k, new_r.center().y), Vec2::splat(9.0 * k)), t.accent);
-    chrome::text(p, egui::pos2(new_r.left() + 28.0 * k, new_r.center().y), "New chat", FontId::proportional(t.font_size - 1.0), t.accent, new_r.width() - 70.0 * k);
-    if let Some(key) = keys.get("new-chat") {
-        chrome::keycap(p, new_r.right() - 8.0 * k, new_r.center().y, key, t);
+    // Its key, when it fits beside the label.
+    let (lx, label_font) = (new_r.left() + 28.0 * k, FontId::proportional(t.font_size - 1.0));
+    let label_w = chrome::text_width(p, "New chat", label_font.clone());
+    let key = keys.get("new-chat").filter(|key| lx + label_w + 8.0 * k + chrome::keycap_width(p, key, t) <= new_r.right() - 8.0 * k);
+    let room = key.map_or(new_r.right() - 8.0 * k, |key| new_r.right() - 16.0 * k - chrome::keycap_width(p, key, t)) - lx;
+    let w = chrome::text(p, egui::pos2(lx, new_r.center().y), "New chat", label_font, t.accent, room);
+    let mut row = vec![("new-chat-label", Rect::from_min_size(egui::pos2(lx, new_r.center().y - 8.0 * k), egui::vec2(w, 16.0 * k)))];
+    if let Some(key) = key {
+        row.push(("new-chat-key", chrome::keycap(p, new_r.right() - 8.0 * k, new_r.center().y, key, t)));
     }
+    ed.check_row("sidebar-new-chat", new_r, &row);
     if nresp.clicked() {
         acts.push(Act::Run("project-new-chat".into(), Vec::new()));
     }

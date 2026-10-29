@@ -94,6 +94,11 @@ pub fn pill(p: &egui::Painter, x: f32, cy: f32, label: &str, font: FontId, fg: C
 }
 
 /// A keyboard shortcut chip (`⌘E`).
+/// How wide [`keycap`] draws `keys`.
+pub fn keycap_width(p: &egui::Painter, keys: &str, t: &Theme) -> f32 {
+    text_width(p, &pretty_keys(keys), FontId::proportional(t.font_size - 3.0)) + 10.0
+}
+
 pub fn keycap(p: &egui::Painter, right: f32, cy: f32, keys: &str, t: &Theme) -> Rect {
     let font = FontId::proportional(t.font_size - 3.0);
     let g = p.layout_no_wrap(pretty_keys(keys), font, t.fg_faint);

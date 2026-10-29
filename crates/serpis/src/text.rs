@@ -90,6 +90,13 @@ pub trait TextSurface {
     fn visible_lines(&self) -> Range<usize>;
     /// Screen rectangle of the character at `p`, if visible. Used by overlays such as jump labels.
     fn screen_rect(&self, p: Pos) -> Option<Rect>;
+    /// Screen rectangles covering chars `s..e` of `line` (one per screen row): the first and
+    /// last characters' cells joined, unless the surface knows its rows.
+    fn range_rects(&self, line: usize, s: usize, e: usize) -> Vec<Rect> {
+        let Some(a) = self.screen_rect(Pos::new(line, s)) else { return Vec::new() };
+        let r = if e > s { self.screen_rect(Pos::new(line, e - 1)).map(|b| a.union(b)).unwrap_or(a) } else { a };
+        vec![r]
+    }
     /// Inline code on line `i` shown without its backticks (a chat's rendered markdown), as
     /// (start, end) character columns. Text that keeps its backticks returns none.
     fn code_spans(&self, _i: usize) -> Vec<(usize, usize)> {
@@ -741,8 +748,17 @@ impl DocView {
     pub fn screen_rect(&self, p: Pos) -> Option<Rect> {
         let pl = self.placed.iter().find(|pl| pl.line == p.line)?;
         let r = pl.galley.pos_from_cursor(CCursor::new(p.col));
-        let w = if r.width() < 1.0 { 7.0 } else { r.width() };
-        Some(Rect::from_min_size(pl.origin + r.min.to_vec2(), egui::vec2(w.max(6.0), r.height())))
+        // As wide as the character: to where the next one starts on the same row.
+        let next = pl.galley.pos_from_cursor(CCursor::new(p.col + 1));
+        let w = if (next.min.y - r.min.y).abs() < 1.0 && next.min.x > r.min.x + 0.5 { next.min.x - r.min.x } else { 7.0 };
+        Some(Rect::from_min_size(pl.origin + r.min.to_vec2(), egui::vec2(w, r.height())))
+    }
+
+    /// The screen rectangles covering chars `s..e` of `line`, one per row it wraps over, as a
+    /// selection is painted; none when the line isn't on screen.
+    pub fn range_rects(&self, line: usize, s: usize, e: usize) -> Vec<Rect> {
+        let Some(pl) = self.placed.iter().find(|pl| pl.line == line) else { return Vec::new() };
+        range_rects(&pl.galley, s, e, false).into_iter().map(|r| r.translate(pl.origin.to_vec2())).collect()
     }
 
     /// What the block cursor covers at `p`, by the line laid out last frame: the cell (its
@@ -1251,19 +1267,27 @@ pub fn word_at(line: &str, col: usize) -> (usize, usize) {
 }
 
 fn paint_range(painter: &egui::Painter, g: &Galley, origin: Pos2, s: usize, e: usize, to_eol: bool, color: Color32) {
+    for r in range_rects(g, s, e, to_eol) {
+        painter.rect_filled(r.translate(origin.to_vec2()), 2.0, color);
+    }
+}
+
+/// The rectangles (one per row it spans, in galley coordinates) covering chars `s..e` of a
+/// laid-out line; `to_eol` reaches a little past the end, for a selection that goes on.
+fn range_rects(g: &Galley, s: usize, e: usize, to_eol: bool) -> Vec<Rect> {
     let a = g.pos_from_cursor(CCursor::new(s));
     let b = g.pos_from_cursor(CCursor::new(e));
-    let right_edge = g.rect.width().max(b.max.x) + if to_eol { 6.0 } else { 0.0 };
+    let tail = if to_eol { 6.0 } else { 0.0 };
+    let right_edge = g.rect.width().max(b.max.x) + tail;
     if (a.min.y - b.min.y).abs() < 1.0 {
-        let r = Rect::from_min_max(a.min, egui::pos2(b.min.x + if to_eol { 6.0 } else { 0.0 }, a.max.y));
-        painter.rect_filled(r.translate(origin.to_vec2()), 2.0, color);
-        return;
+        return vec![Rect::from_min_max(a.min, egui::pos2(b.min.x + tail, a.max.y))];
     }
-    painter.rect_filled(Rect::from_min_max(a.min, egui::pos2(right_edge, a.max.y)).translate(origin.to_vec2()), 2.0, color);
+    let mut out = vec![Rect::from_min_max(a.min, egui::pos2(right_edge, a.max.y))];
     if b.min.y > a.max.y + 0.5 {
-        painter.rect_filled(Rect::from_min_max(egui::pos2(0.0, a.max.y), egui::pos2(right_edge, b.min.y)).translate(origin.to_vec2()), 2.0, color);
+        out.push(Rect::from_min_max(egui::pos2(0.0, a.max.y), egui::pos2(right_edge, b.min.y)));
     }
-    painter.rect_filled(Rect::from_min_max(egui::pos2(0.0, b.min.y), egui::pos2(b.min.x + if to_eol { 6.0 } else { 0.0 }, b.max.y)).translate(origin.to_vec2()), 2.0, color);
+    out.push(Rect::from_min_max(egui::pos2(0.0, b.min.y), egui::pos2(b.min.x + tail, b.max.y)));
+    out
 }
 
 /// A [`Doc`] plus its [`DocView`]: the editable text surface used by text buffers,
@@ -1364,6 +1388,9 @@ impl TextSurface for TextArea {
     }
     fn screen_rect(&self, p: Pos) -> Option<Rect> {
         self.view.screen_rect(p)
+    }
+    fn range_rects(&self, line: usize, s: usize, e: usize) -> Vec<Rect> {
+        self.view.range_rects(line, s, e)
     }
     fn display_move(&self, p: Pos, rows: isize, goal_x: Option<f32>) -> Option<(Pos, f32)> {
         self.view.display_move(p, rows, goal_x)
