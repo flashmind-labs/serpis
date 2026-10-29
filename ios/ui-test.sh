@@ -24,5 +24,8 @@ while IFS='=' read -r k v; do args+=("TEST_RUNNER_$k=$v"); done < "$machine/env"
 if [ -n "${1:-}" ]; then mkdir -p "$1"; args+=("TEST_RUNNER_SERPIS_SHOTS=$(cd "$1" && pwd)"); fi
 cd "$here"
 xcodegen -q
+# Into a file, then read: through a pipe, the reader would wait for every process xcodebuild
+# started to let go of it, and some (the simulator's) outlive it.
 env "${args[@]}" xcodebuild -project Serpis.xcodeproj -scheme Serpis -destination "platform=iOS Simulator,name=$device" \
-  -derivedDataPath build/dd -collect-test-diagnostics never test 2>&1 | grep -E "error:|Test Case .*(passed|failed)|XCTAssert|\*\* TEST|Skipped" || true
+  -derivedDataPath build/dd -collect-test-diagnostics never test > "$machine/xcodebuild.log" 2>&1 || true
+grep -E "error:|Test Case .*(passed|failed)|XCTAssert|\*\* TEST|Skipped" "$machine/xcodebuild.log" || true

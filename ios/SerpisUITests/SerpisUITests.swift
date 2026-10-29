@@ -247,11 +247,24 @@ final class SerpisUITests: XCTestCase {
 
         // While it thinks, the phone says so, with how much.
         composer.tap()
-        composer.typeText("think it over for a while")
+        // (Long, so there's a transcript to scroll up in while it thinks.)
+        composer.typeText("think it over for a while" + String(repeating: ", and take your time with it", count: 16))
         app.buttons["Send"].tap()
         let thinking = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Thinking, about'")).firstMatch
         XCTAssertTrue(thinking.waitForExistence(timeout: 20), "thinking shows")
         shot("14b-thinking")
+        // Scrolled up to read while it thinks, it stays there. (The keyboard away first: a drag
+        // would only put it away.)
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        app.scrollViews["transcript"].swipeDown()
+        app.scrollViews["transcript"].swipeDown()
+        shot("14c-scrolled-up-thinking")
+        let back = app.buttons["Scroll to the bottom"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "scrolled up")
+        Thread.sleep(forTimeInterval: 1.5)
+        shot("14d-still-up")
+        XCTAssertTrue(back.exists, "still up there as it thinks: not pulled back to the bottom")
+        back.tap()
         XCTAssertTrue(app.staticTexts["Thought it through."].waitForExistence(timeout: 30))
 
         // A subagent's turn.

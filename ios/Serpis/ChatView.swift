@@ -13,8 +13,6 @@ struct ChatView: View {
     /// Where the transcript is scrolled: it follows new text only while it is at the bottom.
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var atBottom = true
-    /// The person is moving the transcript (dragging, or it coasting from a drag).
-    @State private var scrolling = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -39,19 +37,16 @@ struct ChatView: View {
             // A tap on the transcript puts the keyboard away, as in any chat.
             .simultaneousGesture(TapGesture().onEnded { typing = false })
             .accessibilityIdentifier("transcript")
-            .defaultScrollAnchor(.bottom)
+            // Opens at the bottom, and keeps the bottom in place as content changes size while
+            // you're there (following the reply); scrolled up to read, it keeps your place.
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(atBottom ? .bottom : .top, for: .sizeChanges)
             .scrollPosition($position)
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 48
-            } action: { _, bottom in
-                // Only the person scrolls away from the bottom: content growing by more than
-                // the margin at once (a card, a long chunk) mustn't stop it following.
-                if bottom || scrolling { atBottom = bottom }
+            } action: { _, end in
+                atBottom = end
             }
-            .onScrollPhaseChange { _, phase in
-                scrolling = phase == .interacting || phase == .decelerating
-            }
-            // New text is followed while you're at the bottom; scrolled up to read, nothing moves.
             .onChange(of: chat.entries) { _, _ in
                 if atBottom { position.scrollTo(edge: .bottom) }
             }

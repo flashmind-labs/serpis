@@ -54,8 +54,8 @@ rec=$!
 for _ in $(seq 100); do grep -q "Recording started" "$tmp/rec.log" 2>/dev/null && break; sleep 0.05; done
 started=$(python3 -c 'import time; print(time.time())')
 env "${args[@]}" xcodebuild -project Serpis.xcodeproj -scheme Serpis -destination "$dest" -derivedDataPath build/dd \
-  -collect-test-diagnostics never test-without-building -only-testing:SerpisUITests/PromoRecording/testPromo 2>&1 | tee "$out/test.log" \
-  | grep -E "error:|Test Case .*(passed|failed)|XCTAssert|Skipped" || true
+  -collect-test-diagnostics never test-without-building -only-testing:SerpisUITests/PromoRecording/testPromo > "$out/test.log" 2>&1 || true
+grep -E "error:|Test Case .*(passed|failed)|XCTAssert|Skipped" "$out/test.log" || true
 kill -INT $rec; wait $rec 2>/dev/null || true; rec=
 xcrun simctl status_bar "$device" clear
 [[ -s "$out/marks.abs" ]] || { echo "no marks: the run failed"; exit 1; }
