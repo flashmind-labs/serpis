@@ -2,10 +2,10 @@
 local T = { results = {} }
 -- ui-test.sh --narrow: serpis is laid out at a small size (SERPIS_TEST_SIZE).
 T.narrow = os.getenv("SERPIS_TEST_SIZE") ~= nil
--- For a test about what clicking a control does, when a narrow window may leave it out: room
--- for it (no sidebar).
+-- For a test about what clicking a control does, which a narrow window may leave out (in
+-- --narrow, or however small the window manager made the window): room for it (no sidebar).
 function T.room()
-  if T.narrow then serpis.var.set("sidebar-visible", false) end
+  serpis.var.set("sidebar-visible", false)
 end
 
 function T.check(name, got, want)
