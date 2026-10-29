@@ -1,5 +1,5 @@
-//! The credentials page: when no provider has a key anywhere, serpis asks for one here instead
-//! of opening a chat that can't run. It closes onto a chat as soon as a key is found.
+//! The welcome page, shown on a first start (no serpis config yet): it says which providers
+//! have keys and offers to add one or start a chat.
 
 use egui::{FontId, Rect};
 use serde_json::Value;
@@ -12,12 +12,12 @@ pub const KIND: &str = "welcome";
 
 pub struct WelcomeBuffer;
 
-/// Show the page on start when no provider has a key. A test asks for it with
-/// SERPIS_TEST_FIRST_RUN=1, since it starts from an empty home.
-pub fn open_if_needed(ed: &mut Editor) {
+/// Show the page on a first start. Tests start without a config, so one asks for it with
+/// SERPIS_TEST_FIRST_RUN=1.
+pub fn open_if_needed(ed: &mut Editor, fresh_config: bool) {
     let wanted = std::env::var_os("SERPIS_TEST_SCRIPT").is_none()
         || std::env::var_os("SERPIS_TEST_FIRST_RUN").is_some_and(|v| v == "1");
-    if !wanted || !ed.registry.configured_providers().is_empty() {
+    if !wanted || !fresh_config {
         return;
     }
     match ed.create_buffer(KIND, Some("*Welcome*"), &Value::Null) {
@@ -53,10 +53,6 @@ impl Buffer for WelcomeBuffer {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, _focused: bool, ed: &mut Editor) {
-        if !ed.registry.configured_providers().is_empty() {
-            ed.main_sender().send(finish);
-            return;
-        }
         let t = ed.theme.clone();
         let k = t.ui_scale();
         let painter = ui.painter_at(rect);
@@ -69,15 +65,18 @@ impl Buffer for WelcomeBuffer {
         painter.text(
             egui::pos2(rect.center().x, y),
             egui::Align2::CENTER_TOP,
-            "Chats need an API key from a model provider.",
+            &match ed.registry.configured_providers() {
+                found if found.is_empty() => "Chats need an API key from a model provider.".into(),
+                found => format!("Keys found for {}.", found.join(", ")),
+            },
             body.clone(),
             t.fg_dim,
         );
         y += 46.0 * k;
         let mut run = None;
         for (cmd, label) in [
+            ("setup-credentials-finish", "Start a chat"),
             ("chat-set-api-key", "Add an API key"),
-            ("setup-credentials-finish", "Skip, for now"),
         ] {
             let r = Rect::from_min_size(egui::pos2(left, y), egui::vec2(width, row_h - 4.0 * k));
             let resp = ui.interact(

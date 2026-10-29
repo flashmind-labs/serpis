@@ -286,6 +286,9 @@ pub fn bootstrap(ed: &mut Editor) {
         }
     }
 
+    // Read before lua::reload, which writes init.lua when the config folder is new.
+    let fresh_config = !config_dir().join("init.lua").exists();
+
     // User configuration (may switch the scheme, bind keys, define tools).
     lua::reload(ed);
     plugins::reload_all(ed);
@@ -312,7 +315,7 @@ pub fn bootstrap(ed: &mut Editor) {
         ed.show_buffer(id);
     }
     session_ui::restore_open(ed);
-    buffers::welcome::open_if_needed(ed);
+    buffers::welcome::open_if_needed(ed, fresh_config);
     if let Some(script) = std::env::var_os("SERPIS_TEST_SCRIPT") {
         run_test_script_when_settled(ed, PathBuf::from(script), std::time::Instant::now(), None);
     }

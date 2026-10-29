@@ -1,5 +1,5 @@
--- A start with no keys anywhere opens the credentials page instead of a chat; adding a key
--- there closes it onto a chat.
+-- A first start opens the welcome page instead of a chat: a key added there is listed, and
+-- starting closes it onto a chat.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 local d = serpis.debug
 
@@ -16,7 +16,7 @@ end
 
 steps({
   function()
-    T.check("no keys opens the credentials page", serpis.buffer.kind(), "welcome")
+    T.check("a first start opens the welcome page", serpis.buffer.kind(), "welcome")
     T.check("it offers a key", d.rect("chat-set-api-key") ~= nil, true)
     serpis.command.run("chat-set-api-key")
   end,
@@ -31,6 +31,10 @@ steps({
     d.key("Enter")
   end,
   function()
-    T.check("a key closes the page onto a chat", serpis.buffer.kind(), "chat")
+    T.check("the page stays to start from", serpis.buffer.kind(), "welcome")
+    serpis.command.run("setup-credentials-finish")
+  end,
+  function()
+    T.check("starting shows a chat", serpis.buffer.kind(), "chat")
   end,
 })
