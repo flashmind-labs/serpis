@@ -881,9 +881,15 @@ impl Chat {
     /// The system prompt as the project's instructions and settings make it now.
     fn build_system_prompt(&self, host: &dyn Host, tools: &[ToolRef]) -> String {
         let agent_dir = host.registry().paths().agent_dir.clone();
+        // From the config directory: SYSTEM.md in place of serpis's own prompt, APPEND_SYSTEM.md
+        // added to it (before agent-append-system-prompt).
+        let files = host.var("agent-system-prompt-files").and_then(|v| v.as_bool()).unwrap_or(true);
+        let read = |name: &str| files.then(|| std::fs::read_to_string(config::config_dir().join(name)).ok()).flatten().filter(|t| !t.trim().is_empty());
+        let append = [read("APPEND_SYSTEM.md"), host.var_str("agent-append-system-prompt")].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         let mut opts = serpis_agent::system_prompt::PromptOptions {
             context_files: serpis_agent::system_prompt::load_context_files(&self.cwd, &agent_dir),
-            append: host.var_str("agent-append-system-prompt"),
+            custom_prompt: read("SYSTEM.md"),
+            append: Some(append).filter(|a| !a.is_empty()),
             ..Default::default()
         };
         if let Some(Value::Array(g)) = host.var("agent-guidelines") {

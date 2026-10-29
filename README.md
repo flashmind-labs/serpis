@@ -156,6 +156,20 @@ sidebar), `new-chat-in-folder`, `new-terminal-in-folder`, `project-add`, or `C-u
 the folders in your home folder; typed paths start from home (`src/app`, no `~/` needed) unless they
 begin with `/`, `~` or `.`; and Browse… opens the system's folder dialog.
 
+## The agent's instructions
+
+Serpis's agent builds its system prompt when a chat starts, from:
+
+- `SYSTEM.md` in the config directory (`~/.config/serpis`), in place of serpis's own prompt;
+- `APPEND_SYSTEM.md` there, added to it, then the `agent-append-system-prompt` setting;
+- `AGENTS.md` (or `CLAUDE.md`) in `~/.serpis/agent`, then in each folder from the root down to the
+  chat's, as the project's instructions.
+
+`agent-system-prompt-files` off ignores the two config-directory files. A chat keeps the prompt
+it started with, so its prompt cache stays warm: `chat-refresh-context` picks up changes once, and
+`agent-live-context` rebuilds the prompt for every message. Claude Code chats use Claude Code's
+own prompt and `CLAUDE.md` files.
+
 ## Skills
 
 Chats on serpis's own agent have skills the way pi has them (the Agent Skills format,

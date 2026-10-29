@@ -105,6 +105,11 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), text).unwrap();
     }
+    // The user's additions to the system prompt, in the config directory (~/.config/serpis).
+    let config = home.join(".config/serpis");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("APPEND_SYSTEM.md"), "Always answer in British English.\n").unwrap();
+    std::fs::write(work.join("AGENTS.md"), "Run the tests before saying it works.\n").unwrap();
     // SAFETY: the only test in this binary, before any thread of ours starts.
     unsafe { std::env::set_var("HOME", &home) };
 
@@ -123,7 +128,7 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     };
     let (wake, woken) = mpsc::channel();
     let wake = Arc::new(std::sync::Mutex::new(wake));
-    let mut chat = Chat::new(ChatInit { cwd: work.clone(), model: Some(model), thinking: serpis_ai::ThinkingLevel::Medium }, Arc::new(move || {
+    let mut chat = Chat::new(ChatInit { cwd: work.clone(), model: Some(model.clone()), thinking: serpis_ai::ThinkingLevel::Medium }, Arc::new(move || {
         let _ = wake.lock().unwrap().send(());
     }));
     let mut mirror = Mirror::default();
@@ -174,6 +179,8 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     assert!(system.contains("<available_skills>") && system.contains("<name>review</name>") && system.contains("<name>deploy</name>"), "{system}");
     assert!(system.contains("Use the read tool to load a skill's file"), "{system}");
     assert!(!system.contains("<name>pdf</name>"), "Claude Code's skills stay Claude Code's");
+    // APPEND_SYSTEM.md is added to serpis's prompt; the project's AGENTS.md is in it too.
+    assert!(system.contains("You are an expert coding assistant") && system.contains("Always answer in British English.") && system.contains("Run the tests before saying it works."), "{system}");
     assert_eq!(chat.skills(&host).iter().map(|s| (s.name.as_str(), s.source.as_str())).collect::<Vec<_>>(), [("review", "user"), ("grill", "pi"), ("deploy", "project")]);
     // /skill:name sends its instructions with what follows; the transcript shows it as typed.
     chat.submit(&mut host, "/skill:review the last commit".into(), vec![], false, None).unwrap();
@@ -188,6 +195,29 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     let mut back = Chat::new(ChatInit { cwd: home.join("project"), model: None, thinking: serpis_ai::ThinkingLevel::Medium }, Arc::new(|| {}));
     back.restore(&mut host, &serpis_chat::session::load(&path).unwrap());
     assert!(back.entries().iter().any(|e| matches!(e, Entry::User { text, .. } if text == "/skill:review the last commit")));
+
+    // SYSTEM.md takes the place of serpis's own prompt; APPEND_SYSTEM.md and the project's
+    // instructions still follow it.
+    std::fs::write(config.join("SYSTEM.md"), "You are Reviewer, a careful code reviewer.\n").unwrap();
+    let system_of = |host: &mut TestHost| {
+        let mut c = Chat::new(ChatInit { cwd: home.join("project"), model: Some(model.clone()), thinking: serpis_ai::ThinkingLevel::Medium }, Arc::new(|| {}));
+        c.submit(host, "hello".into(), vec![], false, None).unwrap();
+        let (tx, rx) = mpsc::channel::<()>();
+        drop(tx);
+        finish(&mut c, host, &rx, &mut Mirror::default());
+        // (A string, or blocks marked for the cache.)
+        let content = mock.log().last().unwrap().body["messages"][0]["content"].clone();
+        content.as_str().map(str::to_string).unwrap_or_else(|| content[0]["text"].as_str().unwrap_or_default().to_string())
+    };
+    let system = system_of(&mut host);
+    assert!(system.starts_with("You are Reviewer, a careful code reviewer."), "{system}");
+    assert!(!system.contains("You are an expert coding assistant"), "{system}");
+    assert!(system.contains("Always answer in British English.") && system.contains("Run the tests before saying it works."), "{system}");
+    // agent-system-prompt-files off: neither file.
+    host.vars.insert("agent-system-prompt-files".into(), json!(false));
+    let system = system_of(&mut host);
+    assert!(system.contains("You are an expert coding assistant") && !system.contains("Reviewer") && !system.contains("British English"), "{system}");
+    assert!(system.contains("Run the tests before saying it works."), "project instructions stay: {system}");
     let _ = std::fs::remove_dir_all(&home);
 }
 
