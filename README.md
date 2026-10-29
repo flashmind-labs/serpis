@@ -42,8 +42,9 @@ and scan its code with the Camera.
 cargo run -p serpis-bin            # or `just run`; `just --list` shows the other tasks
 ```
 
-The build needs zig 0.16, and `brew install zig@0.16` keeps it out of PATH (the keg is not
-linked): `export PATH="$(brew --prefix zig@0.16)/bin:$PATH"`.
+The build needs zig 0.16, because libghostty-vt is compiled from source. `brew install zig@0.16`
+is enough for the `just` recipes, which put brew's keg on PATH themselves. A bare `cargo build`
+needs it on PATH too: `export PATH="$(brew --prefix zig@0.16)/bin:$PATH"`.
 
 Models, keys and defaults come from the same files as pi: `~/.serpis/agent/{models.json,auth.json}`,
 falling back to `~/.pi/agent/`, plus the usual `*_API_KEY` variables. Your pi default model and

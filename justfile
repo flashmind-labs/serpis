@@ -1,7 +1,23 @@
-# Serpis' common tasks. `just` lists them, `just <task> -- <flags>` passes flags on.
+# Serpis' common tasks. `just` alone lists them; `just <task> [flags]` runs one.
 #
-# The build needs zig 0.16 on PATH, because libghostty-vt is built from source: `brew install
-# zig@0.16` and `export PATH="$(brew --prefix zig@0.16)/bin:$PATH"` (the keg is not linked).
+# libghostty-vt is built from source with zig 0.16, so every recipe runs with zig on PATH: brew's
+# zig@0.16 keg (not necessarily linked), or the directory in ZIG_BIN. `brew install zig@0.16` is
+# all it takes on macOS.
+
+zig_bin := env_var_or_default("ZIG_BIN", trim(shell("""
+    d=$(brew --prefix zig@0.16 2>/dev/null)
+    if [ -z "$d" ]; then
+        for c in /opt/homebrew/opt/zig@0.16 /usr/local/opt/zig@0.16; do
+            if [ -x "$c/bin/zig" ]; then d=$c; break; fi
+        done
+    fi
+    printf %s "$d"
+""", "")))
+export PATH := if zig_bin == "" {
+    env_var_or_default("PATH", "")
+} else {
+    zig_bin + "/bin:" + env_var_or_default("PATH", "")
+}
 
 # List the tasks
 default:
