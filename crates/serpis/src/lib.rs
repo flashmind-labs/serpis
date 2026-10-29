@@ -103,6 +103,7 @@ impl Editor {
 pub fn bootstrap(ed: &mut Editor) {
     use serde_json::{Value, json};
     let o = editor::BUILTIN;
+    buffers::welcome::install(ed);
     ed.defvar("keybinding-scheme", json!("regular"), "Active keybinding scheme: regular, emacs or vim.");
     ed.defvar("prefix-passthrough-modes", json!(["terminal"]), "Major modes whose prefix keys also belong to the program: an unbound continuation (C-c q) is sent to it, and a lone prefix after prefix-passthrough-timeout.");
     ed.defvar("prefix-passthrough-timeout", json!(0.0), "Seconds before a lone prefix key in a passthrough buffer is sent to the program (0: wait for the next key, like Emacs; C-c C-c sends C-c).");
@@ -200,6 +201,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.define_buffer_kind("text", o, |_, p| {
         Ok(Box::new(buffers::text::TextBuffer::new(p.get("text").and_then(Value::as_str).unwrap_or(""))))
     });
+    ed.define_buffer_kind("welcome", o, |_, _| Ok(Box::new(buffers::welcome::WelcomeBuffer)));
     packages::install_base(ed);
     packages::set_scheme(ed, "regular");
     fonts::install(ed);
@@ -212,6 +214,9 @@ pub fn bootstrap(ed: &mut Editor) {
             ed.warn(format!("{e:#}"));
         }
     }
+
+    // Read before lua::reload, which writes init.lua when the config folder is new.
+    let fresh_config = !config_dir().join("init.lua").exists();
 
     // User configuration (may switch the scheme, bind keys, define tools).
     lua::reload(ed);
@@ -239,6 +244,11 @@ pub fn bootstrap(ed: &mut Editor) {
         ed.show_buffer(id);
     }
     session_ui::restore_open(ed);
+    // A first start, whose config was just written: ask for a key before a chat that can't run
+    // (setup-credentials reopens the page).
+    if buffers::welcome::should_ask(ed, fresh_config) {
+        buffers::welcome::open(ed);
+    }
     if let Some(script) = std::env::var_os("SERPIS_TEST_SCRIPT") {
         run_test_script_when_settled(ed, PathBuf::from(script), std::time::Instant::now(), None);
     }

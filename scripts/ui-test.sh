@@ -50,7 +50,7 @@ for _ in $(seq 50); do [[ -s "$tmp/mock.port" && -s "$tmp/cache-mock.port" ]] &&
 export SERPIS_TEST_MOCK_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/v1" SERPIS_TEST_MOCK_LOG="$tmp/mock.log"
 export SERPIS_TEST_CACHE_URL="http://127.0.0.1:$(cat "$tmp/cache-mock.port")" SERPIS_TEST_CACHE_LOG="$tmp/cache-mock.log"
 fail=0
-for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model cache cache_restore compact worktree remote remote_login remote_setup config_reload remote_move remote_resume shared_chat terminal_node terminal_node_restore terminal_speed keep_going machine_add phone_pair claude_code log_view notify skills}"; do
+for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sidebar sessions sessions_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model cache cache_restore compact worktree remote remote_login remote_setup config_reload remote_move remote_resume shared_chat terminal_node terminal_node_restore terminal_speed keep_going machine_add phone_pair claude_code log_view notify skills welcome welcome_restore}"; do
   for name in $t; do
     out="$tmp/$name.out"
     # Each test starts from fresh state; sessions_restore checks what sessions left behind.
@@ -60,7 +60,7 @@ for t in "${@:-vim emacs terminal terminal_esc workspaces fonts layout mouse sid
     # the test of it.
     claude=""
     [[ "$state" == claude_code ]] && claude="$root/target/debug/serpis-fake-claude"
-    SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \
+    SERPIS_TEST_FIRST_RUN="$([[ "$state" == welcome ]] && echo 1)" SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \
       SERPIS_CONFIG_DIR="$tmp/cfg-$state" SERPIS_AGENT_DIR="$tmp/agent-$state" HOME="$tmp/home-$state" SERPIS_TERMINAL_SOCKET="$tmp/home-$state/.t.sock" \
       SERPIS_CLAUDE_CODE_PATH="$claude" FAKE_CLAUDE_LOG="$tmp/$name.claude.log" FAKE_CLAUDE_DIR="$tmp/home-$state" \
       timeout "${SERPIS_TEST_TIMEOUT:-60}" "${SERPIS_TEST_BIN:-$root/target/debug/serpis}" >"$tmp/$name.log" 2>&1 || true
