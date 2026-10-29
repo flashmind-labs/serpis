@@ -739,6 +739,36 @@ impl DocView {
         Some(Rect::from_min_size(pl.origin + r.min.to_vec2(), egui::vec2(w.max(6.0), r.height())))
     }
 
+    /// What the block cursor covers at `p`, by the line laid out last frame: the cell (its
+    /// glyph's advance wide, its font's height tall, on its baseline), the baseline's screen y,
+    /// and the character with the format it was laid out in. A line's end gets half a space of
+    /// the font before it; an empty line, nothing.
+    fn cursor_cell(&self, p: Pos) -> Option<(Rect, f32, Option<(String, egui::TextFormat)>)> {
+        let pl = self.placed.iter().find(|pl| pl.line == p.line)?;
+        let rows = &pl.galley.rows;
+        let mut start = 0;
+        for (ri, row) in rows.iter().enumerate() {
+            let n = row.char_count_excluding_newline().0;
+            if p.col < start + n || ri + 1 == rows.len() {
+                let at = row.glyphs.get(p.col - start.min(p.col));
+                let g = at.or(row.glyphs.last())?;
+                let (x, w) = if at.is_some() { (g.pos.x, g.advance_width) } else { (g.pos.x + g.advance_width, g.font_height * 0.45) };
+                let top_left = pl.origin + row.pos.to_vec2();
+                let baseline = top_left.y + g.pos.y;
+                let cell = Rect::from_min_size(egui::pos2(top_left.x + x, baseline - g.font_ascent), egui::vec2(w.max(2.0), g.font_height));
+                // The character and its section's format (font, weight, italics).
+                let glyph = at.and_then(|g| {
+                    let byte = pl.galley.job.text.char_indices().nth(p.col).map(|(b, _)| b)?;
+                    let section = pl.galley.job.sections.iter().find(|s| s.byte_range.contains(&egui::epaint::text::ByteIndex(byte)))?;
+                    Some((g.chr.to_string(), section.format.clone()))
+                });
+                return Some((cell, baseline, glyph));
+            }
+            start += row.char_count_including_newline().0;
+        }
+        None
+    }
+
     /// `p` moved by `rows` screen rows over the lines laid out last frame (see
     /// `TextSurface::display_move`).
     pub fn display_move(&self, p: Pos, rows: isize, goal_x: Option<f32>) -> Option<(Pos, f32)> {
@@ -1099,15 +1129,30 @@ impl DocView {
                     (_, false) | (CursorShape::Hollow, _) => {
                         painter.rect_stroke(r, 1.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
                     }
-                    (CursorShape::Block, true) => {
-                        painter.rect_filled(r, 1.0, color.gamma_multiply(0.85));
-                        if let Some(c) = self.char_under_cursor(src) {
-                            if !c.chars().all(char::is_whitespace) {
-                                let font = theme.mono();
-                                painter.text(r.left_top(), egui::Align2::LEFT_TOP, c, font, theme.bg);
+                    (CursorShape::Block, true) => match self.cursor_cell(self.cursor) {
+                        // The block fits its character, which is drawn again over it as it was
+                        // laid out (same font, weight and baseline), in the background color.
+                        Some((cell, baseline, glyph)) => {
+                            painter.rect_filled(cell, 1.5, color.gamma_multiply(0.85));
+                            if let Some((c, mut format)) = glyph.filter(|(c, _)| !c.trim().is_empty()) {
+                                format.color = theme.bg;
+                                format.background = Color32::TRANSPARENT;
+                                format.underline = Stroke::NONE;
+                                format.strikethrough = Stroke::NONE;
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append(&c, 0.0, format);
+                                let g = painter.layout_job(job);
+                                if let Some(first) = g.rows.first().and_then(|r| r.glyphs.first().map(|gl| (r.pos, gl.pos))) {
+                                    let (row_pos, glyph_pos) = first;
+                                    let origin = egui::pos2(cell.left() - row_pos.x - glyph_pos.x, baseline - row_pos.y - glyph_pos.y);
+                                    painter.galley(origin, g, theme.bg);
+                                }
                             }
                         }
-                    }
+                        None => {
+                            painter.rect_filled(r, 1.0, color.gamma_multiply(0.85));
+                        }
+                    },
                     (CursorShape::Bar, true) => {
                         painter.rect_filled(Rect::from_min_size(r.min, egui::vec2(2.0, r.height())), 0.0, color);
                     }
@@ -1149,13 +1194,6 @@ impl DocView {
             painter.rect_filled(bar, w / 2.0, theme.fg_faint.gamma_multiply(alpha));
         }
         resp
-    }
-
-    fn char_under_cursor(&self, src: &dyn LineSource) -> Option<String> {
-        if self.cursor.line >= src.len() {
-            return None;
-        }
-        src.styled(self.cursor.line).text.chars().nth(self.cursor.col).map(String::from)
     }
 }
 
