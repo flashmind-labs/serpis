@@ -31,3 +31,25 @@ pub fn fake_claude() -> std::path::PathBuf {
         })
         .clone()
 }
+
+/// The stand-in `codex app-server` used by Codex integration tests.
+pub fn fake_codex() -> std::path::PathBuf {
+    static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let exe = std::env::current_exe().expect("test executable");
+            let dir = exe.parent().and_then(|d| d.parent()).expect("target directory").to_path_buf();
+            let release = dir.file_name().is_some_and(|n| n == "release");
+            let mut cargo = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+            cargo.args(["build", "-q", "-p", "serpis-testkit", "--bin", "serpis-fake-codex"]);
+            if release {
+                cargo.arg("--release");
+            }
+            if let Some(target) = dir.parent() {
+                cargo.env("CARGO_TARGET_DIR", target);
+            }
+            assert!(cargo.status().expect("running cargo").success(), "building serpis-fake-codex");
+            dir.join("serpis-fake-codex")
+        })
+        .clone()
+}

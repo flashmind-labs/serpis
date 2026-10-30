@@ -154,7 +154,7 @@ impl Editor {
 
     /// Set chat `id`'s thinking level (clamped to what its model supports).
     pub fn set_chat_thinking(&mut self, id: BufferId, level: &str) -> anyhow::Result<()> {
-        let l = ThinkingLevel::parse(level).ok_or_else(|| anyhow::anyhow!("Unknown thinking level {level} (off, minimal, low, medium, high, xhigh, max)"))?;
+        let l = ThinkingLevel::parse(level).ok_or_else(|| anyhow::anyhow!("Unknown thinking level {level} (off, minimal, low, medium, high, xhigh, max, ultra)"))?;
         self.with_chat_soon(id, move |c, ed| {
             c.set_thinking(l);
             c.publish(ed, id);

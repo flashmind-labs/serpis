@@ -167,8 +167,8 @@ Serpis's agent builds its system prompt when a chat starts, from:
 
 `agent-system-prompt-files` off ignores the two config-directory files. A chat keeps the prompt
 it started with, so its prompt cache stays warm: `chat-refresh-context` picks up changes once, and
-`agent-live-context` rebuilds the prompt for every message. Claude Code chats use Claude Code's
-own prompt and `CLAUDE.md` files.
+`agent-live-context` rebuilds the prompt for every message. Claude Code and Codex chats use their
+own prompts and project-instruction files.
 
 ## Skills
 
@@ -193,6 +193,10 @@ list is read when a chat's `claude` starts: a running one keeps it, so a change 
 costs no restart (`claude-code-skills-restart` = `true` restarts it, resuming, to see them). In
 them, `/skill:name` sends one of serpis's, and Claude Code's own you call as it does, `/name`.
 serpis's own agent doesn't see Claude Code's skills (`agent-skills-claude` adds them).
+
+Codex chats use the skills Codex finds itself and also receive Serpis's skill list in their
+thread instructions (`codex-skills`; `codex-skills-restart` restarts the app-server and resumes
+the thread when that list changes). `/skill:name` still expands a Serpis skill explicitly.
 
 ## Notifications
 
@@ -414,6 +418,34 @@ after a reboot or a crash with nobody connecting (an agent working through the n
 user unit on Linux, a launchd agent on a Mac, which start it at boot (Linux: once `loginctl
 enable-linger <user>`, with sudo where it asks, lets the user's services run without a login, which serpis says) and again
 after a crash. `remote-uninstall-service` removes it.
+
+## Codex
+
+With the `codex` CLI installed and signed in, its models appear in `chat-select-model` as
+`codex/gpt-...`. Serpis asks `codex app-server` for the current model catalog, including each
+model's reasoning levels. A chat on one of those models runs through Codex's own harness, login,
+tools, MCP servers, rules, sandbox and compaction. The result is still an ordinary Serpis chat:
+the transcript, tool cards, diffs, session file, hooks, remote machines and phone all work the
+same way.
+
+Each chat keeps one app-server process and one Codex thread. The Codex thread ID is saved with
+assistant messages, so reopening a Serpis session resumes Codex's stored thread. Switching an
+existing chat to Codex sends the earlier conversation with the first turn. Text, images,
+reasoning summaries, commands, file changes, MCP calls and web searches stream into the usual
+Serpis entries. The context meter uses Codex's token count, and `chat-compact` asks Codex to
+compact its thread.
+
+Command, file-change and extra-permission requests wait on the tool card. Allow, Always and Deny
+use the same keys and phone controls as Claude Code permissions. `before-tool-call` can block a
+request first, and `tool-ask` can answer it. `codex-permission-prompts` can answer every request
+with `ask`, `allow` or `deny`. `codex-approval-policy` defaults to `on-request`; set it to an empty
+string to inherit Codex's config. `codex-sandbox` can override the sandbox, while `codex-args`,
+`codex-env` and `codex-path` control how app-server starts. Each remote machine uses its own Codex
+installation and login.
+
+Messages sent while Codex works use `turn/steer`; follow-ups start after the current turn.
+Stopping sends `turn/interrupt`. Reasoning levels include `ultra` when the selected model offers
+it.
 
 ## Claude Code
 

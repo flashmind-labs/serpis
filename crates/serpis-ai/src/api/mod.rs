@@ -19,9 +19,9 @@ pub const SUPPORTED_APIS: &[&str] = &[
     "google-generative-ai",
 ];
 
-/// Whether a chat can run models of `api`: serpis's own adapters, or Claude Code.
+/// Whether a chat can run models of `api`: Serpis's own adapters or an external agent harness.
 pub fn chat_api(api: &str) -> bool {
-    SUPPORTED_APIS.contains(&api) || api == "azure-openai-responses" || api == crate::claude_code::PROVIDER
+    SUPPORTED_APIS.contains(&api) || api == "azure-openai-responses" || api == crate::claude_code::PROVIDER || api == crate::codex::PROVIDER
 }
 
 /// Default thinking budgets for token-budget providers (pi-ai `DEFAULT_THINKING_BUDGETS`).

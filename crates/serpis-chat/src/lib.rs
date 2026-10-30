@@ -230,6 +230,8 @@ pub struct Chat {
     agent: Option<AgentHandle>,
     /// The `claude` process of a chat on a Claude Code model, kept between turns.
     claude: serpis_agent::claude_code::ClaudeCode,
+    /// The `codex app-server` process of a chat on a Codex model, kept between turns.
+    codex: serpis_agent::codex::Codex,
     /// Tool calls waiting for the person to allow them, by id: where the answer goes.
     asks: HashMap<String, serpis_agent::AskReply>,
     /// Claude Code's permission mode for this chat, once chosen or reported (else its
@@ -309,6 +311,7 @@ impl Chat {
             history: Vec::new(),
             agent: None,
             claude: Default::default(),
+            codex: Default::default(),
             asks: HashMap::new(),
             permission_mode: None,
             thinking_tokens: None,
@@ -356,6 +359,11 @@ impl Chat {
         self.model.as_ref().is_some_and(|m| m.api == serpis_ai::claude_code::PROVIDER)
     }
 
+    /// Whether this chat runs on the Codex harness (a `codex/*` model).
+    pub fn is_codex(&self) -> bool {
+        self.model.as_ref().is_some_and(|m| m.api == serpis_ai::codex::PROVIDER)
+    }
+
     pub fn running(&self) -> bool {
         self.agent.is_some()
     }
@@ -364,9 +372,9 @@ impl Chat {
         self.compacting.is_some() || self.claude_compacting
     }
 
-    /// Where the chat's agent compacts its context by itself, in tokens (Claude Code's).
+    /// Where the chat's agent compacts its context by itself, in tokens.
     pub fn compacts_at(&self) -> Option<u64> {
-        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_claude_code())
+        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_claude_code() || self.is_codex())
     }
 
     /// The running agent (aborting through it takes effect at once).
@@ -417,6 +425,7 @@ impl Chat {
 
     pub fn clear(&mut self) {
         self.abort();
+        self.codex.stop();
         self.claude.stop();
         self.stop_waiting_for_reset();
         self.limit = None;
@@ -437,6 +446,9 @@ impl Chat {
     pub fn set_model(&mut self, m: Model) {
         if m.api != serpis_ai::claude_code::PROVIDER {
             self.claude.stop();
+        }
+        if m.api != serpis_ai::codex::PROVIDER {
+            self.codex.stop();
         }
         self.thinking = clamp_thinking_level(&m, self.thinking);
         self.model = Some(m);
@@ -535,6 +547,10 @@ impl Chat {
         if self.is_claude_code() {
             self.answer_cut_off_calls(host);
             return self.start_claude(host, vec![msg]);
+        }
+        if self.is_codex() {
+            self.answer_cut_off_calls(host);
+            return self.start_codex(host, vec![msg]);
         }
         let Some(cfg) = self.agent_config(host) else { return Err("No model selected".into()) };
         // A turn that was cut off and not continued (parked, or not kept going).
@@ -676,6 +692,68 @@ impl Chat {
         Ok(())
     }
 
+    /// Run a turn through the Codex app-server, with Codex's own tools, login, permissions,
+    /// threads and compaction.
+    fn start_codex(&mut self, host: &mut dyn Host, prompts: Vec<Message>) -> Result<(), String> {
+        let Some(model) = self.model.clone() else { return Err("No model selected".into()) };
+        let binary = match host.var_str("codex-path").filter(|p| !p.is_empty()) {
+            Some(path) => Some(expand_home(&path)),
+            None => host.registry().codex_binary(),
+        };
+        let Some(binary) = binary else {
+            let why = "Codex isn't installed on this machine (codex not found; set codex-path)".to_string();
+            host.notify(Level::Error, why.clone());
+            return Err(why);
+        };
+        self.ensure_session(host);
+        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
+        self.record(host, |writer| writer.note_settings(&provider, &id, thinking).map(|_| ()));
+        let effort = model.thinking_map(self.thinking).flatten().map(str::to_string);
+        let mut env = vec![
+            (serpis_agent::AGENT_ENV.0.into(), serpis_agent::AGENT_ENV.1.into()),
+            ("SERPIS_SESSION_ID".into(), self.session_id.clone()),
+        ];
+        if let Some(Value::Object(extra)) = host.var("codex-env") {
+            env.extend(extra.into_iter().filter_map(|(name, value)| value.as_str().map(|v| (name, v.to_string()))));
+        }
+        let args = match host.var("codex-args") {
+            Some(Value::Array(args)) => args.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        let instructions = host.var_bool("codex-skills", true).then(|| {
+            let skills = if host.var_bool("agent-skills", true) { serpis_agent::skills::discover(&self.skill_places(host)) } else { Vec::new() };
+            serpis_agent::skills::for_prompt(&skills, "shell")
+        });
+        let launch = serpis_agent::codex::Launch {
+            binary,
+            cwd: self.cwd.clone(),
+            args,
+            instructions,
+            instructions_restart: host.var_bool("codex-skills-restart", false),
+            env,
+        };
+        let cfg = serpis_agent::codex::RunConfig {
+            launch,
+            model,
+            effort,
+            approval_policy: host.var_str("codex-approval-policy").filter(|s| !s.is_empty()),
+            sandbox: host.var_str("codex-sandbox").filter(|s| !s.is_empty()),
+            hooks: host.tool_hooks(),
+            prompts: host.var_str("codex-permission-prompts").and_then(|p| serpis_agent::codex::Prompts::parse(&p)).unwrap_or_default(),
+        };
+        self.sent = None;
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
+        let emit: serpis_agent::EmitFn = Arc::new(move |event| {
+            let _ = tx.send(Done::Agent(event));
+            wake();
+        });
+        let runtime = host.runtime();
+        let _guard = runtime.enter();
+        self.last_error = None;
+        self.agent = Some(self.codex.run(self.history.clone(), prompts, cfg, emit));
+        Ok(())
+    }
+
     /// Replace the messages before a cut point with a summary (manually, or automatically near
     /// the context window). The summary is asked for in the conversation itself, so the request
     /// reads the prompt cache; see `serpis_agent::compaction`.
@@ -689,6 +767,12 @@ impl Chat {
                     _ => "/compact".to_string(),
                 };
                 let _ = self.submit(host, text, Vec::new(), true, None);
+            }
+            return;
+        }
+        if self.is_codex() {
+            if reason == CompactReason::Manual && !self.codex.compact() {
+                host.notify(Level::Info, "Wait for Codex to finish before compacting".into());
             }
             return;
         }
@@ -791,6 +875,9 @@ impl Chat {
     /// After a run: compact when the context nears the window (chat-compact-auto), or when the
     /// run failed on a context overflow, then retry it once.
     fn compact_if_needed(&mut self, host: &mut dyn Host) {
+        if self.is_claude_code() || self.is_codex() {
+            return;
+        }
         if !host.var_bool("chat-compact-auto", true) {
             return;
         }
@@ -815,8 +902,8 @@ impl Chat {
     /// Context the conversation fills: the last response's tokens (what the next request sends,
     /// roughly), and the model's window. None before any response.
     pub fn context(&self) -> (Option<u64>, u64) {
-        // Claude Code's own count (its window, what its system prompt and tools take).
-        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_claude_code()) {
+        // An external harness's own count, including its system prompt and tools.
+        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_claude_code() || self.is_codex()) {
             return (Some(used), window);
         }
         let used = self.history.iter().rev().find_map(|m| match m {
@@ -1053,6 +1140,9 @@ impl Chat {
         self.answer_cut_off_calls(host);
         if self.is_claude_code() {
             return self.start_claude(host, Vec::new()).is_ok();
+        }
+        if self.is_codex() {
+            return self.start_codex(host, Vec::new()).is_ok();
         }
         let Some(cfg) = self.agent_config(host) else { return false };
         self.start_agent(host, cfg, Vec::new());

@@ -156,6 +156,8 @@ struct State {
     errors: Vec<String>,
     /// The `claude` CLI, when installed: Claude Code models are offered then.
     claude_code: Option<PathBuf>,
+    /// The `codex` CLI, when installed: Codex harness models are offered then.
+    codex: Option<PathBuf>,
 }
 
 /// Thread-safe model registry. Cheap to clone.
@@ -225,6 +227,7 @@ impl Registry {
         st.catalog = catalog;
         st.errors = errors;
         st.claude_code = crate::claude_code::find_binary();
+        st.codex = crate::codex::find_binary();
     }
 
     pub fn load_errors(&self) -> Vec<String> {
@@ -247,12 +250,20 @@ impl Registry {
         if st.claude_code.is_some() && !out.iter().any(|p| p == crate::claude_code::PROVIDER) {
             out.push(crate::claude_code::PROVIDER.into());
         }
+        if st.codex.is_some() && !out.iter().any(|p| p == crate::codex::PROVIDER) {
+            out.push(crate::codex::PROVIDER.into());
+        }
         out
     }
 
     /// The `claude` CLI found when the registry was last loaded.
     pub fn claude_code_binary(&self) -> Option<PathBuf> {
         self.state.read().unwrap().claude_code.clone()
+    }
+
+    /// The `codex` CLI found when the registry was last loaded.
+    pub fn codex_binary(&self) -> Option<PathBuf> {
+        self.state.read().unwrap().codex.clone()
     }
 
     /// Whether `provider`'s credential is an OAuth login (its tokens belong to one machine:
@@ -321,6 +332,22 @@ impl Registry {
                 }
             }
         }
+        if let Some(binary) = self.codex_binary() {
+            let stale = {
+                let st = self.state.read().unwrap();
+                st.catalog.get(crate::codex::PROVIDER).is_none_or(|e| now_ms().saturating_sub(e.checked_at) > CATALOG_REFRESH_MS)
+            };
+            if stale || force {
+                match crate::codex::discover(&binary).await {
+                    Ok(models) if !models.is_empty() => {
+                        let entry = StoreEntry { models, checked_at: now_ms() };
+                        self.state.write().unwrap().catalog.insert(crate::codex::PROVIDER.into(), entry);
+                    }
+                    Ok(_) => {}
+                    Err(e) => errors.push(format!("{}: {e:#}", crate::codex::PROVIDER)),
+                }
+            }
+        }
         self.save_store();
         errors
     }
@@ -344,6 +371,9 @@ impl Registry {
             if provider == crate::claude_code::PROVIDER && st.claude_code.is_none() {
                 continue;
             }
+            if provider == crate::codex::PROVIDER && st.codex.is_none() {
+                continue;
+            }
             let cfg = st.models_file.providers.get(provider);
             for m in &entry.models {
                 if m.extra.get("type").and_then(Value::as_str).is_some_and(|t| t != "chat") {
@@ -360,6 +390,9 @@ impl Registry {
         }
         if st.claude_code.is_some() && !st.catalog.contains_key(crate::claude_code::PROVIDER) {
             out.extend(crate::claude_code::fallback_models());
+        }
+        if st.codex.is_some() && !st.catalog.contains_key(crate::codex::PROVIDER) {
+            out.extend(crate::codex::fallback_models());
         }
 
         for (provider, cfg) in &st.models_file.providers {

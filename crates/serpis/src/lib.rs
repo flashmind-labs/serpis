@@ -173,6 +173,14 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("claude-code-permission-mode-cycle", json!(["default", "acceptEdits", "plan", "auto"]), "The permission modes chat-cycle-permission-mode (S-TAB in a Claude Code chat) goes through, in order. Add \"bypassPermissions\" or \"dontAsk\" to reach those too.");
     ed.defvar("claude-code-args", json!([]), "More arguments for the claude CLI of Claude Code chats, e.g. [\"--append-system-prompt\", \"Be brief.\"] or [\"--mcp-config\", \"~/mcp.json\"].");
     ed.defvar("claude-code-usage-advice", json!(true), "claude-code-usage also shows Claude Code's advice on what spends the subscription, from a scan of the machine's last week of Claude Code transcripts (a moment longer).");
+    ed.defvar("codex-path", Value::Null, "The codex CLI that chats on codex/* models run through. Unset: codex on PATH or its usual install locations. Each machine uses its own CLI and login.");
+    ed.defvar("codex-permission-prompts", json!("ask"), "Who answers Codex command, file and permission requests that before-tool-call and tool-ask handlers let through: \"ask\", \"allow\" or \"deny\".");
+    ed.defvar("codex-approval-policy", json!("on-request"), "Codex's approval policy for codex/* chats: \"untrusted\", \"on-request\" or \"never\". An empty string inherits Codex's config.");
+    ed.defvar("codex-sandbox", Value::Null, "Override Codex's sandbox for codex/* chats: \"read-only\", \"workspace-write\" or \"danger-full-access\". Unset inherits Codex's config.");
+    ed.defvar("codex-args", json!([]), "More arguments for codex app-server, such as [\"-c\", \"web_search=live\"].");
+    ed.defvar("codex-env", json!({}), "Extra environment variables for the codex app-server process of codex/* chats.");
+    ed.defvar("codex-skills", json!(true), "Offer serpis's skills to Codex beside the skills Codex finds itself. The list is added to the thread's developer instructions when it starts.");
+    ed.defvar("codex-skills-restart", json!(false), "Restart a Codex chat's app-server before its next turn when the offered Serpis skills changed. Its saved thread resumes in the new process.");
     ed.defvar("plugin-paths", json!([]), "Extra Rust plugin library paths.");
     ed.defvar("extensions-disabled", json!([]), "Lua extensions in <config>/extensions not to load, by name (\"max-money\" for max-money.lua).");
     ed.defvar("terminal-image-storage-mb", json!(320), "Memory for images programs show in a terminal (Kitty graphics protocol: yazi previews, kitten icat...), per terminal; 0 turns terminal images off.");

@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod claude_code;
+pub mod codex;
 pub mod compaction;
 pub mod skills;
 pub mod system_prompt;

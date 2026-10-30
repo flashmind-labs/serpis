@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod claude_code;
+pub mod codex;
 pub mod overflow;
 pub mod registry;
 pub mod stream;

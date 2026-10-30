@@ -25,10 +25,11 @@ pub enum ThinkingLevel {
     High,
     Xhigh,
     Max,
+    Ultra,
 }
 
 impl ThinkingLevel {
-    pub const ALL: [ThinkingLevel; 7] = [
+    pub const ALL: [ThinkingLevel; 8] = [
         ThinkingLevel::Off,
         ThinkingLevel::Minimal,
         ThinkingLevel::Low,
@@ -36,6 +37,7 @@ impl ThinkingLevel {
         ThinkingLevel::High,
         ThinkingLevel::Xhigh,
         ThinkingLevel::Max,
+        ThinkingLevel::Ultra,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -47,6 +49,7 @@ impl ThinkingLevel {
             ThinkingLevel::High => "high",
             ThinkingLevel::Xhigh => "xhigh",
             ThinkingLevel::Max => "max",
+            ThinkingLevel::Ultra => "ultra",
         }
     }
 
@@ -400,7 +403,7 @@ pub fn supported_thinking_levels(model: &Model) -> Vec<ThinkingLevel> {
         .filter(|level| match model.thinking_map(*level) {
             Some(None) => false,
             mapped => {
-                if matches!(level, ThinkingLevel::Xhigh | ThinkingLevel::Max) {
+                if matches!(level, ThinkingLevel::Xhigh | ThinkingLevel::Max | ThinkingLevel::Ultra) {
                     mapped.is_some()
                 } else {
                     true

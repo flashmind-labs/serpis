@@ -56,7 +56,7 @@ pub fn model(id: &str, name: &str, efforts: &[&str], thinking_off: bool) -> Mode
     let mut map = serde_json::Map::new();
     map.insert("off".into(), if thinking_off { json!("off") } else { Value::Null });
     map.insert("minimal".into(), Value::Null);
-    for level in ["low", "medium", "high", "xhigh", "max"] {
+    for level in ["low", "medium", "high", "xhigh", "max", "ultra"] {
         map.insert(level.into(), if efforts.contains(&level) { json!(level) } else { Value::Null });
     }
     // Claude Code reports a 1M window for its 5.x models; older ones have 200K.
