@@ -252,6 +252,7 @@ final class SerpisUITests: XCTestCase {
         app.buttons["Send"].tap()
         let thinking = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Thinking, about'")).firstMatch
         XCTAssertTrue(thinking.waitForExistence(timeout: 20), "thinking shows")
+        XCTAssertFalse(app.descendants(matching: .any)["Working"].exists, "one sign that it's working, not two")
         shot("14b-thinking")
         // Scrolled up to read while it thinks, it stays there. (The keyboard away first: a drag
         // would only put it away.)

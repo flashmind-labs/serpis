@@ -128,9 +128,7 @@ struct AssistantView: View {
                     EmptyView()
                 }
             }
-            if streaming && blocks.allSatisfy({ if case .text(let t) = $0 { t.isEmpty } else { true } }) {
-                Working()
-            }
+            // (While it has no text yet, the chat shows that it's working, once, below it.)
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
