@@ -265,8 +265,15 @@ local steps = {
     T.check("its card says it runs on, and how much it printed", has("Running in the background · ") and has(" printed · C-c C-k stops it"), true)
     T.check("and shows what it prints, live", has("line 3") and has("progress 100%"), true)
     T.check("as plain text", has("\27["), false)
-    T.press("C-c C-k")
-    when(function() return d.composer()["background"] == nil and has("Stopped") end, go)
+    -- A click on what runs shows it (its card, open, the cursor on it), and doesn't stop it.
+    click("background")
+    serpis.defer(700, function()
+      T.check("a click on the background work shows it, and doesn't stop it", (serpis.chat.info() or {}).background, 1)
+      local line = serpis.buffer.line((serpis.buffer.cursor())) or ""
+      T.check("the cursor is on its card", line:find("sleep", 1, true) ~= nil, true)
+      T.press("C-c C-k")
+      when(function() return d.composer()["background"] == nil and has("Stopped") end, go)
+    end)
     return false
   end,
   function(go)

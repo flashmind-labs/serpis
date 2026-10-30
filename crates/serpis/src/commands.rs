@@ -1029,6 +1029,38 @@ pub fn install(ed: &mut Editor) {
         },
     );
     ed.define_command(
+        "chat-show-task",
+        "Show work the agent left running in the background (Claude Code's background commands and agents): its card, opened in the transcript, for what it has printed. The only one, or the one you pick. Param: its task id.",
+        o,
+        |ed, a| {
+            let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            let tasks = with_chat(ed, |c, _| c.background_tasks())?;
+            let show = move |ed: &mut Editor, task: String| {
+                let shown = ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.show_task(&task, ed)).unwrap_or(false);
+                if !shown {
+                    ed.message("It isn't in the transcript");
+                }
+            };
+            if let Some(task) = a.str(0) {
+                show(ed, task.to_string());
+                return Ok(());
+            }
+            match tasks.len() {
+                0 => ed.message("Nothing is running in the background"),
+                1 => show(ed, tasks[0].id.clone()),
+                _ => {
+                    let cands = tasks.iter().map(|t| Candidate::new(t.description.clone()).detail(format!("{} · {}", if t.kind == "agent" { "agent" } else { "command" }, t.id))).collect();
+                    ed.completing_read("Show: ", cands, true, move |ed, c, _| {
+                        if let Some(t) = c.and_then(|c| tasks.into_iter().find(|t| t.description == c.value)) {
+                            show(ed, t.id);
+                        }
+                    });
+                }
+            }
+            Ok(())
+        },
+    );
+    ed.define_command(
         "chat-stop-task",
         "Stop work the agent left running in the background (Claude Code's background commands and agents): the only one, or the one you pick. Param: its task id.",
         o,

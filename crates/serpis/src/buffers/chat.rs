@@ -363,6 +363,24 @@ impl ChatBuffer {
         self.node.post(Request::BackgroundTask { chat: self.node.chat.clone(), tool: tool.to_string() });
     }
 
+    /// Show task `task` (one of [`Self::background_tasks`]): its card (or the subagent's it
+    /// runs in) opened in the transcript, with the cursor on it.
+    pub fn show_task(&mut self, task: &str, ed: &Editor) -> bool {
+        let has = |e: &Entry| e.walk().into_iter().any(|e| matches!(e, Entry::Tool { task: Some(t), .. } if t.id == task));
+        let Some(ei) = self.entries.iter().position(has) else { return false };
+        if let Some(v) = self.views.get_mut(ei) {
+            v.expanded = Some(true);
+        }
+        self.dirty = true;
+        self.rebuild(ed);
+        let Some(line) = self.line_entry.iter().position(|e| *e == Some(ei)) else { return false };
+        self.focus = Focus::Transcript;
+        self.view.cursor = Pos::new(line, 0);
+        self.view.anchor = None;
+        self.view.reveal_cursor();
+        true
+    }
+
     pub fn stop_task(&mut self, task: &str) {
         self.node.post(Request::StopTask { chat: self.node.chat.clone(), task: task.to_string() });
     }
@@ -2225,12 +2243,12 @@ impl Buffer for ChatBuffer {
         if !running.is_empty() {
             let label = format!("· {}", background_counts(&running));
             let mut tip: Vec<String> = running.iter().map(|t| format!("{}: {}", task_kind(t).0, t.description)).collect();
-            tip.push("Running in the background. Click (or C-c C-k) to stop one (chat-stop-task)".into());
+            tip.push("Running in the background. Click to see it (chat-show-task); C-c C-k stops one (chat-stop-task)".into());
             let (br, clicked) = pill(ui, kr.right() + 2.0 * k, "background", &label, &tip.join("\n"), None, f32::INFINITY);
             hits.push(("background", br));
             kr = br;
             if clicked {
-                run = Some("chat-stop-task");
+                run = Some("chat-show-task");
             }
         }
         // Close to a usage limit: how close, until it resets.

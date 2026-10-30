@@ -466,8 +466,9 @@ follows. New chats start in `claude-code-permission-mode`.
 Work it runs on the side shows as it goes, as many at once as it starts. A background shell
 (Bash with `run_in_background`), a monitor or an agent keeps a live status on the card that
 started it (`● in background`, then how it ended), and the composer counts what is running by
-kind, as Claude Code does (`· 1 shell · 1 monitor`); `C-c C-k` (`chat-stop-task`) stops one,
-asking which when several run. When such work finishes after the turn, Claude Code takes a turn of its own to act on
+kind, as Claude Code does (`· 1 shell · 1 monitor`). A click on that count (`chat-show-task`)
+opens the work's card in the transcript, with what it has printed; `C-c C-k` (`chat-stop-task`)
+stops one. Both ask which when several run. When such work finishes after the turn, Claude Code takes a turn of its own to act on
 it, and the chat runs that turn like any other: shown with what started it, recorded, stoppable.
 A subagent's steps (its commands, edits and answer) show inside its Agent card, live, even
 when it runs in the background. Stopping or closing a chat ends everything its `claude`
