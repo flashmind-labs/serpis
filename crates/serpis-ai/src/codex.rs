@@ -100,31 +100,8 @@ pub fn model_from_list(value: &Value) -> Option<Model> {
 
 /// Ask a fresh app-server for the model catalog. This does not start a model turn.
 pub async fn discover(binary: &Path) -> Result<Vec<Model>> {
-    let mut child = tokio::process::Command::new(binary)
-        .arg("app-server")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("starting {} app-server", binary.display()))?;
-    let mut input = child
-        .stdin
-        .take()
-        .context("codex app-server has no stdin")?;
-    let mut lines = BufReader::new(
-        child
-            .stdout
-            .take()
-            .context("codex app-server has no stdout")?,
-    )
-    .lines();
-    let init = json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"serpis","title":"Serpis","version":env!("CARGO_PKG_VERSION")}}});
-    input.write_all(format!("{init}\n").as_bytes()).await?;
-    wait_response(&mut lines, 1).await?;
-    input
-        .write_all(b"{\"method\":\"initialized\",\"params\":{}}\n")
-        .await?;
+    let (mut child, mut input, mut lines) = start(binary).await?;
+    initialize(&mut input, &mut lines).await?;
     let request = json!({"method":"model/list","id":2,"params":{"limit":100}});
     input.write_all(format!("{request}\n").as_bytes()).await?;
     let response = wait_response(&mut lines, 2).await?;
@@ -138,7 +115,89 @@ pub async fn discover(binary: &Path) -> Result<Vec<Model>> {
         .collect())
 }
 
+/// Read account details, ChatGPT quota windows and account activity for a Codex status page.
+/// Errors from a surface unavailable to this auth mode are kept beside the other data.
+pub async fn status(binary: &Path) -> Result<Value> {
+    let (mut child, mut input, mut lines) = start(binary).await?;
+    initialize(&mut input, &mut lines).await?;
+    let account = request(&mut input, &mut lines, 2, "account/read", Some(json!({"refreshToken":false}))).await?;
+    let (rate_limits, rate_limits_error) = optional_request(&mut input, &mut lines, 3, "account/rateLimits/read").await?;
+    let (usage, usage_error) = optional_request(&mut input, &mut lines, 4, "account/usage/read").await?;
+    let _ = child.kill().await;
+    Ok(json!({
+        "account": account,
+        "rateLimits": rate_limits,
+        "rateLimitsError": rate_limits_error,
+        "usage": usage,
+        "usageError": usage_error,
+    }))
+}
+
+async fn start(binary: &Path) -> Result<(tokio::process::Child, tokio::process::ChildStdin, tokio::io::Lines<BufReader<tokio::process::ChildStdout>>)> {
+    let mut child = tokio::process::Command::new(binary)
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("starting {} app-server", binary.display()))?;
+    let input = child.stdin.take().context("codex app-server has no stdin")?;
+    let lines = BufReader::new(child.stdout.take().context("codex app-server has no stdout")?).lines();
+    Ok((child, input, lines))
+}
+
+async fn initialize(input: &mut tokio::process::ChildStdin, lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>) -> Result<()> {
+    let init = json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"serpis","title":"Serpis","version":env!("CARGO_PKG_VERSION")}}});
+    input.write_all(format!("{init}\n").as_bytes()).await?;
+    wait_response(lines, 1).await?;
+    input.write_all(b"{\"method\":\"initialized\",\"params\":{}}\n").await?;
+    Ok(())
+}
+
+async fn request(
+    input: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value> {
+    let mut message = json!({"method":method,"id":id});
+    if let Some(params) = params {
+        message["params"] = params;
+    }
+    input.write_all(format!("{message}\n").as_bytes()).await?;
+    let response = wait_response(lines, id).await?;
+    Ok(response["result"].clone())
+}
+
+async fn optional_request(
+    input: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    method: &str,
+) -> Result<(Value, Value)> {
+    let message = json!({"method":method,"id":id});
+    input.write_all(format!("{message}\n").as_bytes()).await?;
+    let response = wait_answer(lines, id).await?;
+    match response.get("error") {
+        Some(error) => Ok((Value::Null, json!(error["message"].as_str().unwrap_or("Codex did not return this status")))),
+        None => Ok((response["result"].clone(), Value::Null)),
+    }
+}
+
 async fn wait_response(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+) -> Result<Value> {
+    let value = wait_answer(lines, id).await?;
+    if let Some(error) = value.get("error") {
+        bail!("{}", error["message"].as_str().unwrap_or("Codex app-server request failed"));
+    }
+    Ok(value)
+}
+
+async fn wait_answer(
     lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     id: u64,
 ) -> Result<Value> {
@@ -148,14 +207,6 @@ async fn wait_response(
                 continue;
             };
             if value["id"].as_u64() == Some(id) {
-                if let Some(error) = value.get("error") {
-                    bail!(
-                        "{}",
-                        error["message"]
-                            .as_str()
-                            .unwrap_or("Codex app-server request failed")
-                    );
-                }
                 return Ok(value);
             }
         }

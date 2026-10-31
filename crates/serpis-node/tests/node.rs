@@ -93,12 +93,17 @@ fn a_node_runs_chats_for_clients_anywhere() {
     unsafe {
         std::env::set_var("HOME", root.join("home"));
         std::env::set_var("SERPIS_CLAUDE_CODE_PATH", serpis_testkit::fake_claude());
+        std::env::set_var("SERPIS_CODEX_PATH", serpis_testkit::fake_codex());
         std::env::set_var("FAKE_CLAUDE_DIR", &root);
     }
     let node_dir = root.join("node");
     std::fs::create_dir_all(&node_dir).unwrap();
-    // Claude Code there is the stand-in (its usage is made up).
-    let settings = json!({"session-directory": root.join("sessions"), "claude-code-path": serpis_testkit::fake_claude()});
+    // Claude Code and Codex there are stand-ins (their usage is made up).
+    let settings = json!({
+        "session-directory": root.join("sessions"),
+        "claude-code-path": serpis_testkit::fake_claude(),
+        "codex-path": serpis_testkit::fake_codex()
+    });
     std::fs::write(node_dir.join("settings.json"), settings.to_string()).unwrap();
     let socket = node_dir.join("node.sock");
     let node = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir: node_dir.clone(), agent_dir: Some(agent.clone()), config_dir: Some(node_dir.join("config")) }, rt.handle().clone()).unwrap();
@@ -114,6 +119,11 @@ fn a_node_runs_chats_for_clients_anywhere() {
         let Response::ClaudeCodeUsage { usage } = a.call(Request::ClaudeCodeUsage { advice: false }).await.unwrap() else { panic!() };
         assert_eq!(usage["rate_limits"]["five_hour"]["utilization"], 42, "{usage}");
         assert!(usage["behaviors"].is_null(), "no advice asked for: {usage}");
+        // Its Codex account and quotas, as app-server answers.
+        let Response::CodexStatus { status } = a.call(Request::CodexStatus).await.unwrap() else { panic!() };
+        assert_eq!(status["account"]["account"]["planType"], "pro", "{status}");
+        assert_eq!(status["rateLimits"]["rateLimits"]["primary"]["usedPercent"], 25, "{status}");
+        assert_eq!(status["usage"]["summary"]["lifetimeTokens"], 1_234_567, "{status}");
 
         // A chat on Claude Code says its permission mode, and switches it.
         for _ in 0..100 {

@@ -1174,6 +1174,24 @@ pub fn install(ed: &mut Editor) {
         crate::claude_usage::show(ed, machine);
         Ok(())
     });
+    ed.define_command(
+        "codex-status",
+        "Show the Codex account, plan limits, credits and token activity reported by app-server, in a page of its own (g asks again). Asked of the current chat's machine, else this one. Param: a machine.",
+        o,
+        |ed, a| {
+            let machine = a.str(0).map(str::to_string).or_else(|| current_chat(ed).and_then(|id| ed.buffer_machine(id)));
+            crate::codex_status::show(ed, machine);
+            Ok(())
+        },
+    );
+    ed.define_command("codex-status-refresh", "Ask Codex for its status again, in the status page shown.", o, |ed, _| {
+        let id = ed.current_buffer();
+        let Some(machine) = ed.with_buffer_as::<crate::codex_status::StatusBuffer, _>(id, |buffer, _| buffer.machine.clone()) else {
+            anyhow::bail!("Not in a Codex status page");
+        };
+        crate::codex_status::show(ed, machine);
+        Ok(())
+    });
     // Toggling tools throws the cache away (tools come first in every request): say what it costs.
     ed.add_hook("variable-changed", o, |ed, p| {
         let name = p.get("name").and_then(Value::as_str).unwrap_or_default();

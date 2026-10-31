@@ -1123,6 +1123,20 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             })
         })
     })?)?;
+    // serpis.agent.codex_status(function(status, err) ... end, {machine = "box"}?):
+    // Codex account and usage status on that machine (this one by default).
+    agent.set("codex_status", lua.create_function(|lua, (f, opts): (Function, Option<Table>)| {
+        let machine: Option<String> = opts.as_ref().and_then(|o| o.get("machine").ok());
+        let l = lua.clone();
+        ed(|e| {
+            crate::codex_status::fetch(e, machine, move |e, result| {
+                let _ = match result {
+                    Ok(status) => call(e, &l, &f, &status),
+                    Err(error) => call_with(e, &l, &f, &[Value::Null, json!(error)]),
+                };
+            })
+        })
+    })?)?;
     s.set("agent", agent)?;
 
     // Chats. Every function takes the chat's buffer id first (nil: the current buffer).

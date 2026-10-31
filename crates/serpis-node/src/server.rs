@@ -917,6 +917,11 @@ impl Node {
             self.answer_usage(client, call.id, advice);
             return false;
         }
+        // Codex status: app-server reads the account and quotas, which can take a moment.
+        if let Request::CodexStatus = call.request {
+            self.answer_codex_status(client, call.id);
+            return false;
+        }
         // A phone proposing its key: answered once the desktop says.
         if let Request::Pair { pairing, key, label } = call.request {
             if let Err(message) = self.pair(client, call.id, pairing, key, label) {
@@ -1186,6 +1191,7 @@ impl Node {
             }
             Request::Pack { .. }
             | Request::ClaudeCodeUsage { .. }
+            | Request::CodexStatus
             | Request::Unpack { .. }
             | Request::Terminals
             | Request::NewTerminal { .. }
@@ -1315,6 +1321,22 @@ impl Node {
                 None => Response::Error { message: "Claude Code isn't installed on this machine (claude not found; set claude-code-path)".into() },
                 Some(b) => match serpis_ai::claude_code::usage(&b, advice).await {
                     Ok(usage) => Response::ClaudeCodeUsage { usage },
+                    Err(e) => Response::Error { message: format!("{e:#}") },
+                },
+            };
+            let _ = msgs.send(Msg::Reply { client, id, response });
+        });
+    }
+
+    /// Ask this machine's Codex app-server for its account and usage status.
+    fn answer_codex_status(&mut self, client: u64, id: u64) {
+        let set = self.lua.var("codex-path").and_then(|v| v.as_str().filter(|p| !p.is_empty()).map(from_home));
+        let (msgs, binary) = (self.msgs.clone(), set.or_else(|| self.registry.codex_binary()));
+        self.rt.spawn(async move {
+            let response = match binary {
+                None => Response::Error { message: "Codex isn't installed on this machine (codex not found; set codex-path)".into() },
+                Some(b) => match serpis_ai::codex::status(&b).await {
+                    Ok(status) => Response::CodexStatus { status },
                     Err(e) => Response::Error { message: format!("{e:#}") },
                 },
             };

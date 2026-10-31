@@ -140,6 +140,8 @@ pub enum Request {
         #[serde(default)]
         advice: bool,
     },
+    /// The machine's Codex account, rate limits and token activity. Answered with `CodexStatus`.
+    CodexStatus,
     /// The skills a chat has there (`/skill:name` sends one).
     Skills { chat: String },
     /// What the node has logged since record `after` (0: all it keeps), oldest first.
@@ -304,6 +306,8 @@ pub enum Response {
     Models { models: Vec<ModelInfo> },
     /// The machine's `claude` answer to `get_usage`, as it gave it.
     ClaudeCodeUsage { usage: serde_json::Value },
+    /// The machine's Codex app-server account and usage status.
+    CodexStatus { status: serde_json::Value },
     Skills { skills: Vec<SkillInfo> },
     /// Its log since the record asked after; `dropped` older ones it no longer keeps.
     Logs { records: Vec<LogRecord>, dropped: u64 },

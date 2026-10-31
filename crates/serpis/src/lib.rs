@@ -13,6 +13,7 @@ pub mod buffers;
 pub use serpis_chat::cache_watch;
 pub mod chat_api;
 pub mod claude_usage;
+pub mod codex_status;
 pub mod log_view;
 pub mod notify;
 pub mod extend;

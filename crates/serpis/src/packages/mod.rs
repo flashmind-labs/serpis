@@ -77,6 +77,9 @@ pub fn install_base(ed: &mut Editor) {
     for (k, c) in [("g", "claude-code-usage-refresh"), ("q", "kill-current-buffer")] {
         ed.bind("claude-usage", k, c, o);
     }
+    for (k, c) in [("g", "codex-status-refresh"), ("q", "kill-current-buffer")] {
+        ed.bind("codex-status", k, c, o);
+    }
     for (k, c) in [("C-c C-c", "terminal-send-ctrl-c"), ("C-c C-k", "terminal-copy-mode"), ("C-c C-j", "terminal-exit-copy-mode"), ("C-c ESC", "terminal-send-escape")] {
         ed.bind("terminal", k, c, o);
     }

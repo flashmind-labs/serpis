@@ -50,6 +50,20 @@ fn main() {
             Some("model/list") => {
                 send(json!({"id":id,"result":{"data":[model()],"nextCursor":null}}))
             }
+            Some("account/read") => send(json!({"id":id,"result":{
+                "account":{"type":"chatgpt","email":"codex@example.test","planType":"pro","workspaceName":null},
+                "requiresOpenaiAuth":true
+            }})),
+            Some("account/rateLimits/read") => send(json!({"id":id,"result":{
+                "rateLimits":{"limitId":"codex","limitName":null,"planType":"pro","primary":{"usedPercent":25,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":2000500000},"credits":{"hasCredits":true,"unlimited":false,"balance":"12.5"}},
+                "rateLimitsByLimitId":null,
+                "rateLimitResetCredits":{"availableCount":1,"credits":null}
+            }})),
+            Some("account/usage/read") => send(json!({"id":id,"result":{
+                "summary":{"lifetimeTokens":1234567,"peakDailyTokens":45678,"longestRunningTurnSec":540,"currentStreakDays":8,"longestStreakDays":14},
+                "dailyUsageBuckets":null,
+                "threadUsage":null
+            }})),
             Some("thread/start") => send(json!({"id":id,"result":{"thread":{"id":"thr-fake"}}})),
             Some("thread/resume") => send(
                 json!({"id":id,"result":{"thread":{"id":message.pointer("/params/threadId").and_then(Value::as_str).unwrap_or("thr-fake")}}}),

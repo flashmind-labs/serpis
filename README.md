@@ -447,6 +447,12 @@ Messages sent while Codex works use `turn/steer`; follow-ups start after the cur
 Stopping sends `turn/interrupt`. Reasoning levels include `ultra` when the selected model offers
 it.
 
+`codex-status` shows the signed-in account, ChatGPT plan-limit windows and reset times, available
+credits and account token activity reported by `codex app-server`. It asks the current chat's
+machine, or this machine when there is no current remote chat. The page's `g` refreshes it and `q`
+closes it. API-key and cloud-provider accounts still show their authentication type; status fields
+that only ChatGPT-backed accounts provide are marked unavailable.
+
 ## Claude Code
 
 With the `claude` CLI installed and logged in, its models show up in `chat-select-model` as
