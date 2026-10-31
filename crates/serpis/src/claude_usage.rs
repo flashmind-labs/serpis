@@ -200,7 +200,7 @@ impl UsageBuffer {
 }
 
 /// How full a window is, in a color: the accent, then yellow from 75%, red from 90%.
-fn level(t: &Theme, pct: f64) -> Color32 {
+pub(crate) fn level(t: &Theme, pct: f64) -> Color32 {
     if pct >= 90.0 {
         t.red
     } else if pct >= 75.0 {
@@ -211,7 +211,7 @@ fn level(t: &Theme, pct: f64) -> Color32 {
 }
 
 /// Text laid out in the theme's UI font at `size`, `weight` (None: regular).
-fn galley(p: &egui::Painter, t: &Theme, s: &str, size: f32, color: Color32, weight: Option<f32>, wrap: f32) -> Arc<egui::Galley> {
+pub(crate) fn galley(p: &egui::Painter, t: &Theme, s: &str, size: f32, color: Color32, weight: Option<f32>, wrap: f32) -> Arc<egui::Galley> {
     let mut f = t.format(Face::Default);
     f.font_id = egui::FontId::proportional(size);
     f.color = color;
@@ -257,24 +257,41 @@ impl Buffer for UsageBuffer {
         };
 
         // The title, the plan, and a way to ask again.
-        let title = text(&painter, egui::pos2(left, y), "Claude Code usage", base + 8.0, t.fg, bold);
+        let title = galley(&painter, &t, "Claude Code usage", base + 8.0, t.fg, bold, width);
+        let title = {
+            let size = title.size();
+            painter.galley(egui::pos2(left, y), title, t.fg);
+            size
+        };
         let sub_font = egui::FontId::proportional(base - 2.0);
-        if let State::Shown(s, _) = &self.state
-            && let Some(plan) = &s.plan
-        {
-            crate::chrome::pill(&painter, left + title.x + 12.0 * k, y + title.y / 2.0, &format!("{plan} plan"), sub_font.clone(), t.accent, crate::chrome::tint(t.accent, 0.16), false);
-        }
+        // In a narrow window: Refresh goes first (g still asks), then the pill (the plan goes
+        // under the title).
+        let plan = match &self.state {
+            State::Shown(s, _) => s.plan.as_ref().map(|p| format!("{p} plan")),
+            _ => None,
+        };
+        let pill_w = plan.as_ref().map_or(0.0, |p| crate::chrome::text_width(&painter, p, sub_font.clone()) + (sub_font.size + 8.0).round() * 0.8 + 12.0 * k);
         let refresh = "Refresh";
         let rw = crate::chrome::text_width(&painter, refresh, sub_font.clone()) + 22.0 * k;
-        let rb = Rect::from_min_size(egui::pos2(left + width - rw, y + title.y / 2.0 - 13.0 * k), egui::vec2(rw, 26.0 * k));
-        let rresp = ui.interact(rb, ui.scope_id().with("claude-usage-refresh"), egui::Sense::click()).on_hover_text("Ask Claude Code again (g)");
-        painter.rect_filled(rb, 8.0 * k, if rresp.hovered() { crate::chrome::hover_bg(&t) } else { t.chip() });
-        crate::chrome::text(&painter, egui::pos2(rb.left() + 11.0 * k, rb.center().y), refresh, sub_font.clone(), t.fg, rw);
-        if rresp.clicked() {
-            run = Some("claude-code-usage-refresh");
+        let pill_fits = title.x + pill_w <= width;
+        if let Some(plan) = plan.as_ref().filter(|_| pill_fits) {
+            crate::chrome::pill(&painter, left + title.x + 12.0 * k, y + title.y / 2.0, plan, sub_font.clone(), t.accent, crate::chrome::tint(t.accent, 0.16), false);
+        }
+        if title.x + pill_w + 12.0 * k + rw <= width {
+            let rb = Rect::from_min_size(egui::pos2(left + width - rw, y + title.y / 2.0 - 13.0 * k), egui::vec2(rw, 26.0 * k));
+            let rresp = ui.interact(rb, ui.scope_id().with("claude-usage-refresh"), egui::Sense::click()).on_hover_text("Ask Claude Code again (g)");
+            painter.rect_filled(rb, 8.0 * k, if rresp.hovered() { crate::chrome::hover_bg(&t) } else { t.chip() });
+            crate::chrome::text(&painter, egui::pos2(rb.left() + 11.0 * k, rb.center().y), refresh, sub_font.clone(), t.fg, rw);
+            if rresp.clicked() {
+                run = Some("claude-code-usage-refresh");
+            }
         }
         y += title.y + 6.0 * k;
         let whose = self.machine.as_ref().map(|m| format!("Claude Code on {m}")).unwrap_or_else(|| "Claude Code on this machine".into());
+        let whose = match plan.filter(|_| !pill_fits) {
+            Some(plan) => format!("{plan} · {whose}"),
+            None => whose,
+        };
         let when = match &self.state {
             State::Asking(_) => "asking…".to_string(),
             State::Shown(_, at) => match at.elapsed().as_secs() {
@@ -283,7 +300,9 @@ impl Buffer for UsageBuffer {
             },
             State::Failed(_) => "couldn't ask".into(),
         };
-        y += text(&painter, egui::pos2(left, y), &format!("{whose} · {when}"), base - 2.0, t.fg_dim, None).y + 22.0 * k;
+        let g = galley(&painter, &t, &format!("{whose} · {when}"), base - 2.0, t.fg_dim, None, width);
+        y += g.size().y + 22.0 * k;
+        painter.galley(egui::pos2(left, y - 22.0 * k - g.size().y), g, t.fg_dim);
 
         // A card: its rectangle, from `y`, `h` tall.
         let card = |p: &egui::Painter, y: f32, h: f32| {
@@ -329,7 +348,13 @@ impl Buffer for UsageBuffer {
                 } else {
                     heading(&painter, &mut y, "Plan limits");
                     // One card, a row per window: its name, how full, its bar, when it resets.
-                    let row_h = 66.0 * k;
+                    let resets = |w: &Window| w.resets.map(|at| format!("resets in {}", until(at, now)));
+                    let measure = |s: &str, size: f32, weight: Option<f32>| galley(&painter, &t, s, size, t.fg, weight, f32::INFINITY).size().x;
+                    let below = s.windows.iter().any(|w| {
+                        let reset = resets(w).map_or(0.0, |r| measure(&r, base - 2.0, None) + 16.0 * k);
+                        measure(&w.label, base, medium) + 16.0 * k + reset + measure("100%", base, bold) > width - 2.0 * pad
+                    });
+                    let row_h = if below { 84.0 * k } else { 66.0 * k };
                     let r = card(&painter, y, row_h * s.windows.len() as f32 + 8.0 * k);
                     for (i, w) in s.windows.iter().enumerate() {
                         let ry = r.top() + 4.0 * k + row_h * i as f32;
@@ -341,10 +366,12 @@ impl Buffer for UsageBuffer {
                         text(&painter, egui::pos2(r.left() + pad, ry + 12.0 * k), &w.label, base, t.fg, medium);
                         let shown = w.pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "?".into());
                         let g = galley(&painter, &t, &shown, base, if pct >= 75.0 { color } else { t.fg }, bold, f32::INFINITY);
-                        painter.galley(egui::pos2(r.right() - pad - g.size().x, ry + 12.0 * k), g, t.fg);
-                        if let Some(at) = w.resets {
-                            let g = galley(&painter, &t, &format!("resets in {}", until(at, now)), base - 2.0, t.fg_dim, None, f32::INFINITY);
-                            painter.galley(egui::pos2(r.right() - pad - 64.0 * k - g.size().x, ry + 14.0 * k), g, t.fg_dim);
+                        let pw = g.size().x;
+                        painter.galley(egui::pos2(r.right() - pad - pw, ry + 12.0 * k), g, t.fg);
+                        if let Some(reset) = resets(w) {
+                            let g = galley(&painter, &t, &reset, base - 2.0, t.fg_dim, None, f32::INFINITY);
+                            let at = if below { egui::pos2(r.left() + pad, ry + 58.0 * k) } else { egui::pos2(r.right() - pad - pw - 16.0 * k - g.size().x, ry + 14.0 * k) };
+                            painter.galley(at, g, t.fg_dim);
                         }
                         let bar = Rect::from_min_size(egui::pos2(r.left() + pad, ry + 42.0 * k), egui::vec2(r.width() - 2.0 * pad, 8.0 * k));
                         painter.rect_filled(bar, 4.0 * k, t.chip());
@@ -360,10 +387,13 @@ impl Buffer for UsageBuffer {
                             (true, None) => "On".into(),
                             _ => "Off".into(),
                         };
-                        let r = card(&painter, y, 48.0 * k);
-                        text(&painter, egui::pos2(r.left() + pad, r.top() + 14.0 * k), "Extra usage", base, t.fg, medium);
-                        let g = galley(&painter, &t, &label, base - 1.0, if on { t.fg } else { t.fg_dim }, None, f32::INFINITY);
-                        painter.galley(egui::pos2(r.right() - pad - g.size().x, r.top() + 15.0 * k), g, t.fg);
+                        let name = galley(&painter, &t, "Extra usage", base, t.fg, medium, f32::INFINITY);
+                        let g = galley(&painter, &t, &label, base - 1.0, if on { t.fg } else { t.fg_dim }, None, width - 2.0 * pad);
+                        let one_line = name.size().x + 16.0 * k + g.size().x <= width - 2.0 * pad;
+                        let r = card(&painter, y, if one_line { 48.0 * k } else { 38.0 * k + g.size().y + 14.0 * k });
+                        painter.galley(egui::pos2(r.left() + pad, r.top() + 14.0 * k), name, t.fg);
+                        let at = if one_line { egui::pos2(r.right() - pad - g.size().x, r.top() + 15.0 * k) } else { egui::pos2(r.left() + pad, r.top() + 38.0 * k) };
+                        painter.galley(at, g, t.fg);
                         y = r.bottom() + 26.0 * k;
                     } else {
                         y += 14.0 * k;
@@ -375,12 +405,27 @@ impl Buffer for UsageBuffer {
                     heading(&painter, &mut y, "This week went to");
                     let colors = [t.accent, t.purple, t.cyan, t.green, t.yellow];
                     let total: f64 = s.shares.iter().map(|(_, p)| p).sum::<f64>().max(100.0);
-                    let r = card(&painter, y, 84.0 * k);
+                    // Where each name goes: a line of them, then the next when it is full.
+                    let line_h = 28.0 * k;
+                    let (mut lx, mut line) = (0.0, 0);
+                    let legend: Vec<(f32, usize)> = s
+                        .shares
+                        .iter()
+                        .map(|(name, pct)| {
+                            let w = 14.0 * k + galley(&painter, &t, &format!("{name}  {pct:.0}%"), base - 1.0, t.fg, None, f32::INFINITY).size().x;
+                            if lx > 0.0 && lx + w > width - 2.0 * pad {
+                                (lx, line) = (0.0, line + 1);
+                            }
+                            let at = (lx, line);
+                            lx += w + 34.0 * k;
+                            at
+                        })
+                        .collect();
+                    let r = card(&painter, y, 84.0 * k + line_h * line as f32);
                     let bar = Rect::from_min_size(egui::pos2(r.left() + pad, r.top() + pad), egui::vec2(r.width() - 2.0 * pad, 10.0 * k));
                     painter.rect_filled(bar, 5.0 * k, t.chip());
                     let mut x = bar.left();
-                    let mut lx = r.left() + pad;
-                    for (i, (name, pct)) in s.shares.iter().enumerate() {
+                    for (i, ((name, pct), (lx, line))) in s.shares.iter().zip(legend).enumerate() {
                         let c = colors[i % colors.len()];
                         let w = (pct / total) as f32 * bar.width();
                         let part = Rect::from_min_size(egui::pos2(x, bar.top()), egui::vec2(w, bar.height()));
@@ -389,10 +434,9 @@ impl Buffer for UsageBuffer {
                         let round = egui::CornerRadius { nw: if first { 5 } else { 0 }, sw: if first { 5 } else { 0 }, ne: if last { 5 } else { 0 }, se: if last { 5 } else { 0 } };
                         painter.rect_filled(part, round, c);
                         x += w;
-                        let ly = r.top() + pad + 36.0 * k;
+                        let (lx, ly) = (r.left() + pad + lx, r.top() + pad + 36.0 * k + line_h * line as f32);
                         painter.circle_filled(egui::pos2(lx + 4.0 * k, ly), 4.0 * k, c);
-                        let used = text(&painter, egui::pos2(lx + 14.0 * k, ly - 9.0 * k), &format!("{name}  {pct:.0}%"), base - 1.0, t.fg, None);
-                        lx += used.x + 34.0 * k;
+                        text(&painter, egui::pos2(lx + 14.0 * k, ly - 9.0 * k), &format!("{name}  {pct:.0}%"), base - 1.0, t.fg, None);
                     }
                     y = r.bottom() + 26.0 * k;
                 }
@@ -401,24 +445,40 @@ impl Buffer for UsageBuffer {
                 if let Some(a) = &s.advice {
                     heading(&painter, &mut y, "What spends it");
                     let note = format!("From this machine's last 7 days: {} requests in {} sessions.", a.requests, a.sessions);
-                    y += text(&painter, egui::pos2(left + 2.0 * k, y - 4.0 * k), &note, base - 2.0, t.fg_dim, None).y + 8.0 * k;
-                    let row_h = 58.0 * k;
-                    let rows = a.tips.len().max(1);
-                    let r = card(&painter, y, row_h * rows as f32);
-                    if a.tips.is_empty() {
+                    let g = galley(&painter, &t, &note, base - 2.0, t.fg_dim, None, width - 2.0 * k);
+                    let gh = g.size().y;
+                    painter.galley(egui::pos2(left + 2.0 * k, y - 4.0 * k), g, t.fg_dim);
+                    y += gh + 8.0 * k;
+                    // Each tip: its share in a pill, then its title and detail, wrapped beside it.
+                    let pill_w = crate::chrome::text_width(&painter, "100%", sub_font.clone()) + (sub_font.size + 8.0).round() * 0.8;
+                    let tw = (width - 2.0 * pad - pill_w - 14.0 * k).max(60.0 * k);
+                    let tips: Vec<_> = a
+                        .tips
+                        .iter()
+                        .map(|(pct, title, detail)| {
+                            let title = galley(&painter, &t, title, base, t.fg, medium, tw);
+                            let detail = detail.as_ref().map(|d| galley(&painter, &t, d, base - 2.0, t.fg_dim, None, tw));
+                            let h = (20.0 * k + title.size().y + detail.as_ref().map_or(0.0, |d| d.size().y + 2.0 * k)).max(58.0 * k);
+                            (pct, title, detail, h)
+                        })
+                        .collect();
+                    let r = card(&painter, y, if tips.is_empty() { 58.0 * k } else { tips.iter().map(|tip| tip.3).sum() });
+                    if tips.is_empty() {
                         text(&painter, egui::pos2(r.left() + pad, r.top() + 18.0 * k), "Nothing stands out.", base, t.fg_dim, None);
                     }
-                    for (i, (pct, title, detail)) in a.tips.iter().enumerate() {
-                        let ry = r.top() + row_h * i as f32;
+                    let mut ry = r.top();
+                    for (i, (pct, title, detail, h)) in tips.into_iter().enumerate() {
                         if i > 0 {
                             painter.hline(r.left() + pad..=r.right() - pad, ry, Stroke::new(1.0, t.border));
                         }
-                        let p = crate::chrome::pill(&painter, r.left() + pad, ry + row_h / 2.0, &format!("{pct:.0}%"), sub_font.clone(), t.fg_dim, t.chip(), false);
+                        let p = crate::chrome::pill(&painter, r.left() + pad, ry + h / 2.0, &format!("{pct:.0}%"), sub_font.clone(), t.fg_dim, t.chip(), false);
                         let tx = p.right() + 14.0 * k;
-                        text(&painter, egui::pos2(tx, ry + 10.0 * k), title, base, t.fg, medium);
+                        let th = title.size().y;
+                        painter.galley(egui::pos2(tx, ry + 10.0 * k), title, t.fg);
                         if let Some(d) = detail {
-                            text(&painter, egui::pos2(tx, ry + 31.0 * k), d, base - 2.0, t.fg_dim, None);
+                            painter.galley(egui::pos2(tx, ry + 12.0 * k + th), d, t.fg_dim);
                         }
+                        ry += h;
                     }
                     y = r.bottom() + 20.0 * k;
                 }
