@@ -1616,7 +1616,11 @@ fn step_rows(steps: &[Entry], depth: usize, out: &mut Vec<(StyledLine, Option<Co
                     text.push_str("  ");
                     let s0 = text.len();
                     text.push_str(&summary);
-                    spans.push((s0..text.len(), Face::ToolArgs));
+                    let first = (name == "bash").then(|| crate::highlight::shell(&[summary.as_str()])).flatten();
+                    match first.as_ref().and_then(|hl| hl.first()) {
+                        Some(hl) => spans.extend(shift(Some(hl), s0)),
+                        None => spans.push((s0..text.len(), Face::ToolArgs)),
+                    }
                 }
                 if let Some(t) = task.as_deref().map(task_status).filter(|s| !s.is_empty()) {
                     text.push_str("   ");
@@ -1677,11 +1681,17 @@ fn tool_lines(
     header.push_str(name);
     spans.push((s0..header.len(), Face::ToolHeader));
     let summary = serpis_chat::tool_summary(name, args);
+    // A command reads as one: its lines highlighted together (the first is the header's).
+    let command: Vec<&str> = if name == "bash" { arg(args, "command").lines().collect() } else { Vec::new() };
+    let command_hl = crate::highlight::shell(&command).unwrap_or_default();
     if !summary.is_empty() {
         header.push_str("  ");
         let s1 = header.len();
         header.push_str(&summary);
-        spans.push((s1..header.len(), Face::ToolArgs));
+        match command_hl.first() {
+            Some(hl) => spans.extend(shift(Some(hl), s1)),
+            None => spans.push((s1..header.len(), Face::ToolArgs)),
+        }
     }
     let time = match (elapsed, started) {
         _ if ask.is_some() => "waiting for you".to_string(),
@@ -1824,13 +1834,22 @@ fn tool_lines(
         } else if name == "bash" || name == "serpis_lua" {
             // The rest of the command (or Lua code), then what it printed.
             let cmd = arg(args, if name == "bash" { "command" } else { "code" });
-            for l in cmd.lines().skip(1) {
-                body.push((StyledLine::new(l, Face::ToolArgs), None));
+            for (i, l) in cmd.lines().enumerate().skip(1) {
+                body.push((StyledLine::new(l, Face::ToolArgs).spans(command_hl.get(i).cloned().unwrap_or_default()), None));
             }
             let out = result.map(|r| tool_text(r)).or(partial.map(str::to_string)).unwrap_or_default();
             let face = if result.is_some_and(|r| r.is_error) { Face::ToolError } else { Face::ToolOutput };
+            // A rule between the command's lines and what it printed.
+            let rule = body.len();
+            if let Some((last, _)) = body.last_mut().filter(|_| rule > 0 && !out.is_empty()) {
+                last.rule_below = Some(t.border);
+                last.pad_bottom = 7.0 * k;
+            }
             for l in out.lines() {
                 body.push((StyledLine::new(l, face), None));
+            }
+            if rule > 0 && body.len() > rule {
+                body[rule].0.pad_top = 7.0 * k;
             }
         } else if let Some(r) = result {
             let face = if r.is_error { Face::ToolError } else { Face::ToolOutput };

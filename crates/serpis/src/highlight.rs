@@ -76,10 +76,38 @@ fn classes() -> &'static [(Scope, Face)] {
     })
 }
 
+/// Shell commands (bash tool calls) get classes of their own: the command it runs stands out
+/// from its arguments, and so do flags, quotes, `$variables`, and the operators between
+/// commands (`&&`, `|`, `>`). Plain words are code (`source.shell`: every token is under it).
+fn shell_classes() -> &'static [(Scope, Face)] {
+    static CLASSES: OnceLock<Vec<(Scope, Face)>> = OnceLock::new();
+    CLASSES.get_or_init(|| {
+        [
+            ("comment", Face::SynComment),
+            ("punctuation.definition.variable", Face::SynType),
+            ("punctuation.section.expansion.parameter", Face::SynType),
+            ("variable.other", Face::SynType),
+            ("punctuation.definition.string", Face::SynString),
+            ("string", Face::SynString),
+            ("constant.character.escape", Face::SynConstant),
+            ("constant", Face::SynConstant),
+            ("variable.function", Face::SynFunction),
+            ("support.function", Face::SynFunction),
+            ("variable.parameter.option", Face::SynAttribute),
+            ("keyword", Face::SynKeyword),
+            ("punctuation.section.parens", Face::SynKeyword),
+            ("source.shell", Face::Code),
+        ]
+        .into_iter()
+        .filter_map(|(s, f)| Scope::new(s).ok().map(|s| (s, f)))
+        .collect()
+    })
+}
+
 /// The face for text under `stack`: the innermost scope with a class wins.
-fn face_of(stack: &[Scope], base: Face) -> Face {
+fn face_of(stack: &[Scope], base: Face, classes: &[(Scope, Face)]) -> Face {
     for s in stack.iter().rev() {
-        if let Some((_, f)) = classes().iter().find(|(p, _)| p.is_prefix_of(*s)) {
+        if let Some((_, f)) = classes.iter().find(|(p, _)| p.is_prefix_of(*s)) {
             return *f;
         }
     }
@@ -108,11 +136,21 @@ pub fn find(hint: &str, first_line: &str) -> Option<&'static SyntaxReference> {
 /// Faces for each of `lines` (code in the language `hint` names), or None when the language is
 /// unknown or the code too large. Text outside any class keeps `base`.
 pub fn highlight(hint: &str, lines: &[&str], base: Face) -> Option<Vec<Spans>> {
+    run(hint, lines, base, classes())
+}
+
+/// Faces for each line of a shell command, covering all of it (plain words are
+/// [`Face::Code`]); None when it is too large.
+pub fn shell(lines: &[&str]) -> Option<Vec<Spans>> {
+    run("bash", lines, Face::Default, shell_classes())
+}
+
+fn run(hint: &str, lines: &[&str], base: Face, classes: &[(Scope, Face)]) -> Option<Vec<Spans>> {
     if lines.iter().map(|l| l.len() + 1).sum::<usize>() > MAX_BYTES {
         return None;
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (hint, lines, base as u8).hash(&mut h);
+    (hint, lines, base as u8, classes.as_ptr() as usize).hash(&mut h);
     let key = h.finish();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(v) = cache.lock().unwrap().get(&key) {
@@ -143,12 +181,12 @@ pub fn highlight(hint: &str, lines: &[&str], base: Face) -> Option<Vec<Spans>> {
         };
         for (pos, op) in ops {
             if pos > at {
-                push(at..pos, face_of(stack.as_slice(), base), &mut spans);
+                push(at..pos, face_of(stack.as_slice(), base, classes), &mut spans);
                 at = pos;
             }
             let _ = stack.apply(&op);
         }
-        push(at..buf.len(), face_of(stack.as_slice(), base), &mut spans);
+        push(at..buf.len(), face_of(stack.as_slice(), base, classes), &mut spans);
         out.push(spans);
     }
     let mut c = cache.lock().unwrap();
@@ -176,6 +214,27 @@ mod tests {
         assert!(f.iter().any(|(t, f)| t == "fn" && *f == Face::SynKeyword), "{f:?}");
         assert!(f.iter().any(|(t, f)| t == "main" && *f == Face::SynFunction), "{f:?}");
         assert!(f.iter().any(|(t, f)| t.contains("\"x\"") && *f == Face::SynString), "{f:?}");
+    }
+
+    #[test]
+    fn shell_commands_color_their_parts_and_cover_every_byte() {
+        let cmd = "FOO=1 cargo test -p serpis 2>&1 | grep \"ok $HOME\" && echo 'done' # why";
+        let spans = shell(&[cmd]).expect("highlighted");
+        let f: Vec<(&str, Face)> = spans[0].iter().map(|(r, f)| (&cmd[r.clone()], *f)).collect();
+        let has = |t: &str, face: Face| f.iter().any(|(s, g)| s.trim() == t && *g == face);
+        assert!(has("cargo", Face::SynFunction) && has("grep", Face::SynFunction) && has("echo", Face::SynFunction), "{f:?}");
+        assert!(has("-p", Face::SynAttribute), "{f:?}");
+        assert!(has("|", Face::SynKeyword) && has("&&", Face::SynKeyword), "{f:?}");
+        assert!(has("'done'", Face::SynString), "{f:?}");
+        assert!(has("$HOME", Face::SynType), "{f:?}");
+        assert!(has("# why", Face::SynComment), "{f:?}");
+        // Nothing is left to the line's own face.
+        let mut at = 0;
+        for (r, _) in &spans[0] {
+            assert_eq!(r.start, at, "{f:?}");
+            at = r.end;
+        }
+        assert_eq!(at, cmd.len());
     }
 
     #[test]

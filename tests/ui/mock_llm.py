@@ -9,6 +9,7 @@ models.json). What it says depends on the last user message:
   INLINE ...      reply with inline code (Run `cargo test` now.)
   LONG ...        reply with a long answer (paragraphs, lists, code, a table)
   READ:<path>     call read on that path
+  SHELL:<command> call bash with that command
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
   EDIT:<path>|<old>|<new>   call edit on that file, replacing old with new
@@ -84,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
                 call = ("read", {"path": prompt[5:]})
             elif prompt.startswith("TOOL"):
                 call = ("bash", {"command": "echo hi"})
+            elif prompt.startswith("SHELL:"):
+                call = ("bash", {"command": prompt[6:]})
             elif prompt.startswith("LUA:"):
                 call = ("serpis_lua", {"code": prompt[4:]})
             elif prompt.startswith("EDIT:"):
