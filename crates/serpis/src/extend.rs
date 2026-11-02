@@ -155,9 +155,10 @@ pub const LUA_API: &[(&str, &str)] = &[
     // The diff page (id: its buffer; nil = the current buffer).
     ("serpis.diff.open", "({dir?, source?, machine?}?): show the diff page for a folder (the current buffer's by default), comparing `source` (\"uncommitted\", \"staged\", \"unstaged\", \"a..b\", \"a...b\", \"commit:rev\", a branch; diff-default-source by default); returns its buffer id. It reads in the background: serpis.diff.info tells when it has."),
     ("serpis.diff.info", "(id?): {root, machine, compared, loaded, loading, error, file, view, whitespace, wrap, change, changes, rows, cursor, side, selection = {side, line, end_line} | nil, writing = {text, kind, line, end_line, side} | nil, target, drafts}."),
-    ("serpis.diff.files", "(id?): the files that differ: {path, old_path, status, untracked, binary, added, removed, viewed}."),
+    ("serpis.diff.files", "(id?): the files that differ: {path, old_path, status, untracked, binary, added, removed, viewed, comments (how many, not counting resolved ones)}."),
     ("serpis.diff.comments", "(id?): the review's comments: {id, path, side = \"old\" | \"new\", line, end_line, text, kind = \"fix\" | \"question\", state = \"draft\" | \"sent\" | \"resolved\", code, outdated}."),
     ("serpis.diff.comment", "({text, line, end_line?, side?, kind?, path?}, id?): add a comment; returns its id. diff-send-review sends the comments."),
+    ("serpis.diff.clear_comments", "(id?): delete every comment of the review, without asking; how many there were."),
     // Projects and the sidebar.
     ("serpis.project.root", "(dir): the project root around dir (git or markers), or nil."),
     ("serpis.project.name", "(dir): its display name."),

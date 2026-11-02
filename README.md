@@ -257,6 +257,7 @@ code that doesn't parse.
 | `/` `y` `o` | search this file, copy the selection, open the file |
 | `c` `a` | comment on the selected lines, or ask about them (or click or drag line numbers) |
 | `e` `D` `R` | edit, delete, resolve the comment below the line |
+| `C` | delete all the comments, after asking |
 | `S` | send the review to the agent |
 
 In the composer, `RET` is a new line, `s-RET` or `C-c C-c` keeps the comment, `C-c C-s` sends it on its
@@ -268,8 +269,13 @@ presses Return too). Fixes and questions are sent apart, each with its file, lin
 chat shows beside the page. While its agent works the review waits its turn
 (`diff-review-while-running`). The page checks the repository every `diff-refresh-seconds`, so what
 the agent changes shows up, and comments follow their code: when it is gone they move above the
-file, marked outdated. Comments and viewed marks are kept per worktree under `reviews/` in the
-config folder.
+file, marked outdated. The file list, the file's header and closed folders show how many comments
+they hold.
+
+A review waits until it is sent. Comments not sent yet, a comment still being written, what was
+compared, the file showing and viewed marks are kept per worktree under `reviews/` in the config
+folder: quit, come back, and `s-D` carries on where you stopped. Sent and resolved comments show
+until the page closes and aren't kept.
 
 The other settings are `diff-view-style`, `diff-split-min-width`, `diff-wrap`,
 `diff-context-lines`, `diff-file-tree`, `diff-tree-width`, `diff-default-source`,

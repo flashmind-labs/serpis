@@ -498,6 +498,29 @@ pub fn install(ed: &mut Editor) {
         };
         with_page(ed, |b, ed| b.toggle_resolved(ed, id))
     });
+    ed.define_command("diff-comments-clear", "Delete every comment of this review, sent or not, after asking (param: true doesn't ask).", o, |ed, a| {
+        let id = page(ed, None)?;
+        let n = ed.with_buffer_as::<DiffBuffer, _>(id, |b, _| b.review.comments.len()).unwrap_or(0);
+        if n == 0 {
+            ed.message("No comments to clear");
+            return Ok(());
+        }
+        let clear = move |ed: &mut Editor| {
+            ed.with_buffer_as::<DiffBuffer, _>(id, |b, ed| b.clear_comments(ed));
+            ed.message(format!("Deleted {n} {}", if n == 1 { "comment" } else { "comments" }));
+        };
+        if a.params.first().and_then(Value::as_bool) == Some(true) {
+            clear(ed);
+            return Ok(());
+        }
+        let question = if n == 1 { "Delete the comment?".to_string() } else { format!("Delete all {n} comments?") };
+        ed.y_or_n(&question, move |ed, yes| {
+            if yes {
+                clear(ed);
+            }
+        });
+        Ok(())
+    });
     ed.define_command("diff-send-review", "Send every comment not sent yet to the agent (param: the buffer id of a chat or terminal, or \"new\").", o, |ed, a| {
         let id = page(ed, None)?;
         let given = a.params.first().map(|v| v.as_u64().map_or_else(|| v.as_str().unwrap_or_default().to_string(), |n| n.to_string()));
@@ -556,6 +579,7 @@ pub fn install(ed: &mut Editor) {
         ("e", "diff-comment-edit"),
         ("D", "diff-comment-delete"),
         ("R", "diff-comment-resolve"),
+        ("C", "diff-comments-clear"),
         ("S", "diff-send-review"),
         ("q", "kill-current-buffer"),
     ] {
@@ -611,7 +635,7 @@ pub fn info(b: &mut DiffBuffer) -> Value {
 
 /// The files a page lists, as scripts see them.
 pub fn files_json(b: &DiffBuffer) -> Value {
-    Value::Array(b.files.iter().map(|f| json!({"path": f.path, "old_path": f.old_path, "status": f.status, "untracked": f.untracked, "binary": f.binary, "added": f.added, "removed": f.removed, "viewed": b.review.viewed.contains_key(&f.path)})).collect())
+    Value::Array(b.files.iter().map(|f| json!({"path": f.path, "old_path": f.old_path, "status": f.status, "untracked": f.untracked, "binary": f.binary, "added": f.added, "removed": f.removed, "viewed": b.review.viewed.contains_key(&f.path), "comments": b.comments_on(&f.path)})).collect())
 }
 
 /// `serpis.diff.comment`: add a comment from a script. On the current file's line, unless

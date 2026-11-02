@@ -188,11 +188,33 @@ pub fn prompt(comments: &[&Comment], f: &Framing) -> String {
     out
 }
 
-/// A worktree's review, as kept on disk.
+/// A comment still being written, kept so quitting doesn't lose it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Writing {
+    /// The comment it changes, when it isn't a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    pub path: String,
+    pub side: Which,
+    pub start: u32,
+    pub end: u32,
+    pub ask: Ask,
+    pub text: String,
+}
+
+/// A worktree's review: on disk, only what hasn't been sent yet, so it can be picked up where it
+/// was left. What was sent is the agent's now, and shows until the page closes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Saved {
     #[serde(default)]
     pub comments: Vec<Comment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writing: Option<Writing>,
+    /// What was being compared and which file was showing, for coming back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<serpis_proto::wire::DiffSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     #[serde(default)]
     pub next_id: u64,
     /// Files marked as viewed, with what they looked like then: changing clears it.
@@ -207,13 +229,17 @@ fn path_of(machine: Option<&str>, root: &str) -> PathBuf {
 }
 
 pub fn load(machine: Option<&str>, root: &str) -> Saved {
-    std::fs::read_to_string(path_of(machine, root)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    let mut saved: Saved = std::fs::read_to_string(path_of(machine, root)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    saved.comments.retain(|c| c.state == State::Draft);
+    saved
 }
 
 pub fn save(machine: Option<&str>, root: &str, saved: &Saved) -> anyhow::Result<()> {
     let path = path_of(machine, root);
+    let mut saved = saved.clone();
+    saved.comments.retain(|c| c.state == State::Draft);
     // A review with nothing to keep leaves no file behind.
-    if saved.comments.is_empty() && saved.viewed.is_empty() {
+    if saved.comments.is_empty() && saved.viewed.is_empty() && saved.writing.is_none() {
         let _ = std::fs::remove_file(&path);
         return Ok(());
     }
@@ -221,7 +247,7 @@ pub fn save(machine: Option<&str>, root: &str, saved: &Saved) -> anyhow::Result<
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(saved)?)?;
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }

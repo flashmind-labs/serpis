@@ -293,6 +293,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let spec: Value = lua.from_value(spec)?;
         ed(|e| crate::diff::add_comment(e, id, &spec).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
     })?)?;
+    diff.set("clear_comments", lua.create_function(move |_, id: Option<u64>| {
+        let id = page(id)?;
+        ed(|e| e.with_buffer_as::<crate::diff::view::DiffBuffer, _>(id, |b, e| b.clear_comments(e)))
+    })?)?;
     s.set("diff", diff)?;
 
     s.set("message", lua.create_function(|_, msg: String| ed(|e| e.message(msg)))?)?;

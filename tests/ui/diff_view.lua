@@ -190,6 +190,10 @@ local steps = {
     T.check("waiting to send", c.state, "draft")
     T.check("it shows between the lines", has("[fix draft] src/a.rs:2: use a better name"), true)
     T.check("the page's keys work again", info().drafts, 1)
+    local n = 0
+    for _, f in ipairs(serpis.diff.files()) do if f.path == "src/a.rs" then n = f.comments end end
+    T.check("the file says it has a comment", n, 1)
+    T.check("in the list of files", d.composer()["file-comments-src/a.rs"] ~= nil, true)
     return shot("diff-comment", go)
   end,
   -- A question with the mouse: a click on a line number.
@@ -422,16 +426,41 @@ local steps = {
   end,
   function()
     T.check("a file that changes after being viewed needs another look", true, true)
+  end,
+  -- Sent comments are the agent's now; one not sent yet outlives the page.
+  function(go)
+    serpis.diff.comment({ text = "still to send", line = 1 })
     serpis.buffer.kill(serpis.buffer.current())
+    serpis.diff.open({ dir = repo })
+    when(function() return serpis.buffer.kind() == "diff" and info().root == repo and #serpis.diff.comments() == 1 end, go)
+    return false
   end,
   function(go)
-    -- The review was saved: a new page for this worktree still has it.
-    serpis.diff.open({ dir = repo })
-    when(function() return serpis.buffer.kind() == "diff" and info().root == repo and #serpis.diff.comments() == 2 end, go)
+    T.check("what wasn't sent is still there", serpis.diff.comments()[1].text, "still to send")
+    click("clear-comments")
+    when(function() return d.minibuffer() ~= nil end, go)
+    return false
+  end,
+  function(go)
+    T.check("Clear all asks", d.minibuffer():find("Delete", 1, true) ~= nil, true)
+    T.press("n")
+    when(function() return d.minibuffer() == nil end, go)
+    return false
+  end,
+  function(go)
+    T.check("no keeps them", #serpis.diff.comments(), 1)
+    T.press("C")
+    when(function() return d.minibuffer() ~= nil end, go)
+    return false
+  end,
+  function(go)
+    T.press("y")
+    when(function() return #serpis.diff.comments() == 0 end, go)
     return false
   end,
   function()
-    T.check("comments outlive the page", serpis.diff.comments()[2].text, "why return it")
+    T.check("C and yes deletes them", #serpis.diff.comments(), 0)
+    T.check("the bar goes with them", d.composer()["clear-comments"], nil)
     -- Not a repository.
     notrepo = sh("mktemp -d /tmp/snotrepo.XXXXXX")
     serpis.diff.open({ dir = notrepo })

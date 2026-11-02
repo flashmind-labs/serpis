@@ -238,6 +238,9 @@ pub struct DiffBuffer {
 
     pub review: Saved,
     review_loaded: bool,
+    /// Where the saved review left off, until the list of files is in.
+    resume_file: Option<String>,
+    resume_writing: Option<review::Writing>,
     pub editor: Option<CommentEditor>,
     /// The chat or terminal a review goes to.
     pub target: Option<BufferId>,
@@ -297,6 +300,8 @@ impl DiffBuffer {
             drag: None,
             review: Saved::default(),
             review_loaded: false,
+            resume_file: None,
+            resume_writing: None,
             editor: None,
             target,
             search: String::new(),
@@ -325,6 +330,13 @@ impl DiffBuffer {
                         b.review = review::load(b.machine.as_deref(), &b.root);
                         b.review_loaded = true;
                         b.items_dirty = true;
+                        // Back to an unfinished review: what it was comparing, where it was.
+                        b.resume_file = b.review.file.take();
+                        b.resume_writing = b.review.writing.take();
+                        let saved = b.review.spec.take();
+                        if b.spec.is_none() && (!b.review.comments.is_empty() || b.resume_writing.is_some()) {
+                            b.spec = saved;
+                        }
                     }
                     if b.spec.is_none() {
                         b.spec = Some(default_spec(ed, &refs));
@@ -340,7 +352,9 @@ impl DiffBuffer {
 
     /// Show another comparison.
     pub fn set_spec(&mut self, ed: &mut Editor, spec: DiffSpec) {
+        self.commit_comment(ed);
         self.spec = Some(spec);
+        self.persist(ed);
         self.files.clear();
         self.loaded = false;
         self.error = None;
@@ -415,11 +429,32 @@ impl DiffBuffer {
         }
         let keep = self.current.as_deref().is_some_and(|p| self.files.iter().any(|f| f.path == p));
         if !keep {
+            self.commit_comment(ed);
             self.clear_file();
-            self.current = self.files.first().map(|f| f.path.clone());
+            let listed = |p: &String| self.files.iter().any(|f| f.path == *p);
+            let back = self.resume_writing.as_ref().map(|w| w.path.clone()).filter(listed).or(self.resume_file.take().filter(listed));
+            self.current = back.or_else(|| self.files.first().map(|f| f.path.clone()));
             self.land = Some(Land::FirstChange);
         }
+        if let Some(w) = self.resume_writing.take() {
+            self.resume_comment(ed, w);
+        }
         self.load(ed);
+    }
+
+    /// Pick up a comment that was being written when serpis quit. Its file may no longer differ:
+    /// then what was written is kept as a comment, not lost.
+    fn resume_comment(&mut self, ed: &mut Editor, w: review::Writing) {
+        if self.current.as_deref() == Some(w.path.as_str()) {
+            self.begin_comment(ed, w.side, w.start, w.end, w.ask, &w.text);
+            if let Some(e) = self.editor.as_mut() {
+                e.id = w.id;
+            }
+        } else if let Some(c) = w.id.and_then(|id| self.review.comments.iter_mut().find(|c| c.id == id)) {
+            c.text = w.text;
+        } else {
+            self.add_comment(w.path, w.side, w.start, w.end, w.text, w.ask);
+        }
     }
 
     /// Show the current file, reading it if what is shown is out of date.
@@ -585,6 +620,8 @@ impl DiffBuffer {
 
     pub fn select_file(&mut self, ed: &mut Editor, path: &str) {
         if self.current.as_deref() != Some(path) {
+            // What is being written stays on the file it is about.
+            self.commit_comment(ed);
             self.clear_file();
             self.current = Some(path.to_string());
             self.land = Some(Land::FirstChange);
@@ -601,6 +638,7 @@ impl DiffBuffer {
             return false;
         }
         let path = self.files[to as usize].path.clone();
+        self.commit_comment(ed);
         self.clear_file();
         self.current = Some(path);
         self.land = Some(if land && delta < 0 { Land::LastChange } else { Land::FirstChange });
@@ -628,9 +666,37 @@ impl DiffBuffer {
     }
 
     pub fn persist(&self, ed: &mut Editor) {
-        if let Err(e) = review::save(self.machine.as_deref(), &self.root, &self.review) {
+        // Before the saved review was read, saving would overwrite it.
+        if !self.review_loaded {
+            return;
+        }
+        let mut saved = self.review.clone();
+        saved.spec = self.spec.clone();
+        saved.file = self.current.clone();
+        saved.writing = self.editor.as_ref().filter(|e| !e.area.doc.is_empty()).map(|e| review::Writing { id: e.id, path: e.path.clone(), side: e.side, start: e.start, end: e.end, ask: e.ask, text: e.area.text() });
+        if let Err(e) = review::save(self.machine.as_deref(), &self.root, &saved) {
             ed.warn(format!("Couldn't save the review: {e:#}"));
         }
+    }
+
+    /// Delete every comment, sent or not. How many there were.
+    pub fn clear_comments(&mut self, ed: &mut Editor) -> usize {
+        let n = self.review.comments.len();
+        self.review.comments.clear();
+        self.items_dirty = true;
+        self.persist(ed);
+        n
+    }
+
+    /// Comments on a file still open (sent or not).
+    pub fn comments_on(&self, path: &str) -> usize {
+        self.review.comments.iter().filter(|c| c.path == path && c.state != State::Resolved).count()
+    }
+
+    /// The same for everything in a folder.
+    fn comments_under(&self, dir: &str) -> usize {
+        let prefix = format!("{dir}/");
+        self.review.comments.iter().filter(|c| c.path.starts_with(&prefix) && c.state != State::Resolved).count()
     }
 
     pub fn drafts(&self) -> Vec<&Comment> {
@@ -931,6 +997,10 @@ impl DiffBuffer {
         for c in self.review.comments.iter().filter(|c| c.path == path && c.outdated) {
             items.push(Item::Comment(c.id));
         }
+        // A comment whose line is gone still needs somewhere to be written.
+        if open.is_some() && composer_row.is_none() {
+            items.push(Item::Composer);
+        }
         let mut i = 0;
         while i < n {
             if keep[i] {
@@ -1214,6 +1284,17 @@ impl DiffBuffer {
     }
 }
 
+/// A bubble and a count, ending at `right`. Where it starts.
+fn comment_count(p: &egui::Painter, t: &Theme, right: f32, cy: f32, n: usize, font: &FontId) -> f32 {
+    let label = n.to_string();
+    let w = chrome::text_width(p, &label, font.clone());
+    chrome::text(p, egui::pos2(right - w, cy), &label, font.clone(), t.accent, w + 1.0);
+    let size = font.size * 1.05;
+    let from = right - w - 3.0 - size;
+    chrome::bubble(p, egui::pos2(from + size / 2.0, cy), size, t.accent);
+    from
+}
+
 fn comment_font(t: &Theme) -> FontId {
     FontId::proportional(t.font_size - 1.0)
 }
@@ -1266,6 +1347,16 @@ impl Controls<'_> {
         let w = self.width(label);
         let r = self.place(w);
         self.at_rect(r, key, label, tip, on)
+    }
+
+    /// A button that opens a list: a chevron after its label.
+    fn menu_button(&mut self, key: &str, label: &str, tip: &str, on: bool) -> bool {
+        let k = self.t.ui_scale();
+        let w = self.width(label) + 14.0 * k;
+        let r = self.place(w);
+        let clicked = self.at_rect(r, key, label, tip, on);
+        chrome::chevron(self.painter, egui::pos2(r.right() - 11.0 * k, r.center().y), true, self.t.fg_faint);
+        clicked
     }
 
     fn at_rect(&mut self, r: Rect, key: &str, label: &str, tip: &str, on: bool) -> bool {
@@ -1326,8 +1417,8 @@ impl Buffer for DiffBuffer {
         let default_base = ed.var_str("diff-base-branch").filter(|b| !b.is_empty()).or_else(|| self.refs.as_ref().and_then(|r| r.default_branch.clone()));
         let (controls_bottom, toggle_split, toggle_wrap, toggle_all, toggle_tree) = {
             let mut c = Controls { ui, painter: &painter, t: &t, font: ui_font.clone(), id, left: rect.left() + pad, right: rect.right() - pad, at: egui::pos2(rect.left() + pad, top), h: 26.0 * k, gap: 6.0 * k, hits: &mut hits };
-            let label = self.spec.as_ref().map_or_else(|| "Reading the repository…".to_string(), |s| format!("{} ▾", describe(s)));
-            if c.button("source", &label, "What is compared (diff-select-source, d)", false) {
+            let label = self.spec.as_ref().map_or_else(|| "Reading the repository…".to_string(), describe);
+            if c.menu_button("source", &label, "What is compared (diff-select-source, d)", false) {
                 acts.push(Act("diff-select-source", vec![]));
             }
             let spec = self.spec.clone();
@@ -1374,42 +1465,70 @@ impl Buffer for DiffBuffer {
         painter.hline(rect.left()..=rect.right(), y, Stroke::new(1.0, t.border));
         y += 1.0;
 
-        // The review bar, when there is something to send.
+        // The review bar, while there are comments.
         let drafts = self.drafts().len();
-        let bar_h = if drafts > 0 { 44.0 * k } else { 0.0 };
+        let total_comments = self.review.comments.len();
+        let bar_h = if total_comments > 0 { 44.0 * k } else { 0.0 };
         let body = Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), rect.bottom() - bar_h));
-        if drafts > 0 {
+        if total_comments > 0 {
             let bar = Rect::from_min_max(egui::pos2(rect.left(), body.bottom()), rect.max);
             painter.rect_filled(bar, 0.0, t.bg_alt);
             painter.hline(rect.left()..=rect.right(), bar.top(), Stroke::new(1.0, t.border));
             let cy = bar.center().y;
-            let what = if drafts == 1 { "1 comment to send".to_string() } else { format!("{drafts} comments to send") };
-            let (bh, right) = (26.0 * k, bar.right() - pad);
-            let send_w = chrome::text_width(&painter, "Send review", ui_font.clone()) + 24.0 * k;
-            let send = Rect::from_min_size(egui::pos2(right - send_w, cy - bh / 2.0), egui::vec2(send_w, bh));
-            // A chat has no title before its first message; its name will do.
-            let target = self.target.filter(|b| ed.buffers.contains_key(*b));
-            let name = target.and_then(|b| ed.with_buffer(b, |b, _| b.title())).filter(|n| !n.is_empty()).or_else(|| target.and_then(|b| ed.meta(b).map(|m| m.name.clone())));
-            let to = format!("To: {} ▾", name.unwrap_or_else(|| "choose…".into()));
-            let room = (send.left() - bar.left() - 170.0 * k).max(70.0 * k);
-            let to_w = (chrome::text_width(&painter, &to, ui_font.clone()) + 22.0 * k).min(room);
-            let to_r = Rect::from_min_size(egui::pos2(send.left() - 6.0 * k - to_w, cy - bh / 2.0), egui::vec2(to_w, bh));
-            chrome::text(&painter, egui::pos2(bar.left() + pad, cy), &what, ui_font.clone(), t.fg_dim, (to_r.left() - bar.left() - pad - 8.0 * k).max(0.0));
-            let resp = ui.interact(send, id.with("send"), Sense::click()).on_hover_text("Send the comments to the agent (diff-send-review, S)");
-            painter.rect_filled(send, 7.0 * k, if resp.hovered() { chrome::tint(t.accent, 0.85) } else { t.accent });
-            painter.text(send.center(), egui::Align2::CENTER_CENTER, "Send review", ui_font.clone(), chrome::on(t.accent, &t));
-            if resp.clicked() {
-                acts.push(Act("diff-send-review", vec![]));
+            let plural = |n: usize| if n == 1 { "comment" } else { "comments" };
+            // Comments on files this comparison doesn't list can't be seen: say so.
+            let elsewhere = self.drafts().iter().filter(|c| self.entry(&c.path).is_none()).count();
+            let what = match (drafts, elsewhere) {
+                (0, _) => format!("{total_comments} {} sent", plural(total_comments)),
+                (n, 0) => format!("{n} {} to send", plural(n)),
+                (n, e) => format!("{n} {} to send, {e} on files not listed here", plural(n)),
+            };
+            let (bh, mut right) = (26.0 * k, bar.right() - pad);
+            let mut row: Vec<(&str, Rect)> = Vec::new();
+            if drafts > 0 {
+                let send_w = chrome::text_width(&painter, "Send review", ui_font.clone()) + 24.0 * k;
+                let send = Rect::from_min_size(egui::pos2(right - send_w, cy - bh / 2.0), egui::vec2(send_w, bh));
+                // A chat has no title before its first message; its name will do.
+                let target = self.target.filter(|b| ed.buffers.contains_key(*b));
+                let name = target.and_then(|b| ed.with_buffer(b, |b, _| b.title())).filter(|n| !n.is_empty()).or_else(|| target.and_then(|b| ed.meta(b).map(|m| m.name.clone())));
+                let to = format!("To: {}", name.unwrap_or_else(|| "choose…".into()));
+                let room = (send.left() - bar.left() - 240.0 * k).max(70.0 * k);
+                let to_w = (chrome::text_width(&painter, &to, ui_font.clone()) + 36.0 * k).min(room);
+                let to_r = Rect::from_min_size(egui::pos2(send.left() - 6.0 * k - to_w, cy - bh / 2.0), egui::vec2(to_w, bh));
+                let resp = ui.interact(send, id.with("send"), Sense::click()).on_hover_text("Send the comments to the agent (diff-send-review, S)");
+                painter.rect_filled(send, 7.0 * k, if resp.hovered() { chrome::tint(t.accent, 0.85) } else { t.accent });
+                painter.text(send.center(), egui::Align2::CENTER_CENTER, "Send review", ui_font.clone(), chrome::on(t.accent, &t));
+                if resp.clicked() {
+                    acts.push(Act("diff-send-review", vec![]));
+                }
+                let resp = ui.interact(to_r, id.with("send-target"), Sense::click()).on_hover_text("Which chat or terminal gets it (diff-select-target)");
+                painter.rect_filled(to_r, 7.0 * k, if resp.hovered() { chrome::hover_bg(&t) } else { t.chip() });
+                chrome::text(&painter, egui::pos2(to_r.left() + 10.0 * k, cy), &to, ui_font.clone(), t.fg_dim, to_r.width() - 28.0 * k);
+                chrome::chevron(&painter, egui::pos2(to_r.right() - 11.0 * k, cy), true, t.fg_faint);
+                if resp.clicked() {
+                    acts.push(Act("diff-select-target", vec![]));
+                }
+                hits.push(("send".into(), send));
+                hits.push(("send-target".into(), to_r));
+                row.push(("send", send));
+                row.push(("target", to_r));
+                right = to_r.left() - 6.0 * k;
             }
-            let resp = ui.interact(to_r, id.with("send-target"), Sense::click()).on_hover_text("Which chat or terminal gets it (diff-select-target)");
-            painter.rect_filled(to_r, 7.0 * k, if resp.hovered() { chrome::hover_bg(&t) } else { t.chip() });
-            chrome::text(&painter, egui::pos2(to_r.left() + 10.0 * k, cy), &to, ui_font.clone(), t.fg_dim, to_r.width() - 14.0 * k);
-            if resp.clicked() {
-                acts.push(Act("diff-select-target", vec![]));
+            let clear = "Clear all";
+            let clear_w = chrome::text_width(&painter, clear, ui_font.clone()) + 20.0 * k;
+            let clear_r = Rect::from_min_size(egui::pos2(right - clear_w, cy - bh / 2.0), egui::vec2(clear_w, bh));
+            let resp = ui.interact(clear_r, id.with("clear-comments"), Sense::click()).on_hover_text("Delete every comment of this review, after asking (diff-comments-clear, C)");
+            if resp.hovered() {
+                painter.rect_filled(clear_r, 7.0 * k, chrome::hover_bg(&t));
             }
-            hits.push(("send".into(), send));
-            hits.push(("send-target".into(), to_r));
-            ed.check_row("diff-review-bar", bar, &[("send", send), ("target", to_r)]);
+            painter.text(clear_r.center(), egui::Align2::CENTER_CENTER, clear, ui_font.clone(), if resp.hovered() { t.fg } else { t.fg_dim });
+            if resp.clicked() {
+                acts.push(Act("diff-comments-clear", vec![]));
+            }
+            hits.push(("clear-comments".into(), clear_r));
+            row.push(("clear", clear_r));
+            chrome::text(&painter, egui::pos2(bar.left() + pad, cy), &what, ui_font.clone(), t.fg_dim, (clear_r.left() - bar.left() - pad - 8.0 * k).max(0.0));
+            ed.check_row("diff-review-bar", bar, &row);
         }
 
         // The file tree.
@@ -1469,6 +1588,11 @@ impl Buffer for DiffBuffer {
         Some(self.as_text())
     }
 
+    fn on_kill(&mut self, ed: &mut Editor) {
+        // Quitting comes through here too: what is being written outlives it.
+        self.persist(ed);
+    }
+
     fn modeline(&self) -> Modeline {
         let name = self.root.rsplit('/').next().unwrap_or(&self.root);
         let what = self.spec.as_ref().map_or_else(String::new, describe);
@@ -1520,7 +1644,6 @@ impl DiffBuffer {
         let font = FontId::proportional(t.font_size - 1.5);
         let mut y = list.top() - self.tree_scroll;
         let mut toggle = None;
-        let counts = |p: &str, c: &[Comment]| c.iter().filter(|c| c.path == p && c.state != State::Resolved).count();
         for row in &rows {
             let r = Rect::from_min_size(egui::pos2(tree.left(), y), egui::vec2(tree.width(), row_h));
             y += row_h;
@@ -1540,7 +1663,13 @@ impl DiffBuffer {
                     }
                     let open = !self.closed_dirs.contains(&row.path);
                     chrome::chevron(&clip, egui::pos2(x + 3.0 * k, cy), open, t.fg_faint);
-                    chrome::text(&clip, egui::pos2(x + 14.0 * k, cy), &row.name, font.clone(), t.fg_dim, r.right() - x - 22.0 * k);
+                    // A closed folder says what is in it.
+                    let inside = if open { 0 } else { self.comments_under(&row.path) };
+                    let mut end = r.right() - 10.0 * k;
+                    if inside > 0 {
+                        end = comment_count(&clip, t, end, cy, inside, &small);
+                    }
+                    chrome::text(&clip, egui::pos2(x + 14.0 * k, cy), &row.name, font.clone(), t.fg_dim, end - x - 18.0 * k);
                     if resp.clicked() {
                         toggle = Some(row.path.clone());
                     }
@@ -1557,19 +1686,16 @@ impl DiffBuffer {
                     clip.text(egui::pos2(x + 3.0 * k, cy), egui::Align2::CENTER_CENTER, &f.status, small.clone(), if viewed { t.fg_faint } else { status_color(t, &f.status) });
                     // What fits on the right: a count of comments, then the size of the change.
                     let mut right = r.right() - 10.0 * k;
-                    let comments = counts(&f.path, &self.review.comments);
+                    let comments = self.comments_on(&f.path);
                     if comments > 0 {
-                        let label = comments.to_string();
-                        let w = chrome::text_width(&clip, &label, small.clone()) + 10.0 * k;
-                        let pill = Rect::from_min_size(egui::pos2(right - w, cy - 8.0 * k), egui::vec2(w, 16.0 * k));
-                        clip.rect_filled(pill, 8.0 * k, chrome::tint(t.yellow, 0.25));
-                        clip.text(pill.center(), egui::Align2::CENTER_CENTER, label, small.clone(), t.yellow);
-                        right = pill.left() - 5.0 * k;
+                        let from = comment_count(&clip, t, right, cy, comments, &small);
+                        hits.push((format!("file-comments-{}", f.path), Rect::from_min_max(egui::pos2(from, r.top()), egui::pos2(right, r.bottom()))));
+                        right = from - 5.0 * k;
                     }
                     let name_x = x + 14.0 * k;
                     let name_w = chrome::text_width(&clip, &row.name, font.clone());
                     if viewed {
-                        clip.text(egui::pos2(right, cy), egui::Align2::RIGHT_CENTER, "✓", small.clone(), t.green);
+                        chrome::check(&clip, egui::pos2(right - 5.0 * k, cy), small.size, t.green);
                         right -= 14.0 * k;
                     } else if !f.binary {
                         let stat = format!("+{} −{}", f.added, f.removed);
@@ -1611,12 +1737,16 @@ impl DiffBuffer {
         // The controls on the right, then whatever fits of the path.
         let ui_font = FontId::proportional(t.font_size - 2.0);
         let viewed = self.review.viewed.contains_key(&entry.path);
-        let label = if viewed { "✓ Viewed" } else { "Viewed" };
-        let vw = chrome::text_width(painter, label, ui_font.clone()) + 18.0 * k;
+        let label = "Viewed";
+        let tick = if viewed { 16.0 * k } else { 0.0 };
+        let vw = chrome::text_width(painter, label, ui_font.clone()) + 18.0 * k + tick;
         let vr = Rect::from_min_size(egui::pos2(head.right() - 10.0 * k - vw, cy - 12.0 * k), egui::vec2(vw, 24.0 * k));
         let resp = ui.interact(vr, id.with("viewed"), Sense::click()).on_hover_text("Mark as viewed, and go to the next file (diff-mark-viewed, v). Changing clears it.");
         painter.rect_filled(vr, 6.0 * k, if viewed { chrome::tint(t.green, 0.18) } else if resp.hovered() { chrome::hover_bg(t) } else { t.chip() });
-        painter.text(vr.center(), egui::Align2::CENTER_CENTER, label, ui_font.clone(), if viewed { t.green } else { t.fg_dim });
+        if viewed {
+            chrome::check(painter, egui::pos2(vr.left() + 13.0 * k, cy), ui_font.size, t.green);
+        }
+        painter.text(vr.center() + egui::vec2(tick / 2.0, 0.0), egui::Align2::CENTER_CENTER, label, ui_font.clone(), if viewed { t.green } else { t.fg_dim });
         if resp.clicked() {
             acts.push(Act("diff-mark-viewed", vec![]));
         }
@@ -1640,6 +1770,10 @@ impl DiffBuffer {
                 chrome::text(painter, egui::pos2(right - rw - aw - 6.0 * k, cy), &a, small.clone(), t.green, aw + 1.0);
                 right -= aw + rw + 16.0 * k;
             }
+        }
+        let on_file = self.comments_on(&entry.path);
+        if on_file > 0 && right - 40.0 * k > x + 60.0 * k {
+            right = comment_count(painter, t, right, cy, on_file, small) - 10.0 * k;
         }
         let path = match &entry.old_path {
             Some(o) => format!("{o} → {}", entry.path),
@@ -1780,8 +1914,9 @@ impl DiffBuffer {
                     clip.rect_filled(row_rect, 0.0, if selected && focused { chrome::selected_bg(t) } else if hover { chrome::hover_bg(t) } else { t.bg_alt });
                     let n = to - from;
                     let scope = self.scope_above(&d, from);
-                    let label = format!("⋯  {n} unchanged lines{}", scope.map_or(String::new(), |s| format!("  ·  {s}")));
-                    chrome::text(&clip, egui::pos2(row_rect.left() + 14.0 * k, row_rect.center().y), &label, small.clone(), t.fg_faint, row_rect.width() - 24.0 * k);
+                    let label = format!("{n} unchanged lines{}", scope.map_or(String::new(), |s| format!("  ·  {s}")));
+                    chrome::dots(&clip, egui::pos2(row_rect.left() + 20.0 * k, row_rect.center().y), small.size, t.fg_faint);
+                    chrome::text(&clip, egui::pos2(row_rect.left() + 34.0 * k, row_rect.center().y), &label, small.clone(), t.fg_faint, row_rect.width() - 44.0 * k);
                     hits.push((format!("fold-{from}"), row_rect));
                 }
                 it @ (Item::Comment(_) | Item::Composer) => cards.push((it, row_rect)),
@@ -2155,12 +2290,17 @@ impl DiffBuffer {
         }
         let mut right = card.right() - 8.0 * k;
         let keys = crate::commands::all_bindings(ed);
-        let save = chrome::with_key("Comment", &keys, "diff-comment-save");
-        let save_w = width(&save);
+        let key = keys.get("diff-comment-save").cloned();
+        let key_w = key.as_ref().map_or(0.0, |key| chrome::keys_width(p, key, font.clone()) + 8.0 * k);
+        let save_w = width("Comment") + key_w;
         let r = Rect::from_min_size(egui::pos2(right - save_w, cy - h / 2.0), egui::vec2(save_w, h));
         let resp = ui.interact(r, id.with("comment-save"), Sense::click()).on_hover_text("Keep it, to send with the rest of the review");
         p.rect_filled(r, 6.0 * k, if resp.hovered() { chrome::tint(t.accent, 0.85) } else { t.accent });
-        p.text(r.center(), egui::Align2::CENTER_CENTER, &save, font.clone(), chrome::on(t.accent, t));
+        let ink = chrome::on(t.accent, t);
+        let word = chrome::text(p, egui::pos2(r.left() + 9.0 * k, cy), "Comment", font.clone(), ink, r.width());
+        if let Some(key) = &key {
+            chrome::paint_keys(p, r.left() + 9.0 * k + word + 8.0 * k, cy, key, font.clone(), chrome::tint(ink, 0.75));
+        }
         if resp.clicked() {
             acts.push(Act("diff-comment-save", vec![]));
         }

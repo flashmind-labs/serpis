@@ -96,17 +96,149 @@ pub fn pill(p: &egui::Painter, x: f32, cy: f32, label: &str, font: FontId, fg: C
 /// A keyboard shortcut chip (`⌘E`).
 /// How wide [`keycap`] draws `keys`.
 pub fn keycap_width(p: &egui::Painter, keys: &str, t: &Theme) -> f32 {
-    text_width(p, &pretty_keys(keys), FontId::proportional(t.font_size - 3.0)) + 10.0
+    keys_width(p, keys, FontId::proportional(t.font_size - 3.0)) + 10.0
 }
 
 pub fn keycap(p: &egui::Painter, right: f32, cy: f32, keys: &str, t: &Theme) -> Rect {
     let font = FontId::proportional(t.font_size - 3.0);
-    let g = p.layout_no_wrap(pretty_keys(keys), font, t.fg_faint);
+    let w = keys_width(p, keys, font.clone());
     let h = (t.font_size + 3.0).round();
-    let r = Rect::from_min_size(egui::pos2(right - g.size().x - 10.0, cy - h / 2.0), egui::vec2(g.size().x + 10.0, h));
+    let r = Rect::from_min_size(egui::pos2(right - w - 10.0, cy - h / 2.0), egui::vec2(w + 10.0, h));
     p.rect_stroke(r, 4.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    p.galley(r.center() - g.size() / 2.0, g, t.fg_faint);
+    paint_keys(p, r.left() + 5.0, cy, keys, font, t.fg_faint);
     r
+}
+
+/// A key's symbol, drawn rather than taken from a font: fonts without these fall back to an
+/// emoji font, whose glyphs don't belong beside text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum KeySymbol {
+    Command,
+    Control,
+    Option,
+    Shift,
+    Return,
+    Tab,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum KeyPart {
+    Symbol(KeySymbol),
+    Text(String),
+}
+
+/// A key sequence as symbols and text: what [`pretty_keys`] writes, with the symbols apart.
+fn key_parts(keys: &str, mac: bool) -> Vec<KeyPart> {
+    let mut out = Vec::new();
+    let text = |out: &mut Vec<KeyPart>, s: String| match out.last_mut() {
+        Some(KeyPart::Text(t)) => t.push_str(&s),
+        _ => out.push(KeyPart::Text(s)),
+    };
+    for (i, chord) in keys.split(' ').enumerate() {
+        if i > 0 {
+            text(&mut out, " ".to_string());
+        }
+        let mut rest = chord;
+        while rest.len() > 2 && rest.as_bytes()[1] == b'-' {
+            match (&rest[..1], mac) {
+                ("s", true) => out.push(KeyPart::Symbol(KeySymbol::Command)),
+                ("C", true) => out.push(KeyPart::Symbol(KeySymbol::Control)),
+                ("M", true) => out.push(KeyPart::Symbol(KeySymbol::Option)),
+                ("S", true) => out.push(KeyPart::Symbol(KeySymbol::Shift)),
+                ("s", false) => text(&mut out, "Super+".into()),
+                ("C", false) => text(&mut out, "Ctrl+".into()),
+                ("M", false) => text(&mut out, "Alt+".into()),
+                _ => text(&mut out, "Shift+".into()),
+            }
+            rest = &rest[2..];
+        }
+        match rest {
+            "RET" => out.push(KeyPart::Symbol(KeySymbol::Return)),
+            "TAB" => out.push(KeyPart::Symbol(KeySymbol::Tab)),
+            "SPC" => text(&mut out, "Space".into()),
+            "ESC" => text(&mut out, "Esc".into()),
+            k if k.chars().count() == 1 && k.chars().all(char::is_lowercase) => text(&mut out, k.to_uppercase()),
+            k if k.chars().count() == 1 && k.chars().all(char::is_uppercase) => {
+                if mac {
+                    out.push(KeyPart::Symbol(KeySymbol::Shift));
+                    text(&mut out, k.to_string());
+                } else {
+                    text(&mut out, format!("Shift+{k}"));
+                }
+            }
+            k => text(&mut out, k.to_string()),
+        }
+    }
+    out
+}
+
+fn paint_symbol(p: &egui::Painter, c: Pos2, size: f32, symbol: KeySymbol, color: Color32) {
+    let s = Stroke::new((size * 0.09).max(1.0), color);
+    let at = |x: f32, y: f32| c + egui::vec2(x * size, y * size);
+    let line = |pts: &[(f32, f32)]| {
+        p.add(egui::Shape::line(pts.iter().map(|(x, y)| at(*x, *y)).collect(), s));
+    };
+    match symbol {
+        KeySymbol::Command => {
+            // A square with a loop at each corner.
+            let (i, r) = (0.17, 0.13);
+            p.rect_stroke(Rect::from_min_max(at(-i, -i), at(i, i)), 0.0, s, StrokeKind::Middle);
+            for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                p.circle_stroke(at(x * (i + r * 0.7), y * (i + r * 0.7)), r * size, s);
+            }
+        }
+        KeySymbol::Control => line(&[(-0.28, 0.1), (0.0, -0.2), (0.28, 0.1)]),
+        KeySymbol::Option => {
+            line(&[(-0.38, -0.22), (-0.14, -0.22), (0.12, 0.22), (0.38, 0.22)]);
+            line(&[(0.1, -0.22), (0.38, -0.22)]);
+        }
+        KeySymbol::Shift => line(&[(0.0, -0.36), (0.32, -0.02), (0.14, -0.02), (0.14, 0.3), (-0.14, 0.3), (-0.14, -0.02), (-0.32, -0.02), (0.0, -0.36)]),
+        KeySymbol::Return => {
+            line(&[(0.32, -0.28), (0.32, 0.1), (-0.3, 0.1)]);
+            line(&[(-0.12, -0.08), (-0.3, 0.1), (-0.12, 0.28)]);
+        }
+        KeySymbol::Tab => {
+            line(&[(-0.36, 0.0), (0.2, 0.0)]);
+            line(&[(0.03, -0.17), (0.2, 0.0), (0.03, 0.17)]);
+            line(&[(0.34, -0.24), (0.34, 0.24)]);
+        }
+    }
+}
+
+fn symbol_width(size: f32) -> f32 {
+    (size * 0.92).round()
+}
+
+/// How wide [`paint_keys`] draws `keys`.
+pub fn keys_width(p: &egui::Painter, keys: &str, font: FontId) -> f32 {
+    key_parts(keys, cfg!(target_os = "macos"))
+        .iter()
+        .map(|part| match part {
+            KeyPart::Symbol(_) => symbol_width(font.size),
+            KeyPart::Text(t) => text_width(p, t, font.clone()),
+        })
+        .sum()
+}
+
+/// A key sequence from `x`, centered on `cy`: `s-RET` as the Command and Return symbols. Its width.
+pub fn paint_keys(p: &egui::Painter, x: f32, cy: f32, keys: &str, font: FontId, color: Color32) -> f32 {
+    let mut at = x;
+    for part in key_parts(keys, cfg!(target_os = "macos")) {
+        match part {
+            KeyPart::Symbol(symbol) => {
+                let w = symbol_width(font.size);
+                paint_symbol(p, egui::pos2(at + w / 2.0, cy), font.size, symbol, color);
+                at += w;
+            }
+            KeyPart::Text(t) => {
+                let g = p.layout_no_wrap(t, font.clone(), color);
+                let w = g.size().x;
+                p.galley(egui::pos2(at, cy - g.size().y / 2.0), g, color);
+                at += w;
+            }
+        }
+    }
+    at - x
 }
 
 /// `s-e` → `⌘E`, `C-c C-m` → `⌃C ⌃M` (on macOS; other platforms spell modifiers out).
@@ -130,10 +262,10 @@ pub fn pretty_keys(keys: &str) -> String {
                 rest = &rest[2..];
             }
             let key = match rest {
-                "RET" => "↩".to_string(),
+                "RET" => "Return".to_string(),
                 "SPC" => "Space".to_string(),
                 "ESC" => "Esc".to_string(),
-                "TAB" => "⇥".to_string(),
+                "TAB" => "Tab".to_string(),
                 k if k.chars().count() == 1 && k.chars().all(char::is_lowercase) => k.to_uppercase(),
                 k if k.chars().count() == 1 && k.chars().all(char::is_uppercase) => format!("⇧{k}"),
                 k => k.to_string(),
@@ -204,6 +336,27 @@ pub fn chevron(p: &egui::Painter, c: Pos2, open: bool, color: Color32) {
         vec![c + egui::vec2(-1.5, -3.0), c + egui::vec2(1.5, 0.0), c + egui::vec2(-1.5, 3.0)]
     };
     p.add(egui::Shape::line(pts, s));
+}
+
+/// A tick.
+pub fn check(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let at = |x: f32, y: f32| c + egui::vec2(x * size, y * size);
+    p.add(egui::Shape::line(vec![at(-0.36, 0.02), at(-0.1, 0.28), at(0.38, -0.28)], Stroke::new((size * 0.14).max(1.2), color)));
+}
+
+/// A speech bubble: a comment.
+pub fn bubble(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let at = |x: f32, y: f32| c + egui::vec2(x * size, y * size);
+    let s = Stroke::new((size * 0.1).max(1.0), color);
+    p.rect_stroke(Rect::from_min_max(at(-0.46, -0.4), at(0.46, 0.22)), size * 0.16, s, StrokeKind::Middle);
+    p.add(egui::Shape::line(vec![at(-0.22, 0.22), at(-0.22, 0.46), at(0.06, 0.22)], s));
+}
+
+/// Three dots in a row: something folded away.
+pub fn dots(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    for x in [-0.34, 0.0, 0.34] {
+        p.circle_filled(c + egui::vec2(x * size, 0.0), (size * 0.08).max(1.0), color);
+    }
 }
 
 pub fn plus(p: &egui::Painter, r: Rect, c: Color32) {
@@ -325,6 +478,18 @@ pub fn avatar(p: &egui::Painter, c: Pos2, size: f32, name: &str, color: Color32)
 #[cfg(test)]
 mod tests {
     #[test]
+    fn keys_split_into_drawn_symbols_and_text() {
+        use super::{KeyPart::*, KeySymbol::*, key_parts};
+        assert_eq!(key_parts("s-RET", true), [Symbol(Command), Symbol(Return)]);
+        assert_eq!(key_parts("C-c C-s", true), [Symbol(Control), Text("C ".into()), Symbol(Control), Text("S".into())]);
+        assert_eq!(key_parts("M-TAB", true), [Symbol(Option), Symbol(Tab)]);
+        assert_eq!(key_parts("s-N", true), [Symbol(Command), Symbol(Shift), Text("N".into())]);
+        assert_eq!(key_parts("C-c", false), [Text("Ctrl+C".into())]);
+        assert_eq!(key_parts("s-RET", false), [Text("Super+".into()), Symbol(Return)]);
+        assert_eq!(key_parts("SPC", true), [Text("Space".into())]);
+    }
+
+    #[test]
     fn names_read_like_titles() {
         assert_eq!(super::pretty_name("*terminal*<2>"), "Terminal 2");
         assert_eq!(super::pretty_name("*chat*"), "Chat");
@@ -337,7 +502,7 @@ mod tests {
             assert_eq!(super::pretty_keys("s-e"), "⌘E");
             assert_eq!(super::pretty_keys("s-N"), "⌘⇧N");
             assert_eq!(super::pretty_keys("C-c C-m"), "⌃C ⌃M");
-            assert_eq!(super::pretty_keys("s-RET"), "⌘↩");
+            assert_eq!(super::pretty_keys("s-RET"), "⌘Return");
         }
     }
 }
