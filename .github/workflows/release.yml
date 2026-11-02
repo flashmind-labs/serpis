@@ -1,0 +1,148 @@
+# Publishes a GitHub release when a tag v<version> is pushed. The nodes are built first, because
+# the desktop app has their checksums built into it (SERPIS_NODE_SHA256, crates/serpis/src/remote.rs).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.99.1"
+  ZIG_VERSION: "0.16.0"
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag names the version in Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+
+  node:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Each Linux build on its own architecture, so it can be run below.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, build: x86_64-unknown-linux-gnu.2.28 }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, build: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, build: aarch64-unknown-linux-gnu.2.28 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, build: aarch64-unknown-linux-musl }
+          - { os: macos-latest, target: aarch64-apple-darwin, build: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin, build: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Rust and cargo-zigbuild
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
+          rustup default "$RUST_VERSION"
+          cargo install cargo-zigbuild --locked
+      - name: Build
+        run: |
+          out="$(scripts/build-node.sh "${{ matrix.build }}")"
+          mkdir dist
+          cp "$out" "dist/serpis-node-${{ matrix.target }}"
+      - name: It starts, serves and stops, and the probe names each system
+        if: runner.os == 'Linux'
+        run: |
+          cat > dist/smoke.sh <<'SMOKE'
+          set -eu
+          node="$(dirname "$0")/serpis-node-$1"
+          export HOME="$(mktemp -d)"
+          "$node" stamp
+          [ "$("$node" system)" = "$2" ] || { echo "the probe says $("$node" system), not $2"; exit 1; }
+          "$node" serve &
+          for _ in $(seq 50); do [ -S "$HOME/.serpis/node/node.sock" ] && break; sleep 0.1; done
+          [ -S "$HOME/.serpis/node/node.sock" ]
+          "$node" stop
+          wait
+          SMOKE
+          arch="$(uname -m)"
+          target="${{ matrix.target }}"
+          sh dist/smoke.sh "$target" "Linux $arch gnu"
+          case "$target" in
+            # The oldest glibc it is built for.
+            *-gnu) docker run --rm -v "$PWD/dist:/dist:ro" debian:10 sh /dist/smoke.sh "$target" "Linux $arch gnu" ;;
+            *-musl) docker run --rm -v "$PWD/dist:/dist:ro" alpine:3 sh /dist/smoke.sh "$target" "Linux $arch musl" ;;
+          esac
+          # A 32-bit system on this 64-bit kernel: uname says x86_64, and the probe must not believe it.
+          if [ "$target" = x86_64-unknown-linux-musl ]; then
+            got="$(docker run --rm --platform linux/386 -v "$PWD/dist:/dist:ro" alpine:3 "/dist/serpis-node-$target" system)"
+            echo "32-bit system: $got"
+            [ "$got" = "Linux x86_64 32-bit" ]
+          fi
+          rm dist/smoke.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: serpis-node-${{ matrix.target }}
+          path: dist/serpis-node-${{ matrix.target }}
+          if-no-files-found: error
+
+  desktop:
+    needs: node
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: nodes
+          pattern: serpis-node-*
+          merge-multiple: true
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - name: Build Serpis.app
+        run: |
+          sums=""
+          for f in nodes/serpis-node-*; do
+            sums="$sums${sums:+,}${f##*/serpis-node-}=$(shasum -a 256 "$f" | cut -d' ' -f1)"
+          done
+          echo "Node checksums: $sums"
+          SERPIS_NODE_SHA256="$sums" SERPIS_BUNDLE_ONLY=1 SERPIS_APP_DIR="$PWD/app" \
+            SERPIS_NODE_BINARY="$PWD/nodes/serpis-node-aarch64-apple-darwin" \
+            scripts/install-macos.sh
+          # ditto keeps the app's symlinks and signatures, which a plain zip may not.
+          mkdir dist
+          ditto -c -k --keepParent app/Serpis.app dist/Serpis-macos-arm64.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop
+          path: dist/Serpis-macos-arm64.zip
+          if-no-files-found: error
+
+  publish:
+    needs: desktop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp LICENSE dist/
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

@@ -158,29 +158,72 @@ fn source_root() -> Option<std::path::PathBuf> {
     root.join("scripts/build-node.sh").is_file().then_some(root)
 }
 
-/// How serpis gets a node build for a system it has none for yet: from its source, into
-/// remote-node-builds (None when it can't, or remote-deploy is off).
+/// The node builds published with this release, `<target triple>=<sha256>,…`, built in by
+/// .github/workflows/release.yml. A serpis built from source has none, and builds its own.
+const RELEASED_NODES: Option<&str> = option_env!("SERPIS_NODE_SHA256");
+
+/// The checksum published for a target triple.
+fn released_sha256<'a>(nodes: &'a str, triple: &str) -> Option<&'a str> {
+    nodes.split(',').find_map(|n| n.trim().strip_prefix(triple)?.strip_prefix('='))
+}
+
+/// How serpis gets a node build for a system it has none for yet, into remote-node-builds: a
+/// release downloads the one published with it, a checkout builds it from its source (None when
+/// it can do neither, or remote-deploy is off).
 fn obtain(ed: &Editor) -> Option<serpis_node::client::Obtain> {
     if !ed.var("remote-deploy").and_then(Value::as_bool).unwrap_or(true) {
         return None;
     }
-    let root = source_root()?;
     let store = crate::expand_home(&ed.var_str("remote-node-builds").unwrap_or_else(|| "~/.serpis/nodes".into())).join(serpis_node::STAMP);
+    if let (Some(nodes), Some(releases)) = (RELEASED_NODES, ed.var_str("remote-node-releases").filter(|u| !u.is_empty())) {
+        return Some(Arc::new(move |system: String| {
+            let (releases, store) = (releases.clone(), store.clone());
+            Box::pin(async move { download_node(&releases, concat!("v", env!("CARGO_PKG_VERSION")), nodes, &store, &system).await })
+        }));
+    }
+    let root = source_root()?;
     Some(Arc::new(move |system: String| {
         let (root, store) = (root.clone(), store.clone());
         Box::pin(async move { build_node(&root, &store, &system).await })
     }))
 }
 
-/// Build the node for `system` (`uname -sm`) with scripts/build-node.sh into `store`.
+/// Download the node for `system` (`serpis_node::deploy::PROBE`) published with release `tag` under `releases`
+/// into `store`, and keep it only if it matches the checksum built into serpis.
+async fn download_node(releases: &str, tag: &str, nodes: &str, store: &std::path::Path, system: &str) -> anyhow::Result<serpis_node::deploy::NodeBinary> {
+    use anyhow::{Context, bail};
+    let triple = serpis_node::deploy::triple_for(system).with_context(|| format!("serpis has no release for {system}"))?;
+    let triple = triple.split(".2.").next().unwrap_or(triple);
+    let wanted = released_sha256(nodes, triple).with_context(|| format!("this release has no serpis-node for {system}"))?;
+    let url = format!("{}/{tag}/serpis-node-{triple}", releases.trim_end_matches('/'));
+    let http = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).timeout(std::time::Duration::from_secs(600)).build()?;
+    let bytes = http.get(&url).send().await.and_then(reqwest::Response::error_for_status).with_context(|| format!("downloading {url}"))?.bytes().await.with_context(|| format!("downloading {url}"))?;
+    let dir = store.join(triple);
+    tokio::fs::create_dir_all(&dir).await?;
+    // Beside its final name and moved, so nothing half-written or wrong is ever found there.
+    let part = dir.join(format!(".serpis-node.{}.part", uuid::Uuid::new_v4()));
+    tokio::fs::write(&part, &bytes).await?;
+    let got = serpis_node::deploy::sha256_file(&part)?;
+    if got != wanted {
+        let _ = tokio::fs::remove_file(&part).await;
+        bail!("{url} isn't the node this serpis was released with (its checksum is {got}, not {wanted})");
+    }
+    tokio::fs::rename(&part, dir.join("serpis-node")).await?;
+    serpis_node::deploy::scan(store).into_iter().find(|n| n.system == system).with_context(|| format!("the build for {system} isn't in {}", store.display()))
+}
+
+/// Build the node for `system` (`serpis_node::deploy::PROBE`) with scripts/build-node.sh into `store`.
 async fn build_node(root: &std::path::Path, store: &std::path::Path, system: &str) -> anyhow::Result<serpis_node::deploy::NodeBinary> {
     use anyhow::{Context, bail};
     let triple = serpis_node::deploy::triple_for(system).with_context(|| format!("serpis can't build for {system}"))?;
-    let here = tokio::process::Command::new("uname").arg("-sm").output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let here = serpis_node::deploy::this_system();
     let mut cmd = tokio::process::Command::new(root.join("scripts/build-node.sh"));
     cmd.arg("--store").env("SERPIS_NODE_STORE", store);
-    if here != system {
-        // Another system: cross-compiled with zig, which needs these two.
+    // A Mac's own node needs nothing else. Anything else is cross-compiled with zig, a Linux
+    // machine's own node too: linked here it would need this machine's glibc, not 2.28, and may
+    // be copied to an older one.
+    if here != system || !system.starts_with("Darwin") {
+        // That needs these two.
         // (`cargo zigbuild --version` is an error: the binary answers for itself.)
         let zigbuild = tokio::process::Command::new("cargo-zigbuild").arg("--version").output().await.is_ok_and(|o| o.status.success());
         if !zigbuild {
@@ -198,7 +241,7 @@ async fn build_node(root: &std::path::Path, store: &std::path::Path, system: &st
         let err = String::from_utf8_lossy(&out.stderr);
         bail!("building it for {system} failed: {}", err.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     }
-    serpis_node::deploy::scan(store).into_iter().find(|n| n.os_arch == system).with_context(|| format!("the build for {system} isn't in {}", store.display()))
+    serpis_node::deploy::scan(store).into_iter().find(|n| n.system == system).with_context(|| format!("the build for {system} isn't in {}", store.display()))
 }
 
 /// How an ssh target logs in: `user@host`, or the host.
@@ -344,8 +387,8 @@ async fn own_node(root: Option<std::path::PathBuf>, store: std::path::PathBuf, s
             return Ok(beside);
         }
     }
-    let here = tokio::process::Command::new("uname").arg("-sm").output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    if let Some(n) = serpis_node::deploy::scan(&store).into_iter().find(|n| n.os_arch == here) {
+    let here = serpis_node::deploy::this_system();
+    if let Some(n) = serpis_node::deploy::scan(&store).into_iter().find(|n| n.system == here) {
         return Ok(n.path);
     }
     let Some(root) = root else { anyhow::bail!("serpis-node isn't installed beside serpis, and serpis has no source to build it from") };
@@ -392,7 +435,7 @@ pub fn with_client(ed: &mut Editor, machine: &str, f: impl FnOnce(&mut Editor, R
             let (main, name, key) = (main.clone(), name.clone(), key.clone());
             move |s: serpis_node::client::Stage| {
                 let label = match s {
-                    serpis_node::client::Stage::Building(system) => format!("Building serpis-node for {system} (once)…"),
+                    serpis_node::client::Stage::Building(system) => format!("{} serpis-node for {system} (once)…", if RELEASED_NODES.is_some() { "Downloading" } else { "Building" }),
                     serpis_node::client::Stage::Installing => format!("Installing serpis-node on {name}…"),
                     serpis_node::client::Stage::Upgrading => format!("Updating serpis-node on {name}…"),
                 };
@@ -1533,7 +1576,8 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-rayfish-command", json!(""), "The ray command for remote-rayfish (\"\": ray on PATH, else the one in /Applications/Rayfish.app).");
     ed.defvar("remote-node-command", json!(""), "What runs on a machine to reach its node over ssh, instead of the node serpis installs there (\"\": serpis's own, else serpis-node from PATH, ~/.local/bin or ~/.cargo/bin).");
     ed.defvar("remote-deploy", json!(true), "Install serpis-node on a machine the first time serpis connects to it (into ~/.serpis/bin there, named and checked by its SHA-256), from remote-node-builds.");
-    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<node source stamp>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (from serpis's source, when it runs from a checkout), or by scripts/build-node.sh --store.");
+    ed.defvar("remote-node-builds", json!("~/.serpis/nodes"), "Where serpis keeps the node builds it installs on machines: <dir>/<node source stamp>/<target triple>/serpis-node. A build is made the first time a machine of that system needs one (a release downloads it from remote-node-releases, a checkout builds it from its source), or by scripts/build-node.sh --store.");
+    ed.defvar("remote-node-releases", json!("https://github.com/flashmind-labs/serpis/releases/download"), "Where a released serpis downloads node builds from: <this>/<tag>/serpis-node-<target triple>, checked against the checksums built into serpis, so a mirror can't serve anything else (\"\": never download). A serpis built from source doesn't use it.");
     ed.defvar("remote-users", Editor::persisted_state("remote-users").unwrap_or_else(|| json!({})), "The account to log in as on each machine named without one (a rayfish peer, a bare host): {[\"box.net.ray\"] = \"alice\"}. serpis asks when a machine refuses your account here, and keeps the answer.");
     ed.defvar("remote-carry-directory", json!("~/.serpis/worktrees/{project}/{branch}"), "Where a repository brought along with a moving chat goes on a machine it hasn't been on: {project}, {branch}, and {path} (where it was, relative to the home there: \"~/{path}\" keeps the same layout). Where it was before, or where it came from, it goes back to; beside a clone of it at the same place it becomes a worktree of that clone. Nothing there is overwritten: changes made there are stashed, commits kept on a branch.");
     ed.defvar("remote-carry-directory-plain", json!("~/.serpis/carried/{project}"), "Where a folder that isn't a repository goes when brought along ({project}, {path}); one changed there since is moved aside first.");
@@ -1719,6 +1763,79 @@ pub fn install(ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves `body` to every request, and answers 404 for any path but `path`.
+    fn serve(path: &'static str, body: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut request = [0u8; 2048];
+                let n = stream.read(&mut request).unwrap_or(0);
+                let found = String::from_utf8_lossy(&request[..n]).starts_with(&format!("GET {path} "));
+                let (status, body) = if found { ("200 OK", &body[..]) } else { ("404 Not Found", &b""[..]) };
+                let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(body);
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[test]
+    fn a_published_checksum_is_found_by_its_exact_triple() {
+        let nodes = "x86_64-unknown-linux-musl=aaa, aarch64-apple-darwin=bbb";
+        assert_eq!(released_sha256(nodes, "x86_64-unknown-linux-musl"), Some("aaa"));
+        assert_eq!(released_sha256(nodes, "aarch64-apple-darwin"), Some("bbb"));
+        assert_eq!(released_sha256(nodes, "x86_64-unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn a_downloaded_node_is_kept_only_if_its_checksum_matches() {
+        let store = std::env::temp_dir().join(format!("serpis-download-test-{}", uuid::Uuid::new_v4()));
+        let triple = "x86_64-unknown-linux-musl";
+        let installed = store.join(triple).join("serpis-node");
+        let leftovers = || std::fs::read_dir(store.join(triple)).unwrap().flatten().filter(|e| e.file_name() != "serpis-node").count();
+        let system = "Linux x86_64 musl";
+        let good = store.with_extension("good");
+        std::fs::write(&good, b"a node").unwrap();
+        let sha = serpis_node::deploy::sha256_file(&good).unwrap();
+        std::fs::remove_file(&good).unwrap();
+        let nodes = format!("{triple}={sha}");
+        let path = "/v1.2.3/serpis-node-x86_64-unknown-linux-musl";
+
+        // What was served isn't what was released: nothing is kept.
+        let tampered = serve(path, b"not that node".to_vec());
+        let err = download_node(&tampered, "v1.2.3", &nodes, &store, system).await.unwrap_err();
+        assert!(format!("{err:#}").contains("isn't the node this serpis was released with"), "{err:#}");
+        assert!(!installed.exists());
+        assert_eq!(leftovers(), 0);
+
+        // A release without it, or without this system, fails and says what is missing.
+        let right = serve(path, b"a node".to_vec());
+        let err = download_node(&right, "v9.9.9", &nodes, &store, system).await.unwrap_err();
+        assert!(format!("{err:#}").contains("/v9.9.9/serpis-node-x86_64-unknown-linux-musl"), "{err:#}");
+        let err = download_node(&right, "v1.2.3", &nodes, &store, "Linux aarch64 musl").await.unwrap_err();
+        assert!(format!("{err:#}").contains("no serpis-node for Linux aarch64 musl"), "{err:#}");
+        let err = download_node(&right, "v1.2.3", &nodes, &store, "Plan9 mips").await.unwrap_err();
+        assert!(format!("{err:#}").contains("no release for Plan9 mips"), "{err:#}");
+
+        // The real one lands where machines' nodes are looked for.
+        let node = download_node(&right, "v1.2.3", &nodes, &store, system).await.unwrap();
+        assert_eq!((node.system.as_str(), node.sha256.as_str(), node.path.as_path()), (system, sha.as_str(), installed.as_path()));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"a node");
+        assert_eq!(serpis_node::deploy::scan(&store), [node.clone()]);
+        assert_eq!(leftovers(), 0);
+
+        // The same machine type with glibc gets its own file, without zigbuild's version suffix.
+        let gnu = serve("/v1.2.3/serpis-node-x86_64-unknown-linux-gnu", b"a node".to_vec());
+        let nodes = format!("{nodes},x86_64-unknown-linux-gnu={sha}");
+        let other = download_node(&gnu, "v1.2.3", &nodes, &store, "Linux x86_64 gnu").await.unwrap();
+        assert_eq!(other.path, store.join("x86_64-unknown-linux-gnu/serpis-node"));
+        assert_eq!(serpis_node::deploy::scan(&store), [other, node]);
+        std::fs::remove_dir_all(&store).unwrap();
+    }
 
     #[test]
     fn rayfish_peers_are_named_as_its_dns_names_them() {

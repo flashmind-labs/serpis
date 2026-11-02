@@ -11,6 +11,16 @@ core is open to extension from Lua or Rust plugins that link the same library.
 
 ## Install (macOS)
 
+[Releases](https://github.com/flashmind-labs/serpis/releases) have `Serpis-macos-arm64.zip`. Unzip
+it and move `Serpis.app` to `~/Applications`. The app isn't notarized yet, so macOS refuses to open
+a downloaded copy until you clear the quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine ~/Applications/Serpis.app
+```
+
+Or build it from source (needs Rust and zig 0.16):
+
 ```sh
 scripts/install-macos.sh      # builds Serpis.app into ~/Applications, and `serpis [dir]` into ~/.local/bin
 ```
@@ -461,11 +471,16 @@ machine's models. Closing such a chat's window only stops showing it. The sideba
 
 serpis installs its node (`serpis-node`, one file, no GUI) on a machine the first time it
 connects: into `~/.serpis/bin` there, named by its SHA-256 and checked before every start. The
-first machine of each system (Linux x86-64 or arm64, macOS) has it built then, once per build of
-its sources, into `~/.serpis/nodes`: serpis run from its source builds it with `scripts/build-node.sh`
-(other systems need `cargo install cargo-zigbuild` and `rustup target add <target>`, and say so).
-Without a build, a `serpis-node` already installed there is used. `remote-deploy` turns
-installing off, and `remote-node-command` runs something else there. On the machine, the
+first machine of each system (Linux x86-64 or arm64, with glibc or musl; macOS) gets it then, once per build of its
+sources, into `~/.serpis/nodes`. serpis asks the machine what it is first, so Alpine gets a musl
+build and Debian a glibc one (`serpis-node system` shows the answer); a glibc older than 2.28, or
+a machine that can't say, gets the musl build too, since it is static and starts anywhere. serpis
+doesn't support 32-bit systems: connecting to one stops with an error saying so, on a 64-bit kernel
+too, and nothing is downloaded or installed there. A released serpis downloads the node published with it
+(`remote-node-releases`) and checks it against the checksums built into serpis. serpis run from
+its source builds it with `scripts/build-node.sh` (anything but this Mac needs `cargo install
+cargo-zigbuild` and `rustup target add <target>`, and says so). When it can't get one, a `serpis-node` already
+installed there is used. `remote-deploy` turns installing off, and `remote-node-command` runs something else there. On the machine, the
 node keeps its settings in `~/.serpis/node/settings.json` (the variables above, by name) and uses
 models and keys from `~/.serpis/agent` or `~/.pi/agent` there. When it has none, serpis offers to
 copy this machine's API keys, models.json and default model there (over the ssh connection, into
@@ -691,6 +706,19 @@ crates/serpis-node    the node: runs a machine's chats and their Lua; `serpis-no
 tests/ui              scripted UI tests (scripts/ui-test.sh)
 docs/PLAN.md          design and roadmap
 ```
+
+## Release
+
+Set the new version in `Cargo.toml`, commit it, then push a tag naming it:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` refuses a tag that doesn't match `Cargo.toml`. It builds `serpis-node`
+for Linux x86-64 and arm64 with glibc and with musl (each run on Ubuntu, and on Debian 10 or Alpine,
+before anything is published) and for macOS arm64 and x86-64, builds `Serpis.app` with those nodes'
+checksums inside it, and publishes all of them with a `SHA256SUMS` file as a GitHub release.
 
 ## Test
 

@@ -9,6 +9,7 @@
 //! - `serpis-node stop-terminals`: stop it, ending every terminal in it.
 //! - `serpis-node install-service` / `uninstall-service`: start the node at boot and after
 //!   crashes (systemd user unit, launchd agent), or stop doing that.
+//! - `serpis-node system`: what serpis calls this machine when picking a node for it.
 //! - `serpis-node version`.
 
 fn main() -> anyhow::Result<()> {
@@ -97,12 +98,16 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serpis_node::STAMP);
             Ok(())
         }
+        Some("system") => {
+            println!("{}", serpis_node::deploy::this_system());
+            Ok(())
+        }
         Some("version" | "--version" | "-V") => {
             println!("serpis-node {} (protocol {})", serpis_node::VERSION, serpis_proto::wire::VERSION);
             Ok(())
         }
         _ => {
-            eprintln!("usage: serpis-node serve | agent | stop | install-service | uninstall-service | terminals | stop-terminals | version | stamp");
+            eprintln!("usage: serpis-node serve | agent | stop | install-service | uninstall-service | terminals | stop-terminals | system | version | stamp");
             std::process::exit(2);
         }
     }

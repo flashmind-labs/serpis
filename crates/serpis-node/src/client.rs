@@ -77,13 +77,13 @@ fn shell_word(s: &str) -> String {
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
-/// Gets a node build for a system (`uname -sm`) serpis has none for yet: builds or downloads it.
+/// Gets a node build for a system ([`crate::deploy::PROBE`]) serpis has none for yet: builds or downloads it.
 pub type Obtain = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::deploy::NodeBinary>> + Send>> + Send + Sync>;
 
 /// What a connect is doing, for whoever shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stage {
-    /// Getting a node build for this system (`uname -sm`).
+    /// Getting a node build for this system ([`crate::deploy::PROBE`]).
     Building(String),
     /// Copying the node to the machine.
     Installing,

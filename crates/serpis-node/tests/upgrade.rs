@@ -37,8 +37,7 @@ fn an_older_node_is_restarted_on_the_new_build_when_idle() {
     std::fs::write(&fake_ssh, "#!/bin/sh\nwhile [ $# -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done; shift\nexec sh -c \"$*\"\n").unwrap();
     std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_serpis-node"));
-    let uname = String::from_utf8(std::process::Command::new("uname").arg("-sm").output().unwrap().stdout).unwrap().trim().to_string();
-    let node = NodeBinary { os_arch: uname, path: exe.to_path_buf(), sha256: sha256_file(exe).unwrap() };
+    let node = NodeBinary { system: serpis_node::deploy::this_system(), path: exe.to_path_buf(), sha256: sha256_file(exe).unwrap() };
     let socket = root.join("n.sock");
     let env = vec![("HOME".to_string(), home.to_string_lossy().into_owned()), ("SERPIS_NODE_SOCKET".to_string(), socket.to_string_lossy().into_owned())];
     let target = Target::Ssh { host: "box".into(), ssh: vec![fake_ssh.to_string_lossy().into_owned()], ssh_args: vec![], env, command: None, deploy: vec![node.clone()], ask: false };

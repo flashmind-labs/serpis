@@ -5,8 +5,9 @@
 #
 #   scripts/build-node.sh                      # for this machine
 #   scripts/build-node.sh x86_64-unknown-linux-gnu.2.28   # another target (here: Linux with
-#       glibc 2.28 or newer, 2018 on): needs `cargo zigbuild` (cargo install cargo-zigbuild;
-#       zig is already a serpis build dependency) and `rustup target add` for it
+#       glibc 2.28 or newer, 2018 on; x86_64-unknown-linux-musl is static, for Alpine and the like):
+#       needs `cargo zigbuild` (cargo install cargo-zigbuild; zig is already a serpis build
+#       dependency) and `rustup target add` for it
 #   SERPIS_BUILD_PACKAGES="serpis-node serpis-testkit" ...   # also the mock provider (tests)
 #   scripts/build-node.sh --store [target]   # and keep it where serpis installs nodes from
 #       (~/.serpis/nodes/<source stamp>/<target>/serpis-node, or $SERPIS_NODE_STORE/<target>/...);

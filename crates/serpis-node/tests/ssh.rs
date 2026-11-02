@@ -38,8 +38,8 @@ fn a_node_over_real_ssh() {
         Ok(dir) => serpis_node::deploy::scan(std::path::Path::new(&dir)),
         Err(_) => {
             let exe = std::path::Path::new(env!("CARGO_BIN_EXE_serpis-node"));
-            let os_arch = String::from_utf8(std::process::Command::new("uname").arg("-sm").output().unwrap().stdout).unwrap().trim().to_string();
-            vec![serpis_node::deploy::NodeBinary { os_arch, path: exe.into(), sha256: serpis_node::deploy::sha256_file(exe).unwrap() }]
+            let system = serpis_node::deploy::this_system();
+            vec![serpis_node::deploy::NodeBinary { system, path: exe.into(), sha256: serpis_node::deploy::sha256_file(exe).unwrap() }]
         }
     };
     assert!(!builds.is_empty(), "no node builds to install");

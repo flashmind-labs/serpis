@@ -4569,6 +4569,7 @@ dependencies = [
  "proptest",
  "qrcode",
  "regex",
+ "reqwest",
  "ropey",
  "serde",
  "serde_json",

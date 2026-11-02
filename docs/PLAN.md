@@ -383,12 +383,10 @@ Steps:
    peers carry none, so `user@host` in `remote-hosts` replaces the peer), and non-interactive
    ssh has a short PATH (hence installing rather than looking for one). A newer serpis talking
    to an older running node isn't handled yet beyond a version check in hello.
-   **Pinned for later: release builds of the node.** Building a node on demand only works when
-   serpis runs from its source with Rust installed; a clean install elsewhere has nothing to
-   build from, and falls back to a serpis-node installed on the machine. The fix is a release
-   pipeline publishing serpis-node for each system (Linux x86-64/arm64, macOS), which serpis
-   downloads when a machine first needs one, checked against checksums built into serpis
-   itself. Needs a decision on where releases are hosted.
+   Release builds of the node: `.github/workflows/release.yml` publishes serpis-node for each
+   system (Linux x86-64/arm64 with glibc and musl, chosen by probing the machine, since a glibc build fails on Alpine; macOS; 32-bit systems are refused) as a GitHub release when a `v*` tag is pushed. A released
+   serpis downloads the one a machine needs (`remote-node-releases`), checked against checksums
+   built into it (`SERPIS_NODE_SHA256`). A checkout still builds its own.
 3. Moving chats between machines (next, in this order):
    a. *Done*: node upgrades. A machine still running an older node is restarted on the new one
       when none of its chats is mid-turn, and its chats come back (`tests/upgrade.rs`).
@@ -550,7 +548,6 @@ Tests:
   run (a freshly built binary's first launch is slow on macOS).
 
 Machines and nodes:
-- Release builds of the node, downloaded when a machine needs one (pinned under step 2).
 - Old node builds pile up in `~/.serpis/bin` on machines (one per serpis build): prune the ones
   no node runs from.
 - This machine's node keeps the environment of the window that started it: API keys exported in

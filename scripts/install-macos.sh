@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build Serpis.app and install it to ~/Applications, with a `serpis` command in ~/.local/bin.
 # Run it again to update. Overrides: SERPIS_APP_DIR, SERPIS_BIN_DIR.
-
+# SERPIS_BUNDLE_ONLY=1 stops once Serpis.app is in SERPIS_APP_DIR, without the command (releases).
+# SERPIS_NODE_BINARY puts that serpis-node in the app instead of building one (releases).
 #
 # The release binary links serpis' core (libserpis.dylib, a dylib so Rust plugins can load into
 # it) from target/ and Rust's standard library from the toolchain, by path. The bundle carries
@@ -15,7 +16,7 @@ bin_dir="${SERPIS_BIN_DIR:-$HOME/.local/bin}"
 echo "Building (release)…"
 cargo build --release -q --manifest-path "$root/Cargo.toml" -p serpis-bin
 # This machine's node, which runs its chats (one file, std linked in): beside serpis in the app.
-node_src="$("$root/scripts/build-node.sh")"
+node_src="${SERPIS_NODE_BINARY:-$("$root/scripts/build-node.sh")}"
 exe_src="$root/target/release/serpis"
 core_src="$root/target/release/deps/libserpis.dylib"
 core_id="$(otool -D "$core_src" | tail -1)"
@@ -31,7 +32,8 @@ exe="$app/Contents/MacOS/serpis"
 cp "$exe_src" "$exe"
 cp "$node_src" "$app/Contents/MacOS/serpis-node"
 cp "$core_src" "$std_src" "$app/Contents/Frameworks/"
-chmod u+w "$exe" "$app/Contents/Frameworks/"*
+chmod u+w "$exe" "$app/Contents/MacOS/serpis-node" "$app/Contents/Frameworks/"*
+chmod +x "$app/Contents/MacOS/serpis-node"
 
 rpaths() { otool -l "$1" | awk '/cmd LC_RPATH/ {getline; getline; print $2}'; }
 # The binary finds its libraries in the bundle, and only there.
@@ -81,6 +83,10 @@ codesign --force --sign - "$app"
 mkdir -p "$app_dir" "$bin_dir"
 command rm -rf "$app_dir/Serpis.app"
 mv "$app" "$app_dir/Serpis.app"
+if [[ -n "${SERPIS_BUNDLE_ONLY:-}" ]]; then
+  echo "Built $app_dir/Serpis.app (v$version)"
+  exit 0
+fi
 
 # `serpis [dir]`: start serpis from a terminal (in dir, or here), detached, with this shell's
 # environment.

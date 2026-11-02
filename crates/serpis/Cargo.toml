@@ -23,6 +23,7 @@ futures.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 similar = "2"
 uuid.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["glow", "clipboard", "links", "default_fonts", "system_fonts", "wayland", "x11"] }
