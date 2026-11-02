@@ -59,6 +59,103 @@ pub struct Call {
     pub request: Request,
 }
 
+/// One state of a repository's files, for comparing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    /// The files on disk, uncommitted changes and untracked files included.
+    Worktree,
+    /// What is staged.
+    Index,
+    /// A branch, tag or commit.
+    Rev(String),
+}
+
+/// What a diff compares: `base` on the left, `target` on the right.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DiffSpec {
+    pub base: DiffSide,
+    pub target: DiffSide,
+    /// Compare from where `base` and `target` (HEAD, for the worktree or index) forked, so what
+    /// `base` did since doesn't show: what a pull request would contain.
+    #[serde(default)]
+    pub merge_base: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffBranch {
+    pub name: String,
+    #[serde(default)]
+    pub remote: bool,
+    #[serde(default)]
+    pub current: bool,
+    #[serde(default)]
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffRefs {
+    /// The worktree around the folder asked about.
+    pub root: String,
+    /// The branch checked out there, or the commit when detached.
+    pub head: String,
+    #[serde(default)]
+    pub detached: bool,
+    /// `origin/HEAD`'s branch, else `main` or `master` when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub branches: Vec<DiffBranch>,
+    /// Every worktree of the repository: (path, branch or commit).
+    #[serde(default)]
+    pub worktrees: Vec<(String, String)>,
+}
+
+/// One file that differs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffEntry {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    /// `M`odified, `A`dded, `D`eleted, `R`enamed, `C`opied, `T`ype changed, `U`nmerged.
+    pub status: String,
+    #[serde(default)]
+    pub untracked: bool,
+    #[serde(default)]
+    pub binary: bool,
+    #[serde(default)]
+    pub added: u64,
+    #[serde(default)]
+    pub removed: u64,
+    /// Changes when the file's content does: what tells a client to read it again.
+    #[serde(default)]
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffList {
+    pub root: String,
+    /// The commit compared from, when it was found as a merge base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_base: Option<String>,
+    pub files: Vec<DiffEntry>,
+}
+
+/// One version of a file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffText {
+    #[serde(default)]
+    pub text: String,
+    /// It doesn't exist on this side.
+    #[serde(default)]
+    pub missing: bool,
+    #[serde(default)]
+    pub binary: bool,
+    /// Larger than a diff reads; `text` is empty.
+    #[serde(default)]
+    pub too_large: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -148,6 +245,18 @@ pub enum Request {
     Logs {
         #[serde(default)]
         after: u64,
+    },
+    /// What a folder's repository can be compared with: its root, branches and worktrees.
+    DiffRefs { dir: String },
+    /// The files that differ between two states of the repository around `dir`.
+    DiffList { dir: String, spec: DiffSpec },
+    /// Both versions of one of those files. `old_path`: where it was, when it was renamed.
+    DiffFile {
+        dir: String,
+        spec: DiffSpec,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_path: Option<String>,
     },
     /// Saved sessions on the node, newest first.
     Sessions {
@@ -311,6 +420,9 @@ pub enum Response {
     Skills { skills: Vec<SkillInfo> },
     /// Its log since the record asked after; `dropped` older ones it no longer keeps.
     Logs { records: Vec<LogRecord>, dropped: u64 },
+    DiffRefs { refs: DiffRefs },
+    DiffList { list: DiffList },
+    DiffFile { old: DiffText, new: DiffText },
     Sessions { sessions: Vec<SessionInfo> },
     Dirs { path: String, dirs: Vec<String> },
     /// A session file's text (`Export`).

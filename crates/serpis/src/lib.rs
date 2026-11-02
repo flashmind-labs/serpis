@@ -24,6 +24,7 @@ pub mod launch;
 pub mod chrome;
 pub mod clipboard;
 pub mod commands;
+pub mod diff;
 pub mod editor;
 pub mod fonts;
 pub mod git;
@@ -191,6 +192,7 @@ pub fn bootstrap(ed: &mut Editor) {
     minibuffer::install(ed);
     commands::install(ed);
     log_view::install(ed);
+    diff::install(ed);
     notify::install(ed);
     wm::install(ed);
     workspace::install(ed);

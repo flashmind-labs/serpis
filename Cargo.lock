@@ -4577,6 +4577,7 @@ dependencies = [
  "serpis-chat",
  "serpis-node",
  "serpis-proto",
+ "similar",
  "slotmap",
  "syntect",
  "tokio",

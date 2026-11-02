@@ -152,6 +152,12 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.workspace.move_window", "(name, {follow = bool}?): move the focused window or container there."),
     ("serpis.workspace.rename", "(from, to): rename."),
     ("serpis.workspace.back_and_forth", "(): to the previous workspace."),
+    // The diff page (id: its buffer; nil = the current buffer).
+    ("serpis.diff.open", "({dir?, source?, machine?}?): show the diff page for a folder (the current buffer's by default), comparing `source` (\"uncommitted\", \"staged\", \"unstaged\", \"a..b\", \"a...b\", \"commit:rev\", a branch; diff-default-source by default); returns its buffer id. It reads in the background: serpis.diff.info tells when it has."),
+    ("serpis.diff.info", "(id?): {root, machine, compared, loaded, loading, error, file, view, whitespace, wrap, change, changes, rows, cursor, side, selection = {side, line, end_line} | nil, writing = {text, kind, line, end_line, side} | nil, target, drafts}."),
+    ("serpis.diff.files", "(id?): the files that differ: {path, old_path, status, untracked, binary, added, removed, viewed}."),
+    ("serpis.diff.comments", "(id?): the review's comments: {id, path, side = \"old\" | \"new\", line, end_line, text, kind = \"fix\" | \"question\", state = \"draft\" | \"sent\" | \"resolved\", code, outdated}."),
+    ("serpis.diff.comment", "({text, line, end_line?, side?, kind?, path?}, id?): add a comment; returns its id. diff-send-review sends the comments."),
     // Projects and the sidebar.
     ("serpis.project.root", "(dir): the project root around dir (git or markers), or nil."),
     ("serpis.project.name", "(dir): its display name."),
@@ -227,6 +233,9 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("window-layout-changed", "{previous, current}: a container's layout changed."),
     ("workspace-switched", "{from, to}."),
     ("workspace-node-moved", "{to, follow}: a window or container moved to another workspace."),
+    ("diff-comment-added", "{id, path}: a comment was written on the diff page."),
+    ("diff-review-send", "{text, comments, target, compared}: a review is about to go to an agent. Return a string to send that instead, or false to not send it."),
+    ("diff-review-sent", "{comments = ids, target}: it went."),
     ("worktree-created", "{project, path, branch}."),
     ("worktree-removed", "{project, path, branch}."),
 ];
@@ -389,6 +398,7 @@ key. The keys below are this user's, as bound right now.
 - Text size: [[text-scale-increase]] and [[text-scale-decrease]]
 - What a key does: [[describe-key]]. What a setting does: [[describe-variable]]
 - Serpis's log: [[log-view]]
+- Compare a repository's changes and review them for an agent: [[diff-view]]
 "#;
 
 fn usage(ed: &Editor) -> String {

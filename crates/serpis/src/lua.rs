@@ -252,6 +252,48 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     s.set("config_dir", crate::config_dir().to_string_lossy().into_owned())?;
     s.set("where", "window")?;
     s.set("log", serpis_node::logs::lua_api(lua)?)?;
+    // serpis.diff.*: the diff page (see extend::LUA_API).
+    let diff = lua.create_table()?;
+    let page = |id: Option<u64>| -> mlua::Result<crate::buffer::BufferId> {
+        ed(|e| crate::diff::page(e, id.map(buffer_id_from_u64)).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
+    };
+    diff.set("open", lua.create_function(|_, opts: Option<Table>| {
+        let dir: Option<String> = opts.as_ref().and_then(|o| o.get("dir").ok());
+        let source: Option<String> = opts.as_ref().and_then(|o| o.get("source").ok());
+        let machine: Option<String> = opts.as_ref().and_then(|o| o.get("machine").ok());
+        ed(|e| {
+            let spec = match source.as_deref() {
+                Some(s) => Some(crate::diff::view::parse_source(s).ok_or_else(|| mlua::Error::runtime(format!("{s:?} isn't something to compare")))?),
+                None => None,
+            };
+            let cur = e.current_buffer();
+            let machine = machine.or_else(|| e.buffer_machine(cur));
+            let dir = dir.map(|d| crate::expand_home(&d).to_string_lossy().into_owned()).or_else(|| e.buffer_directory(cur).map(|d| d.to_string_lossy().into_owned())).unwrap_or_else(|| e.cwd.to_string_lossy().into_owned());
+            let target = e.meta(cur).is_some_and(|m| m.major == "chat" || m.major == "terminal").then_some(cur);
+            Ok(buffer_id_to_u64(crate::diff::open(e, machine, dir, spec, target)))
+        })?
+    })?)?;
+    diff.set("info", lua.create_function(move |lua, id: Option<u64>| {
+        let id = page(id)?;
+        let v = ed(|e| e.with_buffer_as::<crate::diff::view::DiffBuffer, _>(id, |b, _| crate::diff::info(b)))?;
+        lua_of(lua, &v)
+    })?)?;
+    diff.set("files", lua.create_function(move |lua, id: Option<u64>| {
+        let id = page(id)?;
+        let v = ed(|e| e.with_buffer_as::<crate::diff::view::DiffBuffer, _>(id, |b, _| crate::diff::files_json(b)))?;
+        lua_of(lua, &v)
+    })?)?;
+    diff.set("comments", lua.create_function(move |lua, id: Option<u64>| {
+        let id = page(id)?;
+        let v = ed(|e| e.with_buffer_as::<crate::diff::view::DiffBuffer, _>(id, |b, _| b.review.comments.iter().map(crate::diff::review::to_json).collect::<Vec<_>>()))?;
+        lua_of(lua, &v)
+    })?)?;
+    diff.set("comment", lua.create_function(move |lua, (spec, id): (LuaValue, Option<u64>)| {
+        let id = page(id)?;
+        let spec: Value = lua.from_value(spec)?;
+        ed(|e| crate::diff::add_comment(e, id, &spec).map_err(|err| mlua::Error::runtime(format!("{err:#}"))))?
+    })?)?;
+    s.set("diff", diff)?;
 
     s.set("message", lua.create_function(|_, msg: String| ed(|e| e.message(msg)))?)?;
     s.set("error", lua.create_function(|_, msg: String| ed(|e| e.error(msg)))?)?;
@@ -1498,6 +1540,12 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                     o.insert(name.to_string(), json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}));
                 }
                 Value::Object(o)
+            })
+            // The diff page's controls, the same way.
+            .or_else(|| {
+                e.with_buffer_as::<crate::diff::view::DiffBuffer, _>(id, |b, _| {
+                    Value::Object(b.hits.iter().map(|(name, r)| (name.clone(), json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}))).collect())
+                })
             })
             // The log page's controls, the same way.
             .or_else(|| {

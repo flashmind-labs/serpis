@@ -63,6 +63,7 @@ thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) swit
 | `RET` / `S-RET` / `M-RET` | send / newline / queue follow-up |
 | `ESC` or `C-c C-c` | abort the agent |
 | `TAB` | fold/unfold the tool output at point |
+| `s-D` | compare and review the current folder's changes (`diff-view`) |
 | `s-,` | open `init.lua` (`M-x reload-config` applies changes; `config-auto-reload` on applies them on save) |
 | `s-=` / `s--` / `s-0` | bigger / smaller / reset font size |
 
@@ -219,6 +220,70 @@ picks among `"done"`, `"waiting"` and `"failed"`; `notify` = `false` turns them 
 without it they show through AppleScript, and a click doesn't. Scripts send their own
 with `serpis.notify(title, body, {buffer = ...})`, and the `notify` hook changes any (return
 `{title = ..., body = ...}`) or drops it (`false`).
+
+## Diffs and review
+
+`s-D` (`diff-view`) compares the repository of the current buffer's folder, on whichever machine
+it is. On a branch of its own it opens against the main branch, from where they forked, uncommitted
+work and untracked files included: what a pull request would contain, plus what isn't committed
+yet. On the main branch it opens on uncommitted changes. `d` picks anything else: uncommitted,
+staged, unstaged, the last commit, any branch, another worktree, or a typed `a..b`, `a...b` or
+`commit:rev`. A project's or worktree's right-click menu in the sidebar has it too (`Review changes`).
+
+It compares tokens instead of lines, as difftastic does, with the grammars serpis highlights with:
+
+- A renamed variable marks the name, not the line.
+- Re-indenting a block or re-wrapping a call isn't a change: those lines dim, and `n` and `p` skip
+  them. Spacing still counts inside strings, and for indentation where it is syntax (Python, YAML,
+  Makefiles). `w` cycles `diff-whitespace`: `smart`, `hide` (they look unchanged), `exact`.
+- As in JetBrains' viewer, lines that are alike sit across from each other, gaps are hatched, and
+  lines that share little are shaded whole instead of marked word by word.
+- An inserted function reads as the whole function, not the end of one and the start of the next.
+- Blocks of `diff-move-min-lines` or more cut here and pasted there show as moved, in purple.
+
+It works on tokens, not on a syntax tree as difftastic does: a change of nesting reads as tokens
+added around unchanged ones. In return it knows every language with a grammar and never fails on
+code that doesn't parse.
+
+| Keys | Action |
+|---|---|
+| `n` `p` | next / previous change, on into the next file |
+| `]` `[` `f` | next / previous file, or pick one |
+| `j` `k` `J` `K` | move, extend the selection (the mouse: drag) |
+| `h` `l` | the other side |
+| `TAB` `x` | open the fold at the cursor, open or close them all |
+| `s` `z` `b` | side by side or unified, wrap, the file list |
+| `v` | mark viewed and go on (changing the file clears it) |
+| `/` `y` `o` | search this file, copy the selection, open the file |
+| `c` `a` | comment on the selected lines, or ask about them (or click or drag line numbers) |
+| `e` `D` `R` | edit, delete, resolve the comment below the line |
+| `S` | send the review to the agent |
+
+In the composer, `RET` is a new line, `s-RET` or `C-c C-c` keeps the comment, `C-c C-s` sends it on its
+own right away, `M-k` switches between fix and question, and `ESC` drops it.
+
+A review goes to the chat the page was opened from, or one you pick (`diff-select-target`), or a
+new chat, or an agent in a terminal, where it is pasted at the prompt (`diff-review-terminal-submit`
+presses Return too). Fixes and questions are sent apart, each with its file, line and code, and the
+chat shows beside the page. While its agent works the review waits its turn
+(`diff-review-while-running`). The page checks the repository every `diff-refresh-seconds`, so what
+the agent changes shows up, and comments follow their code: when it is gone they move above the
+file, marked outdated. Comments and viewed marks are kept per worktree under `reviews/` in the
+config folder.
+
+The other settings are `diff-view-style`, `diff-split-min-width`, `diff-wrap`,
+`diff-context-lines`, `diff-file-tree`, `diff-tree-width`, `diff-default-source`,
+`diff-base-branch`, `diff-open-in`, `diff-review-fix-instructions`,
+`diff-review-question-instructions`, `diff-review-quote-lines` and `diff-review-focus`. Scripts have
+`serpis.diff.open/info/files/comments/comment`, and the hooks `diff-comment-added`,
+`diff-review-send` (return a string to replace what is sent, `false` to not send it) and
+`diff-review-sent`. For example, a house rule on every review:
+
+```lua
+serpis.hook.add("diff-review-send", function(p)
+  return p.text .. "\nCite the file and line in every answer."
+end)
+```
 
 ## Log
 

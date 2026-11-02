@@ -16,6 +16,8 @@ pub mod bridge;
 pub mod client;
 pub mod deploy;
 #[cfg(feature = "node")]
+pub mod gitdiff;
+#[cfg(feature = "node")]
 pub mod keys;
 #[cfg(feature = "node")]
 pub mod logs;

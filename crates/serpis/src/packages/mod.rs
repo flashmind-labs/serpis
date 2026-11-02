@@ -18,7 +18,7 @@ pub const BASE_OWNER: &str = "base";
 pub const SCHEMES: [&str; 3] = ["regular", "emacs", "vim"];
 
 /// Maps whose buffers edit text with the shared editing commands.
-pub const TEXT_MAPS: [&str; 3] = ["text", "chat", "help"];
+pub const TEXT_MAPS: [&str; 4] = ["text", "chat", "help", crate::diff::view::EDITING];
 
 pub fn install_base(ed: &mut Editor) {
     let o = BASE_OWNER;
