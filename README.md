@@ -11,12 +11,12 @@ core is open to extension from Lua or Rust plugins that link the same library.
 
 ## Install (macOS)
 
-[Releases](https://github.com/flashmind-labs/serpis/releases) have `Serpis-macos-arm64.zip`. Unzip
-it and move `Serpis.app` to `~/Applications`. The app isn't notarized yet, so macOS refuses to open
-a downloaded copy until you clear the quarantine flag:
+[Releases](https://github.com/flashmind-labs/serpis/releases) have `Serpis-macos-arm64.dmg`. Open
+it and drag Serpis onto Applications. The app isn't notarized yet, so macOS refuses to open a
+downloaded copy until you clear the quarantine flag:
 
 ```sh
-xattr -dr com.apple.quarantine ~/Applications/Serpis.app
+xattr -dr com.apple.quarantine /Applications/Serpis.app
 ```
 
 Or build it from source (needs Rust and zig 0.16):
@@ -718,7 +718,7 @@ git tag v0.2.0 && git push origin v0.2.0
 `.github/workflows/release.yml` refuses a tag that doesn't match `Cargo.toml`. It builds `serpis-node`
 for Linux x86-64 and arm64 with glibc and with musl (each run on Ubuntu, and on Debian 10 or Alpine,
 before anything is published) and for macOS arm64 and x86-64, builds `Serpis.app` with those nodes'
-checksums inside it, and publishes all of them with a `SHA256SUMS` file as a GitHub release.
+checksums inside it, packs it into a disk image (`scripts/make-dmg.sh`), and publishes all of them with a `SHA256SUMS` file as a GitHub release.
 
 ## Test
 

@@ -119,13 +119,11 @@ jobs:
           SERPIS_NODE_SHA256="$sums" SERPIS_BUNDLE_ONLY=1 SERPIS_APP_DIR="$PWD/app" \
             SERPIS_NODE_BINARY="$PWD/nodes/serpis-node-aarch64-apple-darwin" \
             scripts/install-macos.sh
-          # ditto keeps the app's symlinks and signatures, which a plain zip may not.
-          mkdir dist
-          ditto -c -k --keepParent app/Serpis.app dist/Serpis-macos-arm64.zip
+          scripts/make-dmg.sh app/Serpis.app dist/Serpis-macos-arm64.dmg
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop
-          path: dist/Serpis-macos-arm64.zip
+          path: dist/Serpis-macos-arm64.dmg
           if-no-files-found: error
 
   publish:
