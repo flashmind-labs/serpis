@@ -4549,7 +4549,7 @@ dependencies = [
 
 [[package]]
 name = "serpis"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4592,7 +4592,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4618,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-ai"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4641,14 +4641,14 @@ dependencies = [
 
 [[package]]
 name = "serpis-bin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serpis",
 ]
 
 [[package]]
 name = "serpis-chat"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -4665,7 +4665,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-mobile"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4685,7 +4685,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-node"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "avt",
@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4719,7 +4719,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-testkit"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
