@@ -28,6 +28,8 @@ pub mod workspace;
 #[cfg(feature = "node")]
 pub mod server;
 #[cfg(feature = "node")]
+pub mod indicator;
+#[cfg(feature = "node")]
 pub mod service;
 #[cfg(feature = "node")]
 pub mod terminals;

@@ -9,6 +9,8 @@
 //! - `serpis-node stop-terminals`: stop it, ending every terminal in it.
 //! - `serpis-node install-service` / `uninstall-service`: start the node at boot and after
 //!   crashes (systemd user unit, launchd agent), or stop doing that.
+//! - `serpis-node status`: whether the node and the terminal host run here, and what they hold,
+//!   as JSON (what the menu bar indicator shows). It starts neither.
 //! - `serpis-node system`: what serpis calls this machine when picking a node for it.
 //! - `serpis-node version`.
 
@@ -29,6 +31,7 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => return Err(e),
             };
             tracing::info!("serpis-node {} listening on {}", serpis_node::VERSION, node.socket.display());
+            serpis_node::indicator::start();
             if let Err(e) = std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| serpis_node::service::note_current(&exe)) {
                 tracing::warn!("noting this build as the current one: {e:#}");
             }
@@ -39,6 +42,7 @@ fn main() -> anyhow::Result<()> {
             serpis_node::logs::init("info");
             let socket = serpis_node::terminals::socket();
             tracing::info!("serpis-node {} holding terminals at {}", serpis_node::VERSION, socket.display());
+            serpis_node::indicator::start();
             rt.block_on(serpis_node::terminals::serve(&socket))
         }
         // What remote-install-service does, for a machine without serpis's window.
@@ -98,6 +102,10 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serpis_node::STAMP);
             Ok(())
         }
+        Some("status") => {
+            println!("{}", serde_json::to_string(&rt.block_on(serpis_node::indicator::status()))?);
+            Ok(())
+        }
         Some("system") => {
             println!("{}", serpis_node::deploy::this_system());
             Ok(())
@@ -107,7 +115,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: serpis-node serve | agent | stop | install-service | uninstall-service | terminals | stop-terminals | system | version | stamp");
+            eprintln!("usage: serpis-node serve | agent | stop | install-service | uninstall-service | terminals | stop-terminals | status | system | version | stamp");
             std::process::exit(2);
         }
     }

@@ -490,6 +490,16 @@ the offer off. A machine's chats run the Lua config that machine has (`~/.config
 it isn't copied yet. `scripts/ssh-check.sh <host>`
 runs a whole chat over real ssh in a throwaway directory there, with a mock model.
 
+On a Mac, an icon in the menu bar shows while this machine's node or terminals run, because they
+keep going after serpis quits. Its number counts the chats working right now, and its menu says what
+is running, opens serpis, and has Quit Serpis, which closes the window (saving its session) and
+stops the node and terminals. It asks first when chats are working or terminals are open: terminals
+end, and chats come back when the node next starts. serpis's own `quit` only closes the window.
+`Contents/Helpers/SerpisStatus.app/Contents/MacOS/serpis-status --quit`, inside the app, does the same
+as the menu without asking.
+`status-indicator` turns the icon off. It comes with the app, so a build run with `cargo run`
+doesn't show one, and neither does a Mac reached over ssh.
+
 A chat keeps going when its machine's node stops mid-turn (a crash, a reboot, a kill): when the
 node starts again, the turn continues from what was saved, and the chat says so. A tool that was
 cut off isn't run again (it may have done its work): its result says it was cut off, and the

@@ -1,0 +1,14 @@
+[package]
+name = "serpis-status"
+description = "The menu bar icon that shows while this Mac's serpis node runs, after the window has closed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"

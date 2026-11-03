@@ -10,6 +10,7 @@ Writes, into assets/:
   serpis-logo-dark.svg     mark + wordmark for dark backgrounds
   serpis-logo-light.svg    mark + wordmark for light backgrounds (deeper gold)
   serpis.png               the app icon at 1024 px (scripts/install-macos.sh makes the .icns)
+  serpis-menubar.png       the mark in one color for the menu bar, where macOS tints it to fit
 
 The wordmark is "serpis" in Manrope Bold (SIL Open Font License), letter-spaced -0.03 em,
 converted to outlines so it looks the same everywhere. Pure Python, no dependencies:
@@ -168,9 +169,44 @@ def png():
         f.write(data)
 
 
+def menubar_png():
+    """The mark's shape alone at 18 points tall (2x): black, with its eye cut out."""
+    scale, left, top = 36 / 80, 14, 10
+    w, h = round(72 * scale), 36
+    poly = [((x - left) * scale, (y - top) * scale) for x, y in BODY]
+    edges = list(zip(poly, poly[1:] + poly[:1]))
+    place = lambda c: ((c[0] - left) * scale, (c[1] - top) * scale, c[2] * scale)
+    head, eye = place(HEAD), place(EYE)
+    samples = 8
+
+    def inside(x, y):
+        if math.hypot(x - eye[0], y - eye[1]) <= eye[2]:
+            return False
+        if math.hypot(x - head[0], y - head[1]) <= head[2]:
+            return True
+        crossings = sum(1 for (x0, y0), (x1, y1) in edges if ((y0 <= y < y1) or (y1 <= y < y0)) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0))
+        return crossings % 2 == 1
+
+    rows = []
+    for py in range(h):
+        row = bytearray([0])
+        for px in range(w):
+            hits = sum(inside(px + (i + 0.5) / samples, py + (j + 0.5) / samples) for i in range(samples) for j in range(samples))
+            row += bytes([0, 0, 0, round(255 * hits / samples**2)])
+        rows.append(bytes(row))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b"")
+    with open(os.path.join(ASSETS, "serpis-menubar.png"), "wb") as f:
+        f.write(data)
+
+
 if __name__ == "__main__":
     os.makedirs(ASSETS, exist_ok=True)
     svgs()
     png()
-    for n in ["serpis-mark.svg", "serpis-icon.svg", "serpis-logo-dark.svg", "serpis-logo-light.svg", "serpis.png"]:
+    menubar_png()
+    for n in ["serpis-mark.svg", "serpis-icon.svg", "serpis-logo-dark.svg", "serpis-logo-light.svg", "serpis.png", "serpis-menubar.png"]:
         print(os.path.normpath(os.path.join(ASSETS, n)))

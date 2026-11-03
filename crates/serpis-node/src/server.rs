@@ -1245,6 +1245,9 @@ impl Node {
             }
             Request::Setup { auth, models, settings } => Response::Setup { added: self.apply_setup(auth, models, settings)? },
             Request::SetVars { vars } => {
+                if let Some(on) = vars.get("status-indicator").and_then(Value::as_bool) {
+                    crate::indicator::set_enabled(on);
+                }
                 let mut s = self.lua.state.borrow_mut();
                 for (name, value) in vars {
                     if value.is_null() {

@@ -524,6 +524,9 @@ fn connected(ed: &mut Editor, machine: &str, client: Result<Arc<Client>, String>
                 let vars: serde_json::Map<String, Value> = ed.vars.iter().map(|(k, v)| (k.clone(), v.value.clone())).collect();
                 ed.remote.vars_changed.clear();
                 c.send(Request::SetVars { vars });
+                // From here too: the node may have been started by something other than this app
+                // (an older version still mid-turn, a build run from source), and has no icon.
+                serpis_node::indicator::set_enabled(ed.var("status-indicator").and_then(Value::as_bool).unwrap_or(true));
                 // A node that was already running may have read them before they changed.
                 c.send(Request::ReloadModels);
                 if ed.remote.config_loads > 1 {
@@ -1584,6 +1587,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("remote-offer-setup", json!(true), "When a machine has no models or API keys, offer to copy this machine's there (remote-setup does it any time).");
     ed.defvar("remote-setup-declined", Editor::persisted_state("remote-setup-declined").unwrap_or_else(|| json!([])), "Machines not to offer setting up again.");
     ed.defvar("local-node-binary", json!(""), "The serpis-node this machine's chats run in (\"\": the one beside serpis, else one serpis builds into remote-node-builds). It keeps running when serpis quits; serpis restarts it on a newer build once its chats are idle.");
+    ed.defvar("status-indicator", json!(true), "macOS: show an icon in the menu bar while this machine's node or terminals run, which stays when serpis quits, with what they are doing and a way to stop them.");
     ed.defvar("remote-ssh-command", json!("ssh"), "The ssh program serpis reaches machines with.");
     ed.defvar("remote-ssh-args", json!([]), "More ssh options for machines (after -T, BatchMode and keepalives), e.g. {\"-o\", \"StrictHostKeyChecking=yes\"}.");
 

@@ -548,6 +548,8 @@ Tests:
   run (a freshly built binary's first launch is slow on macOS).
 
 Machines and nodes:
+- The menu bar indicator (`crates/serpis-status`) starts with a node run from the app bundle: a node
+  that a service started from elsewhere has none, and Linux has no indicator yet.
 - Old node builds pile up in `~/.serpis/bin` on machines (one per serpis build): prune the ones
   no node runs from.
 - This machine's node keeps the environment of the window that started it: API keys exported in

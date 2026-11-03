@@ -17,6 +17,9 @@ echo "Building (release)…"
 cargo build --release -q --manifest-path "$root/Cargo.toml" -p serpis-bin
 # This machine's node, which runs its chats (one file, std linked in): beside serpis in the app.
 node_src="${SERPIS_NODE_BINARY:-$("$root/scripts/build-node.sh")}"
+# What shows in the menu bar while the node runs, std linked in as for the node.
+RUSTFLAGS="" CARGO_TARGET_DIR="$root/target/node" cargo build --release -q --manifest-path "$root/Cargo.toml" -p serpis-status
+status_src="$root/target/node/release/serpis-status"
 exe_src="$root/target/release/serpis"
 core_src="$root/target/release/deps/libserpis.dylib"
 core_id="$(otool -D "$core_src" | tail -1)"
@@ -31,6 +34,12 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resourc
 exe="$app/Contents/MacOS/serpis"
 cp "$exe_src" "$exe"
 cp "$node_src" "$app/Contents/MacOS/serpis-node"
+# An app of its own inside this one: running under this app's id, it would count as Serpis being
+# open, and macOS would then answer opening Serpis (Finder, the Dock) by bringing it forward.
+helper="$app/Contents/Helpers/SerpisStatus.app"
+mkdir -p "$helper/Contents/MacOS"
+cp "$status_src" "$helper/Contents/MacOS/serpis-status"
+chmod u+w "$helper/Contents/MacOS/serpis-status"
 cp "$core_src" "$std_src" "$app/Contents/Frameworks/"
 chmod u+w "$exe" "$app/Contents/MacOS/serpis-node" "$app/Contents/Frameworks/"*
 chmod +x "$app/Contents/MacOS/serpis-node"
@@ -55,6 +64,23 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/serpis.icns"
 
+cat > "$helper/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Serpis Status</string>
+  <key>CFBundleIdentifier</key><string>dev.serpis.Serpis.status</string>
+  <key>CFBundleExecutable</key><string>serpis-status</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$version</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+PLIST
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,6 +104,7 @@ PLIST
 # Ad-hoc signature (this Mac only): libraries and the node first, then the app.
 codesign --force --sign - "$app/Contents/Frameworks/"*.dylib
 codesign --force --sign - "$app/Contents/MacOS/serpis-node"
+codesign --force --sign - "$helper"
 codesign --force --sign - "$app"
 
 mkdir -p "$app_dir" "$bin_dir"
