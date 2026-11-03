@@ -135,6 +135,92 @@ local steps = {
     return false
   end,
   function(go)
+    -- Selecting: a drag over one record's text.
+    serpis.command.run("log-cycle-level", "info")
+    when(function() return d.composer()["text:careful now"] ~= nil and d.composer()["text:hello from lua"] ~= nil end, function()
+      local r = d.composer()["text:careful now"]
+      local y = r.y + r.h / 2
+      d.mouse_move(r.x + 1, y)
+      serpis.defer(60, function()
+        d.mouse_button(r.x + 1, y, "left", true)
+        serpis.defer(60, function()
+          d.mouse_move(r.x + r.w / 2, y)
+          serpis.defer(60, function()
+            d.mouse_move(r.x + r.w + 60, y)
+            serpis.defer(100, function()
+              d.mouse_button(r.x + r.w + 60, y, "left", false)
+              serpis.defer(100, go)
+            end)
+          end)
+        end)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("a drag selects what a record says", d.log_selected(), "careful now")
+    -- The key that copies it, as the keyboard sends it.
+    T.press("y")
+    serpis.defer(150, function()
+      local ms = d.messages()
+      T.check("y copies it", ms[#ms], "Copied")
+      -- A click lets go of it, without opening the record.
+      local r = d.composer()["text:careful now"]
+      local h = r.h
+      local x, y = r.x + 5, r.y + r.h / 2
+      d.mouse_move(x, y)
+      serpis.defer(60, function()
+        d.mouse_button(x, y, "left", true)
+        d.mouse_button(x, y, "left", false)
+        serpis.defer(200, function()
+          T.check("a click clears the selection", d.log_selected(), nil)
+          T.check("and doesn't open the record", d.composer()["text:careful now"].h, h)
+          -- Across records, from the middle of one to the middle of the next.
+          local a, b = d.composer()["text:hello from lua"], d.composer()["text:careful now"]
+          local cw = a.w / #"hello from lua"
+          local from_x, from_y = a.x + cw * 6 + 1, a.y + a.h / 2
+          local to_x, to_y = b.x + cw * 7 + 1, b.y + b.h / 2
+          d.mouse_move(from_x, from_y)
+          serpis.defer(60, function()
+            d.mouse_button(from_x, from_y, "left", true)
+            serpis.defer(60, function()
+              d.mouse_move(from_x + 20, from_y + 2)
+              serpis.defer(60, function()
+                d.mouse_move(to_x, to_y)
+                serpis.defer(100, function()
+                  d.mouse_button(to_x, to_y, "left", false)
+                  serpis.defer(100, go)
+                end)
+              end)
+            end)
+          end)
+        end)
+      end)
+    end)
+    return false
+  end,
+  function(go)
+    T.check("a drag across records takes them all", d.log_selected(), "from lua\nn = 3\nwho = test\ncareful")
+    -- A click with nothing selected still opens a record.
+    local r = d.composer()["text:hello from lua"]
+    local x, y = r.x + 5, r.y + r.h / 2
+    d.mouse_move(x, y)
+    serpis.defer(60, function()
+      d.mouse_button(x, y, "left", true)
+      d.mouse_button(x, y, "left", false)
+      serpis.defer(200, function()
+        T.check("that click only let go", d.log_selected(), nil)
+        d.mouse_button(x, y, "left", true)
+        d.mouse_button(x, y, "left", false)
+        serpis.defer(200, function()
+          T.check("the next click opens the record", d.composer()["text:hello from lua"].h > r.h, true)
+          go()
+        end)
+      end)
+    end)
+    return false
+  end,
+  function(go)
     -- Clear empties it; new records still come.
     click("clear")
     when(function() return not has("careful now") end, function()

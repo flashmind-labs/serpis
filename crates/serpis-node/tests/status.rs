@@ -72,3 +72,43 @@ fn status_reports_what_runs_and_starts_nothing() {
     assert_eq!((s["node"].as_bool(), s["terminal_host"].as_bool()), (Some(false), Some(false)), "{s}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A client that leaves must take its connection with it: this node has few file handles, sees
+/// more clients come and go than it has, and must still serve the next one.
+#[test]
+fn connections_are_freed_when_clients_leave() {
+    let root = std::env::temp_dir().join(format!("ss-{}", &uuid::Uuid::now_v7().simple().to_string()[24..]));
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::create_dir_all(root.join("n")).unwrap();
+    let exe = env!("CARGO_BIN_EXE_serpis-node");
+    let mut serve = node(&root);
+    serve.args(["serve"]);
+    let mut limited = Command::new("sh");
+    limited.args(["-c", &format!("ulimit -n 64; exec '{exe}' serve")]);
+    for (k, v) in serve.get_envs() {
+        limited.env(k, v.unwrap());
+    }
+    let mut server: Child = limited.stderr(std::process::Stdio::null()).stdout(std::process::Stdio::null()).spawn().unwrap();
+    wait_for(|| status(&root)["node"] == true);
+    let handles = |pid: u32| Command::new("lsof").args(["-n", "-p", &pid.to_string()]).output().map(|o| o.stdout.iter().filter(|b| **b == b'\n').count()).unwrap_or(0);
+    let before = handles(server.id());
+    for _ in 0..80 {
+        status(&root);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let after = handles(server.id());
+
+    let home = root.join("home").to_string_lossy().into_owned();
+    let target = Target::Local(root.join("n/n.sock"));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let opened = rt.block_on(async {
+        let (c, _events) = tokio::time::timeout(std::time::Duration::from_secs(5), Client::connect(&target, "status-test")).await.map_err(|_| anyhow::anyhow!("connecting timed out"))??;
+        tokio::time::timeout(std::time::Duration::from_secs(5), c.call(Request::New { cwd: home.clone(), model: None, thinking: None, chat: None })).await.map_err(|_| anyhow::anyhow!("opening a chat timed out"))?
+    });
+    assert!(node(&root).arg("stop").status().unwrap().success());
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(after <= before + 2, "connections piled up: {before} open files before, {after} after");
+    opened.expect("a new client is served");
+}

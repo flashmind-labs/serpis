@@ -1463,6 +1463,11 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
     // Raw pointer input for tests: mouse_move(x, y), mouse_button(x, y, "left"|"right"|"middle", pressed, mods).
+    // What the *Log* page has selected.
+    debug.set("log_selected", lua.create_function(|_, ()| ed(|e| {
+        let id = e.current_buffer();
+        e.with_buffer_as::<crate::log_view::LogBuffer, _>(id, |b, _| b.selected()).flatten()
+    }))?)?;
     debug.set("mouse_move", lua.create_function(|_, (x, y): (f32, f32)| ed(|e| {
         e.injected_events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
         e.ctx.request_repaint();

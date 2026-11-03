@@ -174,7 +174,15 @@ async fn accept(listener: tokio::net::UnixListener, tx: mpsc::Sender<Msg>) {
     let me = nix::unistd::getuid().as_raw();
     let mut next = 0u64;
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            // Out of file handles, most likely: it fails at once until some are freed.
+            Err(e) => {
+                tracing::warn!("accepting a connection: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                continue;
+            }
+        };
         // The directory already keeps others out; this holds even if its mode is changed.
         match stream.peer_cred() {
             Ok(c) if c.uid() == me => {}
@@ -253,7 +261,11 @@ async fn connection(stream: tokio::net::UnixStream, client: u64, tx: mpsc::Sende
         }
     }
     let _ = tx.send(Msg::Gone { client });
+    // The writer ends once nothing can send to it any more, and these two are held here: kept,
+    // it would never end, and the connection would stay open for as long as the node runs.
     drop(terminals);
+    drop(otx);
+    drop(dtx);
     let _ = writer.await;
 }
 

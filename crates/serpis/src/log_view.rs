@@ -1,7 +1,8 @@
 //! The `*Log*` page: what serpis logs (and what it also prints to the terminal it was started
 //! from), and what each connected machine's node logs, where its chats run. A row a record:
-//! when, how severe, where from, what; a click opens one in full. Filtered by level and text,
-//! it follows new records unless scrolled up. Scripts log to it with `serpis.log`.
+//! when, how severe, where from, what; a click opens one in full, a drag selects what they say.
+//! Filtered by level and text, it follows new records unless scrolled up. Scripts log to it with
+//! `serpis.log`.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -15,6 +16,57 @@ use crate::impl_any;
 use crate::theme::Theme;
 
 pub const NAME: &str = "*Log*";
+
+/// A place in what a record says: its `seq`, and a character of [`text_of`].
+type Spot = (u64, usize);
+
+/// What a record says in full: its message, then its fields.
+fn text_of(r: &LogRecord) -> String {
+    let mut s = r.message.clone();
+    for (k, v) in &r.fields {
+        s.push_str(&format!("\n{k} = {v}"));
+    }
+    s
+}
+
+/// The characters of the record `seq`, `len` long, that a selection covers.
+fn selected_in(selection: (Spot, Spot), seq: u64, len: usize) -> Option<std::ops::Range<usize>> {
+    let (from, to) = if selection.0 <= selection.1 { selection } else { (selection.1, selection.0) };
+    if seq < from.0 || seq > to.0 {
+        return None;
+    }
+    let start = if seq == from.0 { from.1.min(len) } else { 0 };
+    let end = if seq == to.0 { to.1.min(len) } else { len };
+    (start < end).then_some(start..end)
+}
+
+/// The text a selection covers: a line for each record it reaches.
+fn selected_text<'a>(records: impl Iterator<Item = &'a LogRecord>, selection: (Spot, Spot)) -> String {
+    let mut parts = Vec::new();
+    for r in records {
+        let text = text_of(r);
+        if let Some(range) = selected_in(selection, r.seq, text.chars().count()) {
+            parts.push(text.chars().skip(range.start).take(range.len()).collect::<String>());
+        }
+    }
+    parts.join("\n")
+}
+
+/// Shade the characters `range` of `galley`, drawn at `origin`.
+fn paint_selected(painter: &egui::Painter, galley: &egui::Galley, origin: egui::Pos2, range: &std::ops::Range<usize>, color: Color32) {
+    use egui::epaint::text::CharIndex;
+    let mut start = 0;
+    for row in &galley.rows {
+        let n = row.char_count_excluding_newline().0;
+        let (a, b) = (range.start.max(start), range.end.min(start + n));
+        if a < b {
+            let top_left = origin + row.pos.to_vec2();
+            let (x0, x1) = (row.x_offset(CharIndex(a - start)), row.x_offset(CharIndex(b - start)));
+            painter.rect_filled(Rect::from_min_max(egui::pos2(top_left.x + x0, top_left.y), egui::pos2(top_left.x + x1, top_left.y + row.height())), 0.0, color);
+        }
+        start += row.char_count_including_newline().0;
+    }
+}
 
 /// Where records come from: this window, or a machine's node.
 struct Source {
@@ -66,6 +118,8 @@ pub struct LogBuffer {
     scroll: f32,
     /// Records opened in full: (source, seq).
     open: HashSet<(usize, u64)>,
+    /// What a drag selected: where it began, and where it is.
+    selection: Option<(Spot, Spot)>,
     polled: Option<Instant>,
     /// Its controls as last drawn (`serpis.debug.composer` reads them).
     pub hits: Vec<(String, Rect)>,
@@ -89,7 +143,7 @@ pub fn show(ed: &mut Editor) {
         Some(id) => id,
         None => {
             let level = ed.var("log-view-level").and_then(|v| v.as_str().map(rank)).unwrap_or(3);
-            let b = LogBuffer { id: None, sources: vec![Source::new(None)], current: 0, level, search: String::new(), follow: true, scroll: 0.0, open: HashSet::new(), polled: None, hits: Vec::new() };
+            let b = LogBuffer { id: None, sources: vec![Source::new(None)], current: 0, level, search: String::new(), follow: true, scroll: 0.0, selection: None, open: HashSet::new(), polled: None, hits: Vec::new() };
             let id = ed.add_buffer(NAME, Box::new(b));
             ed.with_buffer_as::<LogBuffer, _>(id, |b, _| b.id = Some(id));
             id
@@ -183,6 +237,7 @@ impl LogBuffer {
     pub fn cycle_source(&mut self) -> String {
         self.current = (self.current + 1) % self.sources.len();
         self.open.clear();
+        self.selection = None;
         self.follow = true;
         self.source().label()
     }
@@ -193,10 +248,17 @@ impl LogBuffer {
             Some(i) => {
                 self.current = i;
                 self.follow = true;
+                self.selection = None;
                 true
             }
             None => false,
         }
+    }
+
+    /// What is selected, if anything.
+    pub fn selected(&self) -> Option<String> {
+        let selection = self.selection?;
+        Some(selected_text(self.source().records.iter(), selection)).filter(|s| !s.is_empty())
     }
 
     pub fn source_label(&self) -> String {
@@ -211,6 +273,7 @@ impl LogBuffer {
             serpis_node::logs::clear();
         }
         self.open.clear();
+        self.selection = None;
     }
 
     /// Read what is new: this window's records at once, the nodes' every second.
@@ -403,19 +466,15 @@ impl Buffer for LogBuffer {
         let cur = self.current;
         // The full text of an open record, laid out to the message's width.
         let full = |r: &LogRecord| -> std::sync::Arc<egui::Galley> {
-            let mut s = r.message.clone();
-            for (k, v) in &r.fields {
-                s.push_str(&format!("\n{k} = {v}"));
-            }
-            let mut job = egui::text::LayoutJob::simple(s, mono.clone(), t.fg, msg_w);
+            let mut job = egui::text::LayoutJob::simple(text_of(r), mono.clone(), t.fg, msg_w);
             job.wrap.max_rows = 400;
             painter.layout_job(job)
         };
         let open_extra = |g: &egui::Galley| if narrow { g.size().y + line_h + 12.0 * k } else { g.size().y + row_h * 0.6 };
         let heights: Vec<f32> = shown.iter().map(|r| if self.open.contains(&(cur, r.seq)) { open_extra(&full(r)) } else { row_h }).collect();
         let content: f32 = heights.iter().sum();
-        let resp = ui.interact(list, id.with("rows"), egui::Sense::hover());
-        if resp.hovered() {
+        let resp = ui.interact(list, id.with("rows"), egui::Sense::click_and_drag());
+        if resp.contains_pointer() {
             let d = ui.input(|i| i.smooth_scroll_delta.y);
             if d != 0.0 {
                 self.scroll -= d;
@@ -434,7 +493,19 @@ impl Buffer for LogBuffer {
         }
         let clip = painter.with_clip_rect(list);
         let mut ry = list.top() - self.scroll;
+        let pointer = ui.input(|i| i.pointer.latest_pos());
         let mut toggle = None;
+        // The rows drawn: what a drag or a click lands on.
+        struct Drawn {
+            seq: u64,
+            row: Rect,
+            galley: std::sync::Arc<egui::Galley>,
+            origin: egui::Pos2,
+            /// Its end stands for the rest of the record's text, which a closed row doesn't show.
+            closed_len: Option<usize>,
+            len: usize,
+        }
+        let mut drawn: Vec<Drawn> = Vec::new();
         for (r, h) in shown.iter().zip(&heights) {
             if ry + h < list.top() {
                 ry += h;
@@ -444,7 +515,6 @@ impl Buffer for LogBuffer {
                 break;
             }
             let row = Rect::from_min_size(egui::pos2(rect.left(), ry), egui::vec2(rect.width(), *h));
-            let rresp = ui.interact(row.intersect(list), id.with(("row", r.seq)), egui::Sense::click());
             let (badge, color) = level_style(&t, &r.level);
             let wash = match r.level.as_str() {
                 "error" => crate::chrome::tint(t.red, 0.08),
@@ -452,7 +522,7 @@ impl Buffer for LogBuffer {
                 _ => Color32::TRANSPARENT,
             };
             clip.rect_filled(row, 0.0, wash);
-            if rresp.hovered() {
+            if resp.contains_pointer() && pointer.is_some_and(|p| row.contains(p)) {
                 clip.rect_filled(row, 0.0, crate::chrome::hover_bg(&t));
             }
             // A thin rule between rows, for two-line ones.
@@ -469,12 +539,26 @@ impl Buffer for LogBuffer {
             crate::chrome::text(&clip, egui::pos2(target_x, my), &short_target(&r.target), mono_small.clone(), t.fg_dim, tw);
             // What it says: its own column, or the second line.
             let (my, top) = if narrow { (my + line_h, ry + 3.0 * k + line_h) } else { (my, ry + row_h * 0.3) };
+            let len = text_of(r).chars().count();
+            let selected = self.selection.and_then(|s| selected_in(s, r.seq, len));
             if self.open.contains(&(cur, r.seq)) {
-                clip.galley(egui::pos2(msg_x, top), full(r), t.fg);
+                let origin = egui::pos2(msg_x, top);
+                let galley = full(r);
+                if let Some(range) = &selected {
+                    paint_selected(&clip, &galley, origin, range, t.selection);
+                }
+                clip.galley(origin, galley.clone(), t.fg);
+                drawn.push(Drawn { seq: r.seq, row, galley, origin, closed_len: None, len });
             } else {
                 // One line: the message's first, then its fields as chips.
                 let first = r.message.lines().next().unwrap_or("");
                 let more = r.message.lines().nth(1).is_some();
+                let galley = painter.layout_no_wrap(first.to_string(), mono.clone(), t.fg);
+                let origin = egui::pos2(msg_x, my - galley.size().y / 2.0);
+                if let Some(range) = &selected {
+                    paint_selected(&clip, &galley, origin, range, t.selection);
+                }
+                drawn.push(Drawn { seq: r.seq, row, galley, origin, closed_len: Some(first.chars().count()), len });
                 let mw = crate::chrome::text(&clip, egui::pos2(msg_x, my), &format!("{first}{}", if more { " …" } else { "" }), mono.clone(), if r.level == "debug" || r.level == "trace" { t.fg_dim } else { t.fg }, msg_w);
                 let mut fx = msg_x + mw + 10.0 * k;
                 for (key, v) in &r.fields {
@@ -489,17 +573,53 @@ impl Buffer for LogBuffer {
                     fx += w + 6.0 * k;
                 }
             }
-            if rresp.clicked() {
-                toggle = Some(r.seq);
-            }
             ry += h;
         }
         drop(shown);
+        // The place in the text nearest a point: its row, then its character.
+        let spot_at = |p: egui::Pos2| -> Option<Spot> {
+            let d = drawn.iter().find(|d| p.y < d.row.bottom()).or(drawn.last())?;
+            let at = d.galley.cursor_from_pos(p - d.origin).index.0;
+            // Past what a closed row shows is the rest of it.
+            Some((d.seq, if d.closed_len.is_some_and(|n| at >= n) { d.len } else { at }))
+        };
+        if resp.contains_pointer() && pointer.is_some_and(|p| p.x >= msg_x && drawn.iter().any(|d| d.row.contains(p))) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+        if resp.drag_started() {
+            // Where the press was, not where the pointer has got to by now.
+            let from = ui.input(|i| i.pointer.press_origin()).and_then(spot_at);
+            self.selection = from.map(|s| (s, s));
+            self.follow = false;
+        }
+        if resp.dragged()
+            && let Some(p) = pointer
+        {
+            if let (Some(selection), Some(to)) = (&mut self.selection, spot_at(p)) {
+                selection.1 = to;
+            }
+            // Held past the top or bottom, the list moves under it.
+            let by = if p.y < list.top() { p.y - list.top() } else if p.y > list.bottom() { p.y - list.bottom() } else { 0.0 };
+            if by != 0.0 {
+                self.scroll = (self.scroll + by * 0.25).clamp(0.0, max);
+                ui.ctx().request_repaint();
+            }
+        }
+        if resp.clicked() {
+            // With something selected, a click only lets go of it.
+            if self.selection.take().is_none() {
+                toggle = pointer.and_then(|p| drawn.iter().find(|d| d.row.contains(p))).map(|d| d.seq);
+            }
+        }
         if let Some(seq) = toggle
             && !self.open.remove(&(cur, seq))
         {
             self.open.insert((cur, seq));
             self.follow = false;
+        }
+        // What each row says, for scripts and tests to find it by.
+        for d in &drawn {
+            hits.push((format!("text:{}", d.galley.text().lines().next().unwrap_or("")), Rect::from_min_size(d.origin, d.galley.size())));
         }
         self.hits = hits;
         // New records come without any input event.
@@ -603,13 +723,59 @@ pub fn install(ed: &mut Editor) {
             })
         })
     });
+    ed.define_command("log-copy", "Copy the text selected in the *Log* page (drag over records to select).", o, move |ed, _| {
+        let id = ed.current_buffer();
+        let Some(selected) = ed.with_buffer_as::<LogBuffer, _>(id, |b, _| b.selected()) else { anyhow::bail!("Not in the *Log* page (log-view)") };
+        match selected {
+            Some(text) => {
+                ed.copy_to_clipboard(&text);
+                ed.message("Copied");
+            }
+            None => ed.message("Nothing selected: drag over the text to select it"),
+        }
+        Ok(())
+    });
     ed.define_command("log-clear", "Clear the log records the *Log* page shows (new ones still come).", o, move |ed, _| {
         with_log(ed, &mut |b| {
             b.clear();
             None
         })
     });
-    for (k, c) in [("/", "log-search"), ("l", "log-cycle-level"), ("f", "log-toggle-follow"), ("G", "log-end"), ("s", "log-cycle-source"), ("c", "log-clear"), ("q", "kill-current-buffer")] {
+    for (k, c) in [("s-c", "log-copy"), ("M-w", "log-copy"), ("y", "log-copy"), ("/", "log-search"), ("l", "log-cycle-level"), ("f", "log-toggle-follow"), ("G", "log-end"), ("s", "log-cycle-source"), ("c", "log-clear"), ("q", "kill-current-buffer")] {
         ed.bind("log", k, c, o);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(seq: u64, message: &str) -> LogRecord {
+        LogRecord { seq, time: 0, level: "info".into(), target: "test".into(), message: message.into(), fields: Vec::new() }
+    }
+
+    #[test]
+    fn a_selection_covers_characters_within_a_record_and_whole_ones_between() {
+        let rs = [record(1, "first line"), record(2, "second"), record(3, "third line")];
+        // Within one, either way round.
+        assert_eq!(selected_text(rs.iter(), ((1, 6), (1, 10))), "line");
+        assert_eq!(selected_text(rs.iter(), ((1, 10), (1, 6))), "line");
+        // Across several, in the order they show, whichever way the drag went.
+        assert_eq!(selected_text(rs.iter(), ((1, 6), (3, 5))), "line\nsecond\nthird");
+        assert_eq!(selected_text(rs.iter(), ((3, 5), (1, 6))), "line\nsecond\nthird");
+        // Nothing dragged over: nothing.
+        assert_eq!(selected_text(rs.iter(), ((2, 3), (2, 3))), "");
+    }
+
+    #[test]
+    fn it_counts_characters_not_bytes_and_includes_fields() {
+        let mut r = record(1, "naïve → ok");
+        assert_eq!(selected_text([&r].into_iter(), ((1, 2), (1, 7))), "ïve →");
+        r.fields.push(("n".into(), "3".into()));
+        assert_eq!(text_of(&r), "naïve → ok\nn = 3");
+        // The whole of it, for a record a selection passes through.
+        assert_eq!(selected_in(((0, 0), (2, 0)), 1, 16), Some(0..16));
+        assert_eq!(selected_in(((1, 99), (1, 4)), 1, 16), Some(4..16));
+        assert_eq!(selected_in(((2, 0), (3, 0)), 1, 16), None);
     }
 }

@@ -306,7 +306,8 @@ end)
 `log-view` opens the `*Log*` page: what serpis logs (also printed to the terminal it was started
 from, as before), and the log of each connected machine's serpis-node, where its chats and their
 agents run (Claude Code's included). A row a record, with when, how severe, where from and what;
-a click opens one in full. `l` cycles the level shown (or the Errors · Warnings · Info · Debug
+a click opens one in full, and dragging selects what they say, across records too (`s-c`, `M-w` or `y`
+copies it: `log-copy`; dragging past the end of a closed record takes all of it). `l` cycles the level shown (or the Errors · Warnings · Info · Debug
 control), `/` searches, `f` follows the newest (scrolling up pauses, `G` follows again), `s` shows
 the next machine's log, `c` clears, `q` closes. `log-level` says what is kept (`"debug"` for
 more); `log-view-level` what shows first.
