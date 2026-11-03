@@ -135,12 +135,31 @@ impl Client {
         if let Target::Ssh { ask, .. } = &mut target {
             *ask = obtain.is_some();
         }
+        #[cfg(feature = "node")]
+        let mut replaced = false;
         // At most: get a build, install it, connect.
         for _ in 0..3 {
             let Failed { stderr, error } = match Self::connect_once(&target, name).await {
                 Ok(c) => return Self::upgrade(c, &target, name, &stage).await,
                 Err(f) => f,
             };
+            // This machine's node takes the connection but won't greet it: restarting, so it
+            // only needs another try, or stuck, and nothing but replacing it helps.
+            #[cfg(feature = "node")]
+            if let Target::Own { socket, .. } = &target
+                && !replaced
+                && tokio::net::UnixStream::connect(socket).await.is_ok()
+            {
+                replaced = true;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok(c) = Self::connect_once(&target, name).await {
+                    return Self::upgrade(c, &target, name, &stage).await;
+                }
+                if crate::bridge::stop_stuck(socket).await {
+                    continue;
+                }
+                return Err(error);
+            }
             let Target::Ssh { host, ssh, ssh_args, env, deploy, ask, .. } = &mut target else { return Err(error) };
             if let Some(node) = crate::deploy::wanted(&stderr).and_then(|h| deploy.iter().find(|n| n.sha256 == h)).cloned() {
                 stage(Stage::Installing);
@@ -240,7 +259,14 @@ impl Client {
             }
             Target::Command(argv) => Self::spawn(argv).map_err(failed)?,
         };
-        match client.call(Request::Hello { version: wire::VERSION, client: name.to_string() }).await {
+        let greeting = client.call(Request::Hello { version: wire::VERSION, client: name.to_string() });
+        // This machine's node answers at once unless it is stuck; another machine may be slow.
+        let answer = if matches!(target, Target::Own { .. }) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), greeting).await.unwrap_or_else(|_| Err(anyhow!("the node didn't answer")))
+        } else {
+            greeting.await
+        };
+        match answer {
             Ok(Response::Hello { host, serpis, home, setup, build, notes, .. }) => client.hello = Hello { host, serpis, home, setup, build, outdated: false, notes },
             Ok(other) => return Err(failed(anyhow!("the node answered hello with {other:?}"))),
             Err(e) => {

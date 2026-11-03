@@ -56,6 +56,35 @@ pub fn start_node(exe: &Path, socket: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Stop a node that holds `socket` but no longer answers, so another can take its place. Who it is
+/// comes from the `node.pid` beside the socket, and it is only stopped if that process really is a
+/// serpis-node (a process id can be reused). Whether it is gone.
+pub async fn stop_stuck(socket: &Path) -> bool {
+    use nix::sys::signal::{Signal, kill};
+    let Some(pid) = socket.parent().and_then(|d| std::fs::read_to_string(d.join("node.pid")).ok()).and_then(|t| t.trim().parse::<i32>().ok()).filter(|p| *p > 1) else {
+        return false;
+    };
+    let program = |pid: i32| std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "comm="]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    if !program(pid).contains("serpis-node") {
+        tracing::warn!("{} holds the node's socket but doesn't answer, and process {pid} in node.pid isn't a node", socket.display());
+        return false;
+    }
+    tracing::warn!("the node at {} (process {pid}) doesn't answer: replacing it", socket.display());
+    let process = nix::unistd::Pid::from_raw(pid);
+    let _ = kill(process, Signal::SIGTERM);
+    for attempt in 0..60 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if !program(pid).contains("serpis-node") {
+            return true;
+        }
+        // It had its chance to finish up.
+        if attempt == 40 {
+            let _ = kill(process, Signal::SIGKILL);
+        }
+    }
+    false
+}
+
 pub async fn wait_for(socket: &Path) -> Result<UnixStream> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
