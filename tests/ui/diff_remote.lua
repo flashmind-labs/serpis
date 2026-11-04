@@ -17,6 +17,7 @@ local home = sh("cd '" .. b .. "/home' && pwd -P")
 local proj = home .. "/proj"
 local git = "git -c user.email=t@t -c user.name=t"
 sh("cd '" .. proj .. "' && git init -q -b main && printf 'fn on_the_box() {\\n    one();\\n}\\n' > src/x.rs && git add . && " .. git .. " commit -qm init")
+sh("cd '" .. proj .. "' && git init -q --bare '" .. b .. "/origin.git' -b main && git remote add origin '" .. b .. "/origin.git' && git push -q -u origin main")
 write(proj .. "/src/x.rs", "fn on_the_box() {\n    two();\n}\n")
 local env = "HOME=" .. home .. " SERPIS_AGENT_DIR=" .. home .. "/.serpis/agent SERPIS_NODE_DIR=" .. b .. "/node SERPIS_NODE_SOCKET=" .. b .. "/node/node.sock SERPIS_TERMINAL_SOCKET=" .. b .. "/t.sock"
 serpis.var.set("remote-rayfish", false)
@@ -39,6 +40,14 @@ local steps = {
       when(function() return serpis.buffer.kind() == "diff" and info().rows > 0 end, go)
     end)
     return false
+  end,
+  function(go)
+    when(function() return info().upstream ~= nil end, go)
+    return false
+  end,
+  function()
+    T.check("the machine's node says how main stands against its remote", info().upstream and info().upstream.upstream, "origin/main")
+    T.check("up to date there", info().upstream and info().upstream.warning, nil)
   end,
   function()
     T.check("the page belongs to the machine", info().machine, "box1")

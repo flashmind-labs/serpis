@@ -112,11 +112,11 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.session.directory", "(): where new sessions are saved."),
     // UI.
     ("serpis.ui.status", "(name, fn(buf) -> string | nil): a segment in the status bar (buf: the focused buffer)."),
-    ("serpis.ui.header", "(name, fn(buf) -> string | nil): a segment in every window's header (buf: that window's buffer)."),
-    ("serpis.minibuffer.read", "({prompt, candidates = {string | {label, value?, detail?}}, initial?, require_match?, sort?, frecency = category?, on_accept = fn({value, input}), on_select?, on_cancel?}): ask with completion; with `frecency`, picks are remembered and rank higher next time."),
+    ("serpis.ui.header", "(name, fn(buf) -> string | nil, {command?}?): a segment in every window's header (buf: that window's buffer); a click on it runs `command`."),
+    ("serpis.minibuffer.read", "({prompt, candidates = {string | {label, value?, detail?, checked?, section?}}, initial?, require_match?, sort?, frecency = category?, on_accept = fn({value, input}), on_select?, on_cancel?, on_toggle = fn(value)?, search?}): ask with completion; with `frecency`, picks are remembered and rank higher next time. `checked` draws a checkbox and `section` a heading above the first of each. With `on_toggle`, RET and clicks call it and the prompt stays open (the keyboard-quit command closes it, set_candidates updates it). `search = false` has no search field: SPC does what RET does, j and k move."),
     ("serpis.minibuffer.y_or_n", "(prompt, fn(yes)): a one-key yes/no question."),
     ("serpis.minibuffer.loading", "(on?): show (true) or hide (false) the open prompt's loading bar while more candidates are fetched; without an argument, whether it shows."),
-    ("serpis.minibuffer.set_candidates", "(list): replace the open prompt's candidates (strings or {label, value, detail}), keeping the selection."),
+    ("serpis.minibuffer.set_candidates", "(list): replace the open prompt's candidates (strings or {label, value, detail, checked, section}), keeping the selection."),
     ("serpis.busy.start", "(key, label): show work in progress, a card with a spinner (busy-indicator), until stopped; again with the same key changes its label."),
     ("serpis.busy.stop", "(key): it's done."),
     ("serpis.busy.list", "(): what is in progress: {key, label, seconds}, oldest first."),
@@ -154,7 +154,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.workspace.back_and_forth", "(): to the previous workspace."),
     // The diff page (id: its buffer; nil = the current buffer).
     ("serpis.diff.open", "({dir?, source?, machine?}?): show the diff page for a folder (the current buffer's by default), comparing `source` (\"uncommitted\", \"staged\", \"unstaged\", \"a..b\", \"a...b\", \"commit:rev\", a branch; diff-default-source by default); returns its buffer id. It reads in the background: serpis.diff.info tells when it has."),
-    ("serpis.diff.info", "(id?): {root, machine, compared, loaded, loading, error, file, view, whitespace, wrap, change, changes, rows, cursor, side, selection = {side, line, end_line} | nil, writing = {text, kind, line, end_line, side} | nil, target, drafts}."),
+    ("serpis.diff.info", "(id?): {root, machine, compared, loaded, loading, error, file, view, whitespace, wrap, change, changes, rows, cursor, side, selection = {side, line, end_line} | nil, writing = {text, kind, line, end_line, side} | nil, target, drafts, upstream = {upstream, tip, ahead, behind, unfetched, checked, warning} | nil (how the branch \"vs\" compares with stands against its remote; warning when it is out of date)}."),
     ("serpis.diff.files", "(id?): the files that differ: {path, old_path, status, untracked, binary, added, removed, viewed, comments (how many, not counting resolved ones)}."),
     ("serpis.diff.comments", "(id?): the review's comments: {id, path, side = \"old\" | \"new\", line, end_line, text, kind = \"fix\" | \"question\", state = \"draft\" | \"sent\" | \"resolved\", code, outdated}."),
     ("serpis.diff.comment", "({text, line, end_line?, side?, kind?, path?}, id?): add a comment; returns its id. diff-send-review sends the comments."),

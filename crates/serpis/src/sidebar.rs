@@ -1343,10 +1343,10 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
 
-    // Actions: a "New chat" button, then terminal and worktree as icon buttons.
+    // Actions: a "New chat" button, then terminal, worktree and the rest as icon buttons.
     let act_y = search_r.bottom() + 8.0 * k;
     let bh = (32.0 * k).round();
-    let new_r = Rect::from_min_size(egui::pos2(inner.left(), act_y), egui::vec2(inner.width() - 3.0 * (bh + 4.0 * k), bh));
+    let new_r = Rect::from_min_size(egui::pos2(inner.left(), act_y), egui::vec2(inner.width() - 4.0 * (bh + 4.0 * k), bh));
     let nresp = ui.interact(new_r, ui.scope_id().with("sidebar-new"), Sense::click()).on_hover_text("New chat in this project");
     let p = ui.painter();
     p.rect_filled(new_r, 8.0 * k, if nresp.hovered() { chrome::tint(t.accent, 0.22) } else { chrome::tint(t.accent, 0.13) });
@@ -1373,7 +1373,12 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     if chrome::ghost_button(ui, wt_r, ui.scope_id().with("sidebar-wt"), t, &chrome::with_key("New chat in a new worktree", &keys, "worktree-new-chat"), |p, r, c| chrome::branch(p, r.expand(1.0), c)).clicked() {
         acts.push(Act::Run("worktree-new-chat".into(), Vec::new()));
     }
-    let open_r = Rect::from_min_size(egui::pos2(wt_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
+    let review_r = Rect::from_min_size(egui::pos2(wt_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
+    ed.debug_rects.insert("sidebar-review", review_r);
+    if chrome::ghost_button(ui, review_r, ui.scope_id().with("sidebar-review"), t, &chrome::with_key("Review changes", &keys, "diff-view"), chrome::diff).clicked() {
+        acts.push(Act::Run("diff-view".into(), Vec::new()));
+    }
+    let open_r = Rect::from_min_size(egui::pos2(review_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
     if chrome::ghost_button(ui, open_r, ui.scope_id().with("sidebar-open"), t, &chrome::with_key("Open a folder as a project", &keys, "project-open"), |p, r, c| chrome::folder(p, r.expand(1.5), c)).clicked() {
         acts.push(Act::Run("project-open".into(), Vec::new()));
     }
@@ -1571,14 +1576,15 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             if hovered && pr.root.is_some() {
                 let dir = json!(key.to_string_lossy());
                 let mut bx = x1 - bsz;
-                for (tip, cmd, kind) in [("New chat", "project-new-chat", 0), ("New terminal", "project-new-terminal", 1), ("New chat in a new worktree", "worktree-new-chat", 2)] {
-                    if kind == 2 && !pr.git {
+                for (tip, cmd, kind) in [("New chat", "project-new-chat", 0), ("New terminal", "project-new-terminal", 1), ("New chat in a new worktree", "worktree-new-chat", 2), ("Review changes", "diff-view-folder", 3)] {
+                    if kind >= 2 && !pr.git {
                         continue;
                     }
                     let br = Rect::from_min_size(egui::pos2(bx, r.center().y - bsz / 2.0), Vec2::splat(bsz));
                     let resp = chrome::ghost_button(ui, br, id.with(cmd), t, tip, match kind {
                         0 => chrome::plus,
                         1 => chrome::prompt,
+                        3 => chrome::diff,
                         _ => |p: &egui::Painter, r: Rect, c: Color32| chrome::branch(p, r.expand(1.0), c),
                     });
                     if resp.clicked() {
@@ -1651,7 +1657,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                         let dir = json!(wt.path.to_string_lossy());
                         let bsz = (22.0 * k).round();
                         let mut bx = x1 - bsz;
-                        let mut btns: Vec<(&str, &str, fn(&egui::Painter, Rect, Color32))> = vec![("New chat here", "project-new-chat", chrome::plus)];
+                        let mut btns: Vec<(&str, &str, fn(&egui::Painter, Rect, Color32))> = vec![("New chat here", "project-new-chat", chrome::plus), ("Review changes", "diff-view-folder", chrome::diff)];
                         if !wt.main {
                             btns.insert(0, ("Remove worktree", "worktree-remove", chrome::cross));
                         }

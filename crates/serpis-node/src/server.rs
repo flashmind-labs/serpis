@@ -920,7 +920,7 @@ impl Node {
             return false;
         }
         // Diffs run git and read files: done elsewhere too.
-        if let Request::DiffRefs { .. } | Request::DiffList { .. } | Request::DiffFile { .. } = &call.request {
+        if let Request::DiffRefs { .. } | Request::DiffUpstream { .. } | Request::DiffList { .. } | Request::DiffFile { .. } = &call.request {
             let (msgs, id, request) = (self.msgs.clone(), call.id, call.request);
             self.rt.spawn_blocking(move || {
                 let response = crate::gitdiff::answer(&request).unwrap_or_else(|e| Response::Error { message: format!("{e:#}") });
@@ -1300,7 +1300,7 @@ impl Node {
                 Response::Dirs { path: dir.to_string_lossy().into_owned(), dirs }
             }
             // Answered off this thread by `call`; here so nothing goes unanswered.
-            r @ (Request::DiffRefs { .. } | Request::DiffList { .. } | Request::DiffFile { .. }) => crate::gitdiff::answer(&r).map_err(|e| format!("{e:#}"))?,
+            r @ (Request::DiffRefs { .. } | Request::DiffUpstream { .. } | Request::DiffList { .. } | Request::DiffFile { .. }) => crate::gitdiff::answer(&r).map_err(|e| format!("{e:#}"))?,
         })
     }
 

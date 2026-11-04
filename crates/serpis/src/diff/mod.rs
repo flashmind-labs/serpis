@@ -254,6 +254,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("diff-file-tree", json!(true), "Show the list of files on the diff page, when there is room.");
     ed.defvar("diff-tree-width", json!(250), "Width of the diff page's file list, in points.");
     ed.defvar("diff-refresh-seconds", json!(2), "How often a diff page on screen checks the repository for changes, so what an agent writes shows up; 0: only when asked (diff-refresh).");
+    ed.defvar("diff-upstream-check-seconds", json!(300), "How often a diff page on screen asks the remote whether the branch \"vs\" compares with is out of date (git ls-remote, which changes nothing), showing a warning beside that button when it is; 0: never ask.");
     ed.defvar("diff-default-source", json!("auto"), "What a new diff page compares. \"auto\": on a branch of its own, what the branch would bring (against diff-base-branch); on the main branch, uncommitted changes. Or any of \"uncommitted\", \"staged\", \"unstaged\", \"a..b\", \"a...b\", \"commit:rev\", or a branch.");
     ed.defvar("diff-base-branch", Value::Null, "The branch \"vs\" compares with on the diff page. Unset: origin's default branch, else main or master.");
     ed.defvar("diff-open-in", json!("current"), "Where diff-view opens the page: \"current\" (the focused window) or \"split\" (beside it).");
@@ -289,7 +290,12 @@ pub fn install(ed: &mut Editor) {
         }
         select_source(ed)
     });
-    ed.define_command("diff-refresh", "Read the repository again now: its branches too, and whatever a file looks like.", o, |ed, _| with_page(ed, |b, ed| b.start(ed)));
+    ed.define_command("diff-refresh", "Read the repository again now: its branches, whatever a file looks like, and how the base branch stands against its remote.", o, |ed, _| {
+        with_page(ed, |b, ed| {
+            b.upstream_asked = None;
+            b.start(ed)
+        })
+    });
     ed.define_command("diff-next-change", "Go to the next change, on into the next file.", o, |ed, _| {
         let m = with_page(ed, |b, ed| b.step_change(ed, 1))?;
         m.into_iter().for_each(|m| ed.message(m));
@@ -630,6 +636,10 @@ pub fn info(b: &mut DiffBuffer) -> Value {
         "writing": b.editor.as_ref().map(|e| json!({"text": e.area.text(), "kind": e.ask.name(), "line": e.start, "end_line": e.end, "side": e.side.name()})),
         "target": b.target.map(crate::editor::buffer_id_to_u64),
         "drafts": b.drafts().len(),
+        "upstream": b.upstream.as_ref().map(|u| json!({
+            "upstream": u.upstream, "tip": u.tip, "ahead": u.ahead, "behind": u.behind, "unfetched": u.unfetched, "checked": u.checked,
+            "warning": b.upstream_base().and_then(|branch| view::upstream_warning(&branch, u)),
+        })),
     })
 }
 

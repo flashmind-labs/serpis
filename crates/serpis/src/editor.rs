@@ -102,6 +102,8 @@ pub struct Segment {
     pub name: String,
     pub owner: String,
     pub f: SegmentFn,
+    /// Run when the segment is clicked (header segments).
+    pub command: Option<String>,
 }
 
 /// A temporary highlight over a text range (yank flash, search hits, jump targets).
@@ -540,7 +542,14 @@ impl Editor {
     pub fn add_segment(&mut self, header: bool, name: &str, owner: &str, f: impl Fn(&mut Editor, Option<BufferId>) -> Option<String> + 'static) {
         let list = if header { &mut self.header_segments } else { &mut self.status_segments };
         list.retain(|s| s.name != name);
-        list.push(Segment { name: name.to_string(), owner: owner.to_string(), f: Rc::new(f) });
+        list.push(Segment { name: name.to_string(), owner: owner.to_string(), f: Rc::new(f), command: None });
+    }
+
+    /// What clicking a header segment runs.
+    pub fn set_segment_command(&mut self, name: &str, command: Option<String>) {
+        if let Some(s) = self.header_segments.iter_mut().find(|s| s.name == name) {
+            s.command = command;
+        }
     }
 
     /// Evaluate header segments for a buffer.
@@ -570,9 +579,9 @@ impl Editor {
         }
     }
 
-    pub fn header_text(&mut self, id: BufferId) -> Vec<String> {
+    pub fn header_text(&mut self, id: BufferId) -> Vec<(String, Option<String>)> {
         let segs = self.header_segments.clone();
-        segs.iter().filter_map(|s| (s.f)(self, Some(id))).filter(|t| !t.is_empty()).collect()
+        segs.iter().filter_map(|s| (s.f)(self, Some(id)).map(|t| (t, s.command.clone()))).filter(|(t, _)| !t.is_empty()).collect()
     }
 
     // ------------------------------------------------------------------

@@ -93,6 +93,23 @@ pub struct DiffBranch {
     pub subject: String,
 }
 
+/// How a local branch stands against the branch it follows on its remote.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffUpstream {
+    /// What it follows, as git names it (`origin/master`).
+    pub upstream: String,
+    /// The commit that branch was last known to be on.
+    pub tip: String,
+    /// Commits only the local branch has.
+    pub ahead: u32,
+    /// Commits only the remote's has.
+    pub behind: u32,
+    /// The remote is on a commit this repository hasn't fetched, so they can't be counted.
+    pub unfetched: bool,
+    /// The remote answered just now; otherwise `tip` is from the last fetch.
+    pub checked: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DiffRefs {
     /// The worktree around the folder asked about.
@@ -248,6 +265,14 @@ pub enum Request {
     },
     /// What a folder's repository can be compared with: its root, branches and worktrees.
     DiffRefs { dir: String },
+    /// How local `branch` stands against its remote. It asks the remote, changing nothing here,
+    /// unless given the `tip` an earlier answer named.
+    DiffUpstream {
+        dir: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tip: Option<String>,
+    },
     /// The files that differ between two states of the repository around `dir`.
     DiffList { dir: String, spec: DiffSpec },
     /// Both versions of one of those files. `old_path`: where it was, when it was renamed.
@@ -421,6 +446,8 @@ pub enum Response {
     /// Its log since the record asked after; `dropped` older ones it no longer keeps.
     Logs { records: Vec<LogRecord>, dropped: u64 },
     DiffRefs { refs: DiffRefs },
+    /// None: `branch` follows nothing that can be compared.
+    DiffUpstream { upstream: Option<DiffUpstream> },
     DiffList { list: DiffList },
     DiffFile { old: DiffText, new: DiffText },
     Sessions { sessions: Vec<SessionInfo> },
