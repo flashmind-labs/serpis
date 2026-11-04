@@ -96,6 +96,8 @@ pub struct State {
     /// window while it runs; a later layer wins.
     pub file: serde_json::Map<String, Value>,
     pub lua_vars: serde_json::Map<String, Value>,
+    /// The defaults of the settings Lua defined, for `serpis.var.reset`.
+    lua_defaults: serde_json::Map<String, Value>,
     pub pushed: serde_json::Map<String, Value>,
     pub chats: BTreeMap<String, Info>,
     pub actions: Vec<Action>,
@@ -134,6 +136,7 @@ impl NodeLua {
         let state = State {
             file,
             lua_vars: Default::default(),
+            lua_defaults: Default::default(),
             pushed: Default::default(),
             chats: BTreeMap::new(),
             actions: Vec::new(),
@@ -154,6 +157,7 @@ impl NodeLua {
         {
             let mut s = self.state.borrow_mut();
             s.lua_vars.clear();
+            s.lua_defaults.clear();
             s.hooks.clear();
             s.tools.clear();
             s.timers.clear();
@@ -421,16 +425,34 @@ fn api(lua: &Lua, st: Rc<RefCell<State>>, dir: &Path) -> mlua::Result<Table> {
     var.set("define", lua.create_function(move |lua, (name, default, _doc): (String, LuaValue, Option<String>)| {
         // A value already set (settings.json, the window, the config) stays.
         let mut s = st2.borrow_mut();
+        let v = json_of(lua, default)?;
+        s.lua_defaults.insert(name.clone(), v.clone());
         if s.var(&name).is_none() {
-            let v = json_of(lua, default)?;
             s.lua_vars.insert(name, v);
         }
         Ok(())
     })?)?;
     let st2 = st.clone();
+    let reset = move |name: String| {
+        let mut s = st2.borrow_mut();
+        match s.lua_defaults.get(&name).cloned() {
+            Some(d) => s.lua_vars.insert(name, d),
+            None => s.lua_vars.remove(&name),
+        };
+    };
+    let st2 = st.clone();
+    let reset2 = reset.clone();
     var.set("set", lua.create_function(move |lua, (name, v): (String, LuaValue)| {
+        if v.is_nil() {
+            reset2(name);
+            return Ok(());
+        }
         let v = json_of(lua, v)?;
         st2.borrow_mut().lua_vars.insert(name, v);
+        Ok(())
+    })?)?;
+    var.set("reset", lua.create_function(move |_, name: String| {
+        reset(name);
         Ok(())
     })?)?;
     inert(lua, &var)?;

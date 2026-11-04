@@ -2031,6 +2031,16 @@ pub fn default_thinking(ed: &Editor) -> ThinkingLevel {
         .unwrap_or(ThinkingLevel::Medium)
 }
 
+/// A chat's folder for its header: from home, or its last parts when that is long.
+fn folder_label(cwd: &str, remote: bool) -> String {
+    let full = if remote { cwd.to_string() } else { crate::pickers::tilde(std::path::Path::new(cwd)) };
+    if full.chars().count() <= 32 {
+        return full;
+    }
+    let parts: Vec<&str> = full.rsplit('/').take(2).collect();
+    format!("…/{}/{}", parts[1], parts[0])
+}
+
 /// A chat on this machine wrote its session for the first time, in `cwd`.
 fn session_created(ed: &mut Editor, cwd: &std::path::Path) {
     // A project you have chatted in stays in the sidebar with its sessions.
@@ -2609,6 +2619,10 @@ impl Buffer for ChatBuffer {
             status.insert(0, c);
             status_commands.insert(0, Some("chat-cache-report".into()));
         }
+        // Where it works: clicking it chooses another folder. Last: the first to fit in a narrow
+        // window (the composer has the model too).
+        status.push(folder_label(&self.state_now().cwd, !self.node.local()));
+        status_commands.push(Some("chat-select-folder".into()));
         Modeline { title: self.state_now().title, status, status_commands, busy: self.running() }
     }
 

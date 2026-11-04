@@ -472,6 +472,10 @@ there, and keeps it (`remote-users`) once a login with it works; `"alice@box.net
 `remote-hosts`, or `User` in `~/.ssh/config`, names it up front. serpis keeps no
 credentials of its own: sshd, or rayfish, decides who gets in.
 
+A chat's header shows its folder; clicking it (`chat-select-folder`) changes it, on the machine
+it runs on, messages included. New chats and terminals start in the folder of the chat or terminal
+you are in (`new-buffer-directory`).
+
 The composer's machine pill (`chat-select-machine`) moves a chat to a machine and a folder there,
 messages and all: here to a machine, back, or from one machine to another. It continues there as
 the same chat (its id keeps provider caches warm), with that folder's instructions, and the machine
@@ -691,7 +695,7 @@ ends its terminal. `terminal-persistent` runs this machine's terminals that way 
 
 `remote-new-terminal` opens one on another machine (pick the machine, then a folder there),
 `new-terminal` in a chat or terminal on another machine opens it there, in its folder
-(`terminal-follow-machine`), and `terminal-attach` shows one no buffer shows. Everything about a
+(`terminal-follow-machine`; `chat-follow-machine` does the same for `new-chat`), and `terminal-attach` shows one no buffer shows. Everything about a
 terminal goes over the connection the window has to its machine's node anyway, bytes included,
 and a dropped one is attached again with the machine. What runs in it (for the sidebar's
 activity) is asked of its machine every `terminal-poll-seconds`. A terminal runs with the home

@@ -79,10 +79,38 @@ pub struct Interceptor {
 /// Work `Editor::defer` runs at the start of the next tick.
 type Deferred = Box<dyn FnOnce(&mut Editor)>;
 
+/// What a setting's value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarOrigin {
+    /// Its definition's default: follows the definition.
+    Default,
+    /// Set while the config ran: gone on a reload that no longer sets it.
+    Config,
+    /// Set any other time (`serpis_lua`, a command, a key): stays until reset or restart.
+    Live,
+}
+
+impl VarOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VarOrigin::Default => "default",
+            VarOrigin::Config => "config",
+            VarOrigin::Live => "live",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Var {
     pub value: Value,
     pub doc: String,
+    pub default: Value,
+    pub origin: VarOrigin,
+    /// Something defined it (`defvar`); else it only exists because something set it.
+    pub defined: bool,
+    /// The running config hasn't set it yet, though the last one did: reads give the default,
+    /// and if nothing sets it by the end of the load, the default is what it is.
+    stale: bool,
 }
 
 /// Constructor for a buffer kind (`new-buffer <kind>`).
@@ -193,6 +221,12 @@ pub struct Editor {
     pub commands: HashMap<String, Command>,
     pub hooks: HashMap<String, Vec<Hook>>,
     pub vars: HashMap<String, Var>,
+    /// The config is running: what it sets has `VarOrigin::Config`.
+    pub config_loading: bool,
+    /// Settings the config defines (`serpis.var.define`), and those of its last run.
+    pub lua_vars: std::collections::HashSet<String>,
+    lua_vars_before: std::collections::HashSet<String>,
+    var_notes: Vec<String>,
     pub interceptors: Vec<Interceptor>,
     pub buffer_kinds: HashMap<String, BufferKind>,
     pub agent_tools: Vec<(String, serpis_agent::ToolRef)>,
@@ -306,6 +340,10 @@ impl Editor {
             commands: HashMap::new(),
             hooks: HashMap::new(),
             vars: HashMap::new(),
+            config_loading: false,
+            lua_vars: Default::default(),
+            lua_vars_before: Default::default(),
+            var_notes: Vec::new(),
             interceptors: Vec::new(),
             buffer_kinds: HashMap::new(),
             agent_tools: Vec::new(),
@@ -474,26 +512,110 @@ impl Editor {
         });
     }
 
+    /// Define a setting: `value` is its default from now on, and its value unless something set
+    /// one. Defining it again (a reload) brings the new default in.
     pub fn defvar(&mut self, name: &str, value: Value, doc: &str) {
-        self.vars.entry(name.to_string()).or_insert(Var { value, doc: doc.to_string() });
+        let Some(v) = self.vars.get_mut(name) else {
+            self.vars.insert(name.to_string(), Var { value: value.clone(), doc: doc.to_string(), default: value, origin: VarOrigin::Default, defined: true, stale: false });
+            return;
+        };
+        let new_default = v.defined && v.default != value;
+        v.default = value.clone();
+        v.defined = true;
+        if !doc.is_empty() {
+            v.doc = doc.to_string();
+        }
+        match v.origin {
+            VarOrigin::Default if v.value != value => {
+                v.value = value.clone();
+                self.var_changed(name, &value);
+            }
+            VarOrigin::Live if new_default => self.var_notes.push(format!("{name} keeps the value set while serpis runs, not the config's new default (serpis.var.reset(\"{name}\") or reset-variable drops it)")),
+            _ => {}
+        }
     }
 
     pub fn set_var(&mut self, name: &str, value: Value) {
+        let origin = if self.config_loading { VarOrigin::Config } else { VarOrigin::Live };
         let old = self.vars.get(name).map(|v| v.value.clone());
         match self.vars.get_mut(name) {
-            Some(v) => v.value = value.clone(),
+            Some(v) => {
+                v.value = value.clone();
+                v.origin = origin;
+                v.stale = false;
+            }
             None => {
-                self.vars.insert(name.to_string(), Var { value: value.clone(), doc: String::new() });
+                self.vars.insert(name.to_string(), Var { value: value.clone(), doc: String::new(), default: Value::Null, origin, defined: false, stale: false });
             }
         }
         if old.as_ref() != Some(&value) {
-            crate::remote::var_changed(self, name, &value);
-            self.run_hook("variable-changed", &serde_json::json!({"name": name, "value": value}));
+            self.var_changed(name, &value);
         }
     }
 
+    /// Drop what was set: back to the default, or gone when nothing defined it.
+    pub fn reset_var(&mut self, name: &str) {
+        let Some(v) = self.vars.get_mut(name) else { return };
+        let was = std::mem::replace(&mut v.value, v.default.clone());
+        v.origin = VarOrigin::Default;
+        v.stale = false;
+        let now = v.value.clone();
+        if !v.defined {
+            self.vars.remove(name);
+            if was != Value::Null {
+                self.var_changed(name, &Value::Null);
+            }
+            return;
+        }
+        if was != now {
+            self.var_changed(name, &now);
+        }
+    }
+
+    fn var_changed(&mut self, name: &str, value: &Value) {
+        crate::remote::var_changed(self, name, value);
+        self.run_hook("variable-changed", &serde_json::json!({"name": name, "value": value}));
+    }
+
     pub fn var(&self, name: &str) -> Option<&Value> {
-        self.vars.get(name).map(|v| &v.value)
+        let v = self.vars.get(name)?;
+        match (v.stale, v.defined) {
+            (false, _) => Some(&v.value),
+            (true, true) => Some(&v.default),
+            (true, false) => None,
+        }
+    }
+
+    /// The config is about to run. What it set last time counts only if it sets it again.
+    pub fn config_load_begin(&mut self) {
+        self.config_loading = true;
+        self.var_notes.clear();
+        for v in self.vars.values_mut().filter(|v| v.origin == VarOrigin::Config) {
+            v.stale = true;
+        }
+        self.lua_vars_before = std::mem::take(&mut self.lua_vars);
+    }
+
+    /// The config ran: settings it no longer sets go back, those it no longer defines go.
+    pub fn config_load_end(&mut self) {
+        self.config_loading = false;
+        let stale: Vec<String> = self.vars.iter().filter(|(_, v)| v.stale).map(|(k, _)| k.clone()).collect();
+        for name in stale {
+            self.reset_var(&name);
+        }
+        for name in std::mem::take(&mut self.lua_vars_before) {
+            if !self.lua_vars.contains(&name) {
+                if let Some(v) = self.vars.get_mut(&name) {
+                    v.defined = false;
+                    if v.origin == VarOrigin::Default {
+                        self.reset_var(&name);
+                    }
+                }
+            }
+        }
+        for note in std::mem::take(&mut self.var_notes) {
+            self.warn(note);
+        }
     }
 
     pub fn var_str(&self, name: &str) -> Option<String> {

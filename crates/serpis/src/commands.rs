@@ -472,7 +472,17 @@ pub fn install(ed: &mut Editor) {
         }
         Ok(())
     });
-    ed.define_command("new-chat", "Open a new agent chat in the current project. With C-u, choose the folder (scripts pass it as a parameter).", o, |ed, a| {
+    ed.define_command("new-chat", "Open a new agent chat where you are: the folder of the current chat or terminal (new-buffer-directory). With C-u, choose the folder (scripts pass it as a parameter). In a chat or terminal on another machine, it opens there, in its folder (chat-follow-machine).", o, |ed, a| {
+        let here = ed.current_buffer();
+        if a.str(0).is_none()
+            && a.prefix.is_none()
+            && ed.var("chat-follow-machine").and_then(Value::as_bool).unwrap_or(true)
+            && let Some(machine) = ed.buffer_machine(here)
+        {
+            let dir = ed.buffer_directory(here).map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| "~".into());
+            crate::remote::new_chat(ed, &machine, &dir, None);
+            return Ok(());
+        }
         crate::pickers::with_directory(ed, a, "New chat in: ", |ed, dir| {
             if let Err(e) = ed.new_buffer_in("chat", &dir) {
                 ed.error(format!("{e:#}"));
@@ -480,7 +490,7 @@ pub fn install(ed: &mut Editor) {
         });
         Ok(())
     });
-    ed.define_command("new-terminal", "Open a new terminal in the current project. With C-u, choose the folder (scripts pass it as a parameter). In a chat or terminal on another machine, it opens there, in its folder (terminal-follow-machine).", o, |ed, a| {
+    ed.define_command("new-terminal", "Open a new terminal where you are: the folder of the current chat or terminal (new-buffer-directory). With C-u, choose the folder (scripts pass it as a parameter). In a chat or terminal on another machine, it opens there, in its folder (terminal-follow-machine).", o, |ed, a| {
         let here = ed.current_buffer();
         if a.str(0).is_none()
             && a.prefix.is_none()
@@ -582,8 +592,29 @@ pub fn install(ed: &mut Editor) {
         ed.completing_read("Describe variable: ", cands, true, |ed, c, _| {
             if let Some(c) = c {
                 if let Some(v) = ed.vars.get(&c.value).cloned() {
-                    show_page(ed, "*Help*", &format!("{}\n\n  value: {}\n\n{}", c.value, serde_json::to_string_pretty(&v.value).unwrap_or_default(), v.doc));
+                    let json = |x: &Value| serde_json::to_string_pretty(x).unwrap_or_default();
+                    show_page(ed, "*Help*", &format!("{}\n\n  value: {}\n  from: {}\n  default: {}\n\n{}", c.value, json(&v.value), v.origin.as_str(), json(&v.default), v.doc));
                 }
+            }
+        });
+        Ok(())
+    });
+    ed.define_command("reset-variable", "Drop what was set for a setting, by the config or while serpis runs: back to its default (param: the setting).", o, |ed, a| {
+        if let Some(name) = a.str(0) {
+            ed.reset_var(name);
+            return Ok(());
+        }
+        let mut names: Vec<String> = ed.vars.iter().filter(|(_, v)| v.origin != crate::editor::VarOrigin::Default).map(|(k, _)| k.clone()).collect();
+        names.sort();
+        let cands = names.into_iter().map(|n| {
+            let v = &ed.vars[&n];
+            let detail = format!("{} ({})", v.value, v.origin.as_str());
+            Candidate::new(n).detail(detail)
+        }).collect();
+        ed.completing_read("Reset variable: ", cands, true, |ed, c, _| {
+            if let Some(c) = c {
+                ed.reset_var(&c.value);
+                ed.message(format!("{} is back to its default", c.value));
             }
         });
         Ok(())

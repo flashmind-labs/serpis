@@ -16,6 +16,8 @@ pub struct Candidate {
     pub checked: Option<bool>,
     /// The heading this candidate falls under, drawn above the first of each.
     pub section: Option<String>,
+    /// More text that finds it when typed, besides its label (a buffer's project).
+    pub search: String,
 }
 
 impl Candidate {
@@ -27,6 +29,7 @@ impl Candidate {
             detail: String::new(),
             checked: None,
             section: None,
+            search: String::new(),
         }
     }
     pub fn detail(mut self, d: impl Into<String>) -> Self {
@@ -101,6 +104,21 @@ impl Minibuffer {
     }
 }
 
+/// Match a candidate by its label, or with its `search` text too: whichever scores higher.
+/// Positions are the label's (only those are drawn).
+fn match_candidate(query: &str, c: &Candidate) -> Option<(i64, Vec<usize>)> {
+    let label = fuzzy(query, &c.label);
+    if c.search.is_empty() || query.is_empty() {
+        return label;
+    }
+    let n = c.label.chars().count();
+    let wider = fuzzy(query, &format!("{} {}", c.label, c.search)).map(|(s, p)| (s, p.into_iter().filter(|i| *i < n).collect()));
+    match (label, wider) {
+        (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Subsequence fuzzy match; returns a score (higher is better) and matched char positions.
 pub fn fuzzy(query: &str, text: &str) -> Option<(i64, Vec<usize>)> {
     if query.is_empty() {
@@ -161,7 +179,7 @@ impl Minibuffer {
             .candidates
             .iter()
             .enumerate()
-            .filter_map(|(i, c)| fuzzy(&query, &c.label).map(|(s, p)| (s + boost(i), i, p)))
+            .filter_map(|(i, c)| match_candidate(&query, c).map(|(s, p)| (s + boost(i), i, p)))
             .collect();
         if !self.keep_order && (!query.is_empty() || (self.frecency_empty && !self.boost.is_empty())) {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -567,6 +585,18 @@ pub fn install(ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::fuzzy;
+
+    #[test]
+    fn candidates_are_found_by_their_search_text() {
+        use super::{Candidate, match_candidate};
+        let c = Candidate { search: "Chat field main".into(), ..Candidate::new("Fix the loop") };
+        assert_eq!(match_candidate("loop", &c).unwrap().1, vec![8, 9, 10, 11]);
+        let (_, by_project) = match_candidate("field", &c).unwrap();
+        assert!(by_project.iter().all(|i| *i < "Fix the loop".len()));
+        assert!(match_candidate("field loop", &c).is_some());
+        assert!(match_candidate("nothing", &c).is_none());
+        assert!(match_candidate("field", &Candidate::new("Fix the loop")).is_none());
+    }
 
     #[test]
     fn fuzzy_prefers_contiguous_word_starts() {

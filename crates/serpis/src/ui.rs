@@ -547,7 +547,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         if resp.hovered() {
             ui.painter().rect_filled(pr, pr.height() / 2.0, crate::chrome::hover_bg(&theme));
         }
-        ed.debug_rects.insert("header-status-button", pr);
+        ed.debug_rects.insert(if cmd == "chat-select-folder" { "header-folder-button" } else { "header-status-button" }, pr);
         if resp.clicked() {
             ed.focus_window(w);
             ed.defer(move |ed| ed.call(&cmd));

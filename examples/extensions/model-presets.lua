@@ -28,12 +28,19 @@ local function apply(p)
   end
 end
 
-local presets = serpis.var.get("model-presets")
-for name, p in pairs(presets) do
-  serpis.command.define(name, function()
-    apply(p)
-  end, "Switch this chat to " .. p.label .. ".")
+local presets
+local function load_presets()
+  presets = serpis.var.get("model-presets") or {}
+  for name, p in pairs(presets) do
+    serpis.command.define(name, function()
+      apply(p)
+    end, "Switch this chat to " .. p.label .. ".")
+  end
 end
+load_presets()
+serpis.hook.add("variable-changed", function(e)
+  if e.name == "model-presets" then load_presets() end
+end)
 
 serpis.command.define("presets", function()
   local current = serpis.chat.info()

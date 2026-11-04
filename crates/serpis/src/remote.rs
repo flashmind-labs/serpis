@@ -1034,15 +1034,41 @@ pub fn new_chat(ed: &mut Editor, machine: &str, dir: &str, model: Option<String>
 
 /// Turn chat buffer `id`, a chat with no messages yet, into a new chat in `dir` on `machine`.
 fn move_empty_chat(ed: &mut Editor, id: BufferId, machine: &str, dir: &str) {
+    start_empty_chat(ed, id, machine, dir, None, None);
+}
+
+/// Change the folder chat buffer `id` runs in, on the machine it runs on. A chat with no
+/// messages starts over there; one with messages continues there from its session, which leaves
+/// the old folder (see `session::import`). Only an idle chat changes folder.
+fn change_folder(ed: &mut Editor, id: BufferId, dir: String) {
+    let Some((machine, state, empty)) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| (c.node.machine.clone(), c.state_now(), c.is_empty())) else { return };
+    if empty {
+        return start_empty_chat(ed, id, &machine, &dir, state.model, Some(state.thinking));
+    }
+    if state.running || state.compacting {
+        return ed.message("The chat is working: stop it (C-c C-c) or let it finish, then change its folder");
+    }
+    let on = (machine != LOCAL).then_some(machine);
+    fetch_session(ed, id, on.clone(), on, dir);
+}
+
+fn start_empty_chat(ed: &mut Editor, id: BufferId, machine: &str, dir: &str, model: Option<String>, thinking: Option<String>) {
     let m = machine.to_string();
     let chat = uuid::Uuid::now_v7().to_string();
-    request(ed, machine, Request::New { cwd: dir.to_string(), model: None, thinking: None, chat: Some(chat.clone()) }, move |ed, r| match r {
+    let shown = (model.clone(), thinking.clone());
+    request(ed, machine, Request::New { cwd: dir.to_string(), model, thinking, chat: Some(chat.clone()) }, move |ed, r| match r {
         Ok(_) => {
             // The empty chat it showed is closed where it was.
             if let Some((was, old)) = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| (c.node.machine.clone(), c.chat_id())) {
                 send(ed, &was, Request::Detach { chat: old, close: true });
             }
-            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &m, &chat));
+            ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| {
+                c.become_remote(ed, &m, &chat);
+                if let (Some(_), Some(t)) = &shown {
+                    c.node.state.model = shown.0.clone();
+                    c.node.state.thinking = t.clone();
+                }
+            });
             send(ed, &m, Request::Attach { chat });
         }
         Err(e) => ed.error(format!("{}: {e}", if m == LOCAL { "this machine" } else { &m })),
@@ -1356,9 +1382,12 @@ fn deliver(ed: &mut Editor, id: BufferId, from: Option<String>, to: Option<Strin
     let shown = to.clone().unwrap_or_else(|| "this machine".into());
     request(ed, &to_node.clone(), Request::Import { session: text, cwd: dir.clone() }, move |ed, r| match r {
         Ok(Response::Chat { chat }) => {
-            // Marked as moved, and closed where it was.
+            // Marked as moved, and closed where it was. Within a machine, the import already
+            // took its place.
             let old = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.chat_id()).unwrap_or_default();
-            send(ed, &from_node, Request::Moved { chat: old, to: to_name });
+            if from_node != to_node {
+                send(ed, &from_node, Request::Moved { chat: old, to: to_name });
+            }
             ed.with_buffer_as::<ChatBuffer, _>(id, |c, ed| c.become_remote(ed, &to_node, &chat));
             send(ed, &to_node, Request::Attach { chat });
             moved(ed, id, &shown, &dir);
@@ -1462,8 +1491,10 @@ pub fn open_chats(ed: &Editor) -> Value {
         .buffers
         .values()
         .filter_map(|s| {
-            let r = &s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?.node;
-            Some(json!({"machine": r.machine, "chat": r.chat, "session": r.state.session}))
+            let c = s.buf.as_ref()?.as_any().downcast_ref::<ChatBuffer>()?;
+            let r = &c.node;
+            // One that never got a message closes with this window: nothing to show again.
+            (r.state.session.is_some() || !c.is_empty()).then(|| json!({"machine": r.machine, "chat": r.chat, "session": r.state.session}))
         })
         .collect();
     Value::Array(list)
@@ -1475,16 +1506,20 @@ pub fn reopen(ed: &mut Editor, list: &Value) {
         if chat_buffer(ed, m, c).is_some() {
             continue;
         }
-        let buf = ChatBuffer::new(ed, &json!({"machine": m, "chat": c}));
-        ed.add_buffer("*chat*", Box::new(buf));
+        let mut buf = ChatBuffer::new(ed, &json!({"machine": m, "chat": c}));
+        // Known before the node answers: this list is saved again whatever happens meanwhile.
+        buf.node.state.session = v["session"].as_str().map(str::to_string);
+        let id = ed.add_buffer("*chat*", Box::new(buf));
         let (m2, c2, session) = (m.to_string(), c.to_string(), v["session"].as_str().map(str::to_string));
         request(ed, m, Request::Attach { chat: c.to_string() }, move |ed, r| {
+            let Err(e) = r else { return };
             // Closed there meanwhile (its node stopped, or it was idle and nobody showed it):
-            // it continues from its session.
-            if r.is_err()
-                && let Some(path) = session
-            {
-                resume_into(ed, &m2, &path, &c2);
+            // it continues from its session. Without one, the chat is gone (a machine out of
+            // reach may still have it).
+            match session {
+                Some(path) => resume_into(ed, &m2, &path, &c2),
+                None if e.starts_with("no chat") => ed.kill_buffer(id),
+                None => {}
             }
         });
     }
@@ -1619,6 +1654,18 @@ pub fn install(ed: &mut Editor) {
             }
             pick_dir(ed, &m.clone(), move |ed, d| move_empty_chat(ed, id, &m, &d));
         });
+        Ok(())
+    });
+    ed.define_command("chat-select-folder", "Choose the folder this chat runs in, on the machine it runs on (param: the folder). A chat with messages continues there, its session with it.", o, |ed, a| {
+        let id = crate::commands::current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+        if let Some(d) = a.str(0) {
+            change_folder(ed, id, d.to_string());
+            return Ok(());
+        }
+        match ed.buffer_machine(id) {
+            Some(m) => pick_dir(ed, &m, move |ed, d| change_folder(ed, id, d)),
+            None => ed.read_directory("Run this chat in: ", move |ed, d| change_folder(ed, id, d.to_string_lossy().into_owned())),
+        }
         Ok(())
     });
     ed.define_command("remote-attach-chat", "Show a chat running on another machine (params: machine, chat id).", o, |ed, a| {

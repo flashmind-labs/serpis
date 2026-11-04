@@ -395,6 +395,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("terminal-persistent", json!(false), "Terminals on this machine run in its terminal host (serpis-node terminals), so they outlive the window and other devices reach them; off (the default), a terminal is a child of the window, which is quickest, and ends with it. Terminals on other machines always run in theirs.");
     ed.defvar("terminal-poll-seconds", json!(1.0), "How often machines are asked what their shown terminals are doing (the program in front, for activity).");
     ed.defvar("terminal-follow-machine", json!(true), "new-terminal opens on the machine of the buffer you are in (a chat or terminal on another machine), in its folder there.");
+    ed.defvar("chat-follow-machine", json!(true), "new-chat opens on the machine of the buffer you are in (a chat or terminal on another machine), in its folder there.");
     ed.define_command("remote-new-terminal", "Open a terminal on another machine: pick the machine, then a folder there (params: machine, folder).", o, |ed, a| {
         let (machine, dir) = (a.str(0).map(str::to_string), a.str(1).map(str::to_string));
         let open = |ed: &mut Editor, m: &str, d: &str| {

@@ -396,8 +396,19 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     var.set(
         "set",
         lua.create_function(|lua, (name, v): (String, LuaValue)| {
+            if v.is_nil() {
+                return ed(|e| e.reset_var(&name));
+            }
             let v: Value = json_of(lua, v)?;
             ed(|e| e.set_var(&name, v))
+        })?,
+    )?;
+    var.set("reset", lua.create_function(|_, name: String| ed(|e| e.reset_var(&name)))?)?;
+    var.set(
+        "info",
+        lua.create_function(|lua, name: String| {
+            let info = ed(|e| e.vars.get(&name).map(|v| json!({"value": e.var(&name), "default": v.default, "origin": v.origin.as_str(), "doc": v.doc, "defined": v.defined})))?;
+            info.map(|i| lua_of(lua, &i)).transpose().map(|i| i.unwrap_or(LuaValue::Nil))
         })?,
     )?;
     var.set(
@@ -414,7 +425,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         "define",
         lua.create_function(|lua, (name, v, doc): (String, LuaValue, Option<String>)| {
             let v: Value = json_of(lua, v)?;
-            ed(|e| e.defvar(&name, v, doc.as_deref().unwrap_or("")))
+            ed(|e| {
+                e.defvar(&name, v, doc.as_deref().unwrap_or(""));
+                e.lua_vars.insert(name);
+            })
         })?,
     )?;
     s.set("var", var)?;
@@ -1728,6 +1742,12 @@ fn watch(dir: &std::path::Path) -> (Option<notify::RecommendedWatcher>, mpsc::Re
 
 /// (Re)create the Lua state and run `init.lua`.
 pub fn reload(ed: &mut Editor) {
+    ed.config_load_begin();
+    run_config(ed);
+    ed.config_load_end();
+}
+
+fn run_config(ed: &mut Editor) {
     ed.remove_owner(OWNER);
     let dir = crate::config_dir();
     let init: PathBuf = dir.join("init.lua");

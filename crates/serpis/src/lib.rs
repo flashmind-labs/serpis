@@ -249,8 +249,10 @@ pub fn bootstrap(ed: &mut Editor) {
         });
     });
 
-    // Start with a chat in the main window.
-    if let Ok(id) = ed.create_buffer("chat", Some("*chat*"), &Value::Null) {
+    // Start on an empty chat outside any project when there is one (the config may have made
+    // it), else on a new one.
+    let empty = sidebar::items(ed).into_iter().filter(|it| it.project.is_none()).map(|it| it.buffer).find(|id| ed.with_buffer_as::<buffers::chat::ChatBuffer, _>(*id, |c, _| c.is_empty()).unwrap_or(false));
+    if let Some(id) = empty.or_else(|| ed.create_buffer("chat", Some("*chat*"), &Value::Null).ok()) {
         ed.show_buffer(id);
     }
     session_ui::restore_open(ed);

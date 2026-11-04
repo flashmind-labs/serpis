@@ -49,12 +49,22 @@ impl Editor {
                 }
                 None => detail.push(tilde(&d)),
             }
+        } else if let (Some(m), Some(d)) = (self.buffer_machine(id), self.buffer_directory(id)) {
+            detail.push(format!("{m}:{}", d.display()));
         }
+        // Typing its kind, project, branch or folder's name finds it (not the whole path: letters
+        // scattered over a long one match nearly anything).
+        let mut search = detail.iter().take(if self.local_directory(id).is_some_and(|d| self.repo_of(&d).is_some()) { 3 } else { 1 }).cloned().collect::<Vec<_>>();
+        search.extend(self.buffer_machine(id));
+        search.extend(self.buffer_directory(id).and_then(|d| d.file_name().map(|f| f.to_string_lossy().into_owned())));
+        let search = search.join(" ");
         let a = self.buffer_activity(id);
         if a.state != crate::ActivityState::Idle {
             detail.push(a.state.as_str().into());
         }
-        Candidate::new(label).detail(detail.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).value(buffer_id_to_u64(id).to_string())
+        let mut c = Candidate::new(label).detail(detail.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).value(buffer_id_to_u64(id).to_string());
+        c.search = search;
+        c
     }
 
     /// Folders worth offering: projects with open buffers, pinned ones, then those of recent

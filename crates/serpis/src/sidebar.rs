@@ -299,11 +299,14 @@ impl Editor {
     /// buffer's worktree root ("project"), its own directory ("buffer"), or where serpis
     /// started ("editor").
     pub fn new_buffer_directory(&mut self) -> PathBuf {
-        let mode = self.var_str("new-buffer-directory").unwrap_or_else(|| "project".into());
-        let dir = self.local_directory(self.current_buffer());
+        let mode = self.var_str("new-buffer-directory").unwrap_or_else(|| "same".into());
+        let here = self.current_buffer();
+        let works_in_folder = self.meta(here).is_some_and(|m| m.major == "chat" || m.major == "terminal");
+        let dir = self.local_directory(here);
         match (mode.as_str(), dir) {
             ("editor", _) | (_, None) => self.cwd.clone(),
             ("buffer", Some(d)) => d,
+            ("same", Some(d)) if works_in_folder => d,
             (_, Some(d)) => self.repo_of(&d).map(|r| r.worktree).or_else(|| self.marked_root_of(&d)).unwrap_or(d),
         }
     }
@@ -959,7 +962,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("agent-programs", json!(["claude", "codex", "pi", "aider", "opencode", "gemini", "amp", "goose", "crush", "cursor-agent", "qwen", "droid"]), "Programs that count as coding agents when they run in a terminal.");
     ed.defvar("terminal-busy-title-regexp", json!("^[\u{2800}-\u{28FF}]"), "A terminal title matching this means its agent is working (Claude Code spins a braille glyph). \"\" disables.");
     ed.defvar("terminal-quiet-seconds", json!(1.5), "Seconds without output after which an agent in a terminal counts as waiting for you.");
-    ed.defvar("new-buffer-directory", json!("project"), "Where new-chat / new-terminal start: \"project\" (the current buffer's worktree root), \"buffer\" (its directory) or \"editor\" (where serpis started).");
+    ed.defvar("new-buffer-directory", json!("same"), "Where new-chat / new-terminal start: \"same\" (the folder the current chat or terminal is in; from anything else, its worktree root), \"project\" (the current buffer's worktree root), \"buffer\" (its directory) or \"editor\" (where serpis started).");
     ed.defvar("worktree-directory", json!("~/.serpis/worktrees"), "Where new worktrees go: <dir>/<project>/<branch>.");
     ed.defvar("worktree-branch-prefix", json!("serpis/"), "Prefix of suggested branch names for new worktrees.");
     ed.defvar("worktree-pick-base", json!(true), "New worktrees ask which branch (local or remote) or commit they start from; off: they start from the current checkout.");

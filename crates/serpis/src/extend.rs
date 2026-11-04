@@ -47,8 +47,10 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.hook.run", "(name, payload?): run a hook (your own events too); returns the handlers' non-nil results."),
     // Settings.
     ("serpis.var.get", "(name): a setting's value."),
-    ("serpis.var.set", "(name, value): change a setting (runs variable-changed)."),
-    ("serpis.var.define", "(name, default, doc?): define a setting; keeps a value that was already set."),
+    ("serpis.var.set", "(name, value): change a setting (runs variable-changed). Set by the config, it lasts while the config sets it; set any other time, until reset or restart, also over a reload. nil resets it."),
+    ("serpis.var.reset", "(name): drop what was set: back to its default."),
+    ("serpis.var.info", "(name): {value, default, origin = \"default\" | \"config\" | \"live\", doc, defined}, or nil."),
+    ("serpis.var.define", "(name, default, doc?): define a setting. Its default follows the file on each reload; a value that was set stays over it."),
     // Buffers (ids are numbers; nil means the current buffer).
     ("serpis.buffer.current", "(): the current buffer's id."),
     ("serpis.buffer.list", "(): every buffer as {id, name, kind}."),
@@ -279,12 +281,18 @@ buffers, chats, agent tools, UI segments.
 ## Loading
 Changes load on reload-config (serpis.reload() from Lua), or about 150 ms after any .lua file
 under {config} is saved when the user has config-auto-reload on (off by default). A reload
-removes what Lua registered (commands, bindings, hooks, tools, segments, settings'
-definitions) and runs every file again in a fresh Lua state. So:
+removes what Lua registered (commands, bindings, hooks, tools, segments) and runs every file
+again in a fresh Lua state. So:
 - top-level code runs on every reload; define things, don't accumulate them;
 - local variables reset on reload. Keep per-chat state in the session with
   serpis.chat.append / serpis.chat.entries (it also survives resume), and settings with
   serpis.var.define (the user can set them in init.lua).
+- settings follow the files: an edited serpis.var.define default takes effect, and a
+  serpis.var.set or define no longer in the files stops applying. The exception is a value set
+  live (serpis.var.set outside the config, as in serpis_lua): it stays over a reload and hides
+  the file's default until serpis.var.reset(name), and the reload warns when that happens.
+  serpis.var.info(name) says where a value comes from. To change a setting for good, edit the
+  file and reload; don't also set it live.
 
 ## Working on an extension
 1. Read the API: serpis_api with topic "lua", "hooks", "commands" or "variables" (filter
