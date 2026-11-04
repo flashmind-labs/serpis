@@ -20,4 +20,27 @@ final class SerpisTests: XCTestCase {
         XCTAssertEqual(ChatsView.sections(rows, now: now).map(\.title), ["Working", "Today", "Yesterday", "Previous 7 days", "Older"])
         XCTAssertEqual(ChatsView.sections(rows, now: now).map { $0.rows.map(\.chat) }, [["a"], ["b"], ["c"], ["d"], ["e"]])
     }
+
+    @MainActor func testAChatIsLoadingUntilItsTranscriptComes() throws {
+        let chat = ChatModel(app: AppModel(store: UserDefaults(suiteName: "serpis-unit-tests")!), machine: "m", chat: "c", path: nil)
+        XCTAssertTrue(chat.loading)
+        chat.take(.splice(chat: "c", Splice(from: 0, entries: [])))
+        XCTAssertFalse(chat.loading)
+    }
+
+    func testThinkingLevelsAModelOffers() throws {
+        func levels(_ json: String) throws -> [String] {
+            try JSONDecoder().decode(ModelInfo.self, from: Data(json.utf8)).thinkingLevels
+        }
+        XCTAssertEqual(try levels(#"{"model":"a","name":"A","images":false,"reasoning":true,"thinking_levels":["off","high","max"]}"#), ["off", "high", "max"])
+        XCTAssertEqual(try levels(#"{"model":"a","name":"A","images":false,"reasoning":false,"thinking_levels":["off"]}"#), [], "nothing to choose")
+        XCTAssertEqual(try levels(#"{"model":"a","name":"A","images":false,"reasoning":true}"#), ["off", "low", "medium", "high"], "a node from before the field")
+        XCTAssertEqual(try levels(#"{"model":"a","name":"A","images":false,"reasoning":false}"#), [])
+        XCTAssertEqual(thinkingName("xhigh"), "Extra high")
+    }
+
+    func testMarkdownToSelectLosesItsMarkupButNotItsCode() {
+        let text = styledMarkdown("## Steps\n\nA **bold** and `code` word.\n\n```sh\necho **raw** *\n```\n\nThe [end](https://example.com).").string
+        XCTAssertEqual(text, "Steps\n\nA bold and code word.\n\necho **raw** *\n\nThe end.")
+    }
 }

@@ -11,6 +11,8 @@ final class ChatModel: Identifiable {
     private(set) var chat: String
     private(set) var entries: [Entry] = []
     private(set) var state: ChatState?
+    /// Its transcript hasn't come yet, the first time it is asked for.
+    private(set) var loading = true
     /// Attached now: what happens there shows here as it happens.
     var connected = false
     /// Something to tell the person (a refused message, a failed connection), until they read it.
@@ -31,16 +33,21 @@ final class ChatModel: Identifiable {
     }
 
     var running: Bool { state?.running ?? false }
-    var title: String { state?.title.isEmpty == false ? state!.title : "New chat" }
+    var title: String { state?.title.isEmpty == false ? state!.title : loading ? "" : "New chat" }
     var model: String? { state?.model }
     var modelName: String {
         guard let m = model else { return "Model" }
         return models.first { $0.model == m }?.name ?? String(m.split(separator: "/").last ?? Substring(m))
     }
 
+    /// The thinking levels its model takes; none when it doesn't think.
+    var thinkingLevels: [String] { models.first { $0.model == model }?.thinkingLevels ?? [] }
+
     /// Follow the chat: opened again from its session when its machine had closed it.
     func attach() async {
         guard let app else { return }
+        loading = entries.isEmpty
+        defer { loading = false }
         do {
             _ = try await app.call(machine, ["op": "attach", "chat": chat])
             connected = true
@@ -170,9 +177,19 @@ final class ChatModel: Identifiable {
         }
     }
 
+    func setThinking(_ level: String) async {
+        do {
+            _ = try await app?.call(machine, ["op": "set_thinking", "chat": chat, "level": level])
+        } catch {
+            notice = AppModel.describe(error)
+        }
+    }
+
     func take(_ event: Event) {
         switch event {
-        case .splice(_, let s): s.apply(to: &entries)
+        case .splice(_, let s):
+            s.apply(to: &entries)
+            loading = false
         case .state(_, let s): state = s
         case .closed: connected = false
         case .notice(_, let text, _): notice = text

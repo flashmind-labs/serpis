@@ -1124,6 +1124,7 @@ impl Node {
                         model: format!("{}/{}", m.provider, m.id),
                         name: m.display_name().to_string(),
                         reasoning: m.reasoning,
+                        thinking_levels: serpis_ai::supported_thinking_levels(&m).into_iter().map(|l| l.as_str().to_string()).collect(),
                         images: m.input.iter().any(|i| i == "image"),
                         context_window: m.context_window,
                         cost: (m.cost.input, m.cost.output),

@@ -95,10 +95,10 @@ struct UserBubble: View {
             if !text.isEmpty {
                 Text(text)
                     .font(.body)
-                    .textSelection(.enabled)
                     .padding(.horizontal, 15)
                     .padding(.vertical, 10)
                     .background(Color.userBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .selectable(text)
             }
             if queued {
                 Label("Sent while it works", systemImage: "clock")
@@ -167,7 +167,7 @@ struct Thought: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineSpacing(3)
-                    .textSelection(.enabled)
+                    .selectable(text)
                     .padding(.leading, 14)
                     .overlay(alignment: .leading) { Capsule().fill(.quaternary).frame(width: 2) }
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -506,7 +506,7 @@ struct ToolStep: View {
                     case .assistant(let blocks, _, _):
                         let text = blocks.compactMap { if case .text(let t) = $0 { t } else { nil } }.joined(separator: "\n")
                         if !text.isEmpty {
-                            Text(text).font(.subheadline).padding(.vertical, 4)
+                            Text(text).font(.subheadline).padding(.vertical, 4).selectable(text)
                         }
                     default:
                         EmptyView()
@@ -586,8 +586,8 @@ struct TerminalCard: View {
                 }
                 .font(.system(size: 11.5, design: .monospaced))
                 .lineSpacing(2)
-                .textSelection(.enabled)
                 .fixedSize(horizontal: true, vertical: false)
+                .selectable(printed.isEmpty ? command : "$ \(command)\n\(printed)", code: true)
             }
             if lines.count > shown.count {
                 Button("Show all \(lines.count) lines") { withAnimation { all = true } }
@@ -629,7 +629,7 @@ struct OutputCard: View {
                 Text(shown.joined(separator: "\n"))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(failed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                    .textSelection(.enabled)
+                    .selectable(text, code: true)
             }
             if lines.count > shown.count {
                 Button("Show all \(lines.count) lines") { withAnimation { all = true } }

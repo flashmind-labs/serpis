@@ -10,7 +10,7 @@ struct MarkdownView: View {
     var body: some View {
         Markdown(text)
             .markdownTheme(.serpis)
-            .textSelection(.enabled)
+            .selectable(text, markdown: true)
     }
 }
 

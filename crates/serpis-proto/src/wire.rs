@@ -543,6 +543,9 @@ pub struct ModelInfo {
     pub model: String,
     pub name: String,
     pub reasoning: bool,
+    /// The thinking levels it takes, lowest first (empty from nodes before this field).
+    #[serde(default)]
+    pub thinking_levels: Vec<String>,
     pub images: bool,
     #[serde(default)]
     pub context_window: u64,

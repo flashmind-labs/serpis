@@ -51,7 +51,16 @@ struct ChatView: View {
                 if atBottom { position.scrollTo(edge: .bottom) }
             }
             .overlay {
-                if chat.entries.isEmpty && !chat.running {
+                if chat.loading {
+                    VStack(spacing: 12) {
+                        ProgressView().controlSize(.large)
+                        Text("Loading chat from \(app.machine(chat.machine)?.name ?? "the machine")…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("chat-loading")
+                } else if chat.entries.isEmpty && !chat.running {
                     ContentUnavailableView {
                         Label(app.machine(chat.machine)?.name ?? "", systemImage: "desktopcomputer")
                     } description: {
@@ -102,27 +111,48 @@ struct ChatView: View {
     private var subtitle: String {
         let machine = app.machine(chat.machine)?.name ?? ""
         if chat.running, let step = chat.state?.step, !step.isEmpty { return step }
-        if !chat.connected { return "\(machine) · reconnecting…" }
+        if !chat.connected && !chat.loading { return "\(machine) · reconnecting…" }
         let folder = chat.state.map { ($0.cwd as NSString).lastPathComponent } ?? ""
         return folder.isEmpty ? machine : "\(folder) · \(machine)"
     }
 
     private var modelMenu: some View {
-        Menu {
-            ForEach(chat.models) { m in
-                Button {
-                    Task { await chat.setModel(m.model) }
+        let levels = chat.thinkingLevels
+        let thinking = levels.isEmpty ? nil : chat.state.map { thinkingName($0.thinking) }
+        return Menu {
+            if let thinking {
+                Menu {
+                    ForEach(levels.reversed(), id: \.self) { level in
+                        Button {
+                            Task { await chat.setThinking(level) }
+                        } label: {
+                            if level == chat.state?.thinking { Label(thinkingName(level), systemImage: "checkmark") } else { Text(thinkingName(level)) }
+                        }
+                    }
                 } label: {
-                    if m.model == chat.model { Label(m.name, systemImage: "checkmark") } else { Text(m.name) }
+                    Text("Thinking")
+                    Text(thinking)
+                }
+            }
+            Section("Model") {
+                ForEach(chat.models) { m in
+                    Button {
+                        Task { await chat.setModel(m.model) }
+                    } label: {
+                        if m.model == chat.model { Label(m.name, systemImage: "checkmark") } else { Text(m.name) }
+                    }
                 }
             }
         } label: {
-            Text(chat.modelName)
-                .font(.subheadline)
-                .lineLimit(1)
+            VStack(alignment: .trailing, spacing: 0) {
+                Text(chat.modelName).font(.subheadline)
+                if let thinking { Text("Thinking: \(thinking)").font(.caption2).foregroundStyle(.secondary) }
+            }
+            .lineLimit(1)
         }
         .disabled(chat.models.isEmpty || chat.running)
         .accessibilityLabel("Model")
+        .accessibilityValue(thinking.map { "\(chat.modelName), thinking \($0)" } ?? chat.modelName)
     }
 
     /// A tool call waiting for you: what it wants, and the answers.

@@ -175,6 +175,8 @@ struct Splice: Decodable {
 struct ChatState: Decodable, Hashable {
     var title: String
     var model: String?
+    /// Its thinking level: "off", "low", "high", …
+    var thinking: String
     var running: Bool
     var step: String?
     var cwd: String
@@ -189,12 +191,13 @@ struct ChatState: Decodable, Hashable {
     /// Stopped at a usage limit: when it goes on by itself (nil: it waits for you).
     var continuesAt: Date?
 
-    private enum Keys: String, CodingKey { case title, model, running, step, cwd, session_id, last_error, permission_mode, thinking_tokens, limit, continues_at }
+    private enum Keys: String, CodingKey { case title, model, thinking, running, step, cwd, session_id, last_error, permission_mode, thinking_tokens, limit, continues_at }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         model = try? c.decode(String.self, forKey: .model)
+        thinking = (try? c.decode(String.self, forKey: .thinking)) ?? ""
         running = (try? c.decode(Bool.self, forKey: .running)) ?? false
         step = try? c.decode(String.self, forKey: .step)
         cwd = (try? c.decode(String.self, forKey: .cwd)) ?? ""
@@ -312,7 +315,27 @@ struct ModelInfo: Decodable, Hashable, Identifiable {
     var model: String
     var name: String
     var images: Bool
+    /// The thinking levels to offer, lowest first; none when it doesn't think.
+    var thinkingLevels: [String]
     var id: String { model }
+
+    private enum Keys: String, CodingKey { case model, name, images, reasoning, thinking_levels }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        model = try c.decode(String.self, forKey: .model)
+        name = try c.decode(String.self, forKey: .name)
+        images = (try? c.decode(Bool.self, forKey: .images)) ?? false
+        let levels = (try? c.decode([String].self, forKey: .thinking_levels)) ?? []
+        let reasoning = (try? c.decode(Bool.self, forKey: .reasoning)) ?? false
+        // A node from before `thinking_levels` only says whether it thinks; it fits these to the model.
+        thinkingLevels = levels.isEmpty && reasoning ? ["off", "low", "medium", "high"] : levels == ["off"] ? [] : levels
+    }
+}
+
+/// A thinking level, in words.
+func thinkingName(_ level: String) -> String {
+    level == "xhigh" ? "Extra high" : level.prefix(1).uppercased() + level.dropFirst()
 }
 
 /// A node's answer: only the fields the app reads, by the answer's kind.
