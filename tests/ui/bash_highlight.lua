@@ -11,6 +11,8 @@ serpis.agent.reload_models()
 serpis.agent.model("mock/m")
 serpis.var.set("session-directories", {})
 serpis.var.set("remote-rayfish", false)
+-- Open cards, as this is about how a command shows (tool_cards.lua: how they close).
+serpis.var.set("chat-tool-compact", false)
 
 local function when(ready, go, tries)
   tries = tries or 0

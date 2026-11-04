@@ -10,6 +10,8 @@ models.json). What it says depends on the last user message:
   LONG ...        reply with a long answer (paragraphs, lists, code, a table)
   READ:<path>     call read on that path
   SHELL:<command> call bash with that command
+  DESCRIBED:<description>|<command> the same, saying what it is for
+  STEPS:<description>|<command>;;... several, one after another
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
   EDIT:<path>|<old>|<new>   call edit on that file, replacing old with new
@@ -61,11 +63,20 @@ class Handler(BaseHTTPRequestHandler):
             }) + "\n")
 
         delta, finish = {"role": "assistant", "content": "ok"}, "stop"
-        if last.get("role") == "tool":
+        # STEPS: one command after another in the same turn.
+        users = [m for m in messages if m.get("role") == "user"]
+        asked = text_of(users[-1].get("content")) if users else ""
+        step_list = asked[6:].split(";;") if asked.startswith("STEPS:") else []
+        after = messages[len(messages) - messages[::-1].index(users[-1]):] if users else []
+        ran = sum(1 for m in after if m.get("role") == "tool")
+        call = None
+        if ran < len(step_list) and step_list:
+            description, command = step_list[ran].split("|", 1)
+            call = ("bash", {"command": command, "description": description})
+        elif last.get("role") == "tool":
             delta["content"] = "done"
         else:
             prompt = text_of(last.get("content"))
-            call = None
             if prompt.startswith("THINK"):
                 delta["reasoning_content"] = "\n".join(f"step {i}" for i in range(1, 7))
             if prompt.startswith("LONG"):
@@ -85,6 +96,9 @@ class Handler(BaseHTTPRequestHandler):
                 call = ("read", {"path": prompt[5:]})
             elif prompt.startswith("TOOL"):
                 call = ("bash", {"command": "echo hi"})
+            elif prompt.startswith("DESCRIBED:"):
+                description, command = prompt[10:].split("|", 1)
+                call = ("bash", {"command": command, "description": description})
             elif prompt.startswith("SHELL:"):
                 call = ("bash", {"command": prompt[6:]})
             elif prompt.startswith("LUA:"):
@@ -94,12 +108,12 @@ class Handler(BaseHTTPRequestHandler):
                 call = ("edit", {"path": path, "edits": [{"oldText": old, "newText": new}]})
             elif prompt.startswith("API:"):
                 call = ("serpis_api", {"topic": prompt[4:]})
-            if call:
-                delta = {"role": "assistant", "tool_calls": [{
-                    "index": 0, "id": f"call_{count}", "type": "function",
-                    "function": {"name": call[0], "arguments": json.dumps(call[1])},
-                }]}
-                finish = "tool_calls"
+        if call:
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": f"call_{count}", "type": "function",
+                "function": {"name": call[0], "arguments": json.dumps(call[1])},
+            }]}
+            finish = "tool_calls"
 
         chunks = [
             {"id": "r", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},

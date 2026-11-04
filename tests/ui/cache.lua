@@ -41,6 +41,7 @@ local function count_messages(text)
   for _, m in ipairs(d.messages()) do if m:find(text, 1, true) then n = n + 1 end end
   return n
 end
+local miss_rows
 local function transcript_has(text) return serpis.chat.transcript(chat):find(text, 1, true) ~= nil end
 
 local project = sh("mktemp -d"):gsub("%s+$", "")
@@ -209,6 +210,43 @@ steps({
     T.check("an hour later the cache is cold", serpis.chat.cache(chat).state, "cold")
   end,
   turn("back", 1, "expired", "after an hour the provider's cache expired"),
+  function()
+    miss_rows = select(2, serpis.chat.transcript(chat):gsub("cache miss: ", ""))
+    write("CLAUDE.md", "Use tabs.\nAnd write tests.\nAnd keep it short.\n")
+    serpis.command.run("chat-refresh-context")
+  end,
+  turn("READ 1", 2, "prefix:system[0],none", "a miss on a turn that goes on to a tool"),
+  function(go)
+    local at, line, text = nil, nil, serpis.chat.transcript(chat)
+    local n = 0
+    for l in (text .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if l:find("⚠", 1, true) then at, line = n, l end
+    end
+    T.check("the tool's line has the warning sign", at ~= nil, true)
+    T.check("instead of a row of its own", select(2, text:gsub("cache miss: ", "")), miss_rows)
+    -- The sign is the line's last character.
+    local col = select(2, line:gsub("[^\128-\191]", ""))
+    serpis.command.run("chat-focus-transcript")
+    serpis.defer(800, function()
+      local r = d.cell_rect(at, col)
+      d.mouse_move(r.x + r.w / 2, r.y + r.h / 2)
+      serpis.defer(1200, function()
+        if os.getenv("SERPIS_TEST_SHOTS") then d.screenshot(os.getenv("SERPIS_TEST_SHOTS") .. "/cache-hint.png") end
+        serpis.defer(500, function()
+          -- A click on the sign still opens the card, as on the rest of its line.
+          local before = #serpis.chat.transcript(chat)
+          d.mouse_button(r.x + r.w / 2, r.y + r.h / 2, "left", true)
+          d.mouse_button(r.x + r.w / 2, r.y + r.h / 2, "left", false)
+          serpis.defer(400, function()
+            T.check("clicking it opens the card", #serpis.chat.transcript(chat) > before, true)
+            go()
+          end)
+        end)
+      end)
+    end)
+    return false
+  end,
   function()
     T.check("sending warned that it had expired", last_message("The prompt cache expired") ~= nil, true)
     T.check("and the miss is named as expiry", (serpis.chat.cache(chat).misses[3] or {}).cause, "expired")

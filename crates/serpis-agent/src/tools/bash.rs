@@ -62,6 +62,7 @@ impl AgentTool for BashTool {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
+                "description": {"type": "string", "description": "What the command is for, in a few words, for the person following along: \"Run the test suite\", \"Find where cards are drawn\". Give one with every command."},
                 "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}
             },
             "required": ["command"]

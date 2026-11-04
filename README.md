@@ -315,6 +315,17 @@ end)
 
 ## Shell commands in chats
 
+A command or lookup that goes well closes to one line when it finishes, so a run of them reads as a
+list of what the agent did: `✓ Run the test suite   4 steps   12s`. That line is the agent's own
+description of the command where it gave one, else the command. A click or `TAB` opens it to the exact
+commands and everything they printed. What is running stays open with a spinner, its output live;
+so do failures and what waits for your approval, and `edit` and `write` keep showing their diffs.
+`chat-tool-compact` and `chat-tool-spinner` turn these off.
+
+Usage and cache lines stay out of such a run: its total is in the composer, and the turn's last
+message has its own. A call whose request missed the prompt cache shows `⚠` on its line, and
+hovering the sign says why and what it cost.
+
 A bash card shows a chain of commands (`cd x && make 2>&1 | tail; echo done`) a step per row, with
 the operator joining each to the last in a gutter on the left, so you can read it at a glance and
 see what depends on what. Its header counts the steps. Pipelines, loops, subshells, quotes and
@@ -322,7 +333,7 @@ heredocs stay whole, and a command that can't be fully understood shows as writt
 display changes: what runs is the command as written. Selected and copied, the rows still run the
 same, with each operator at the end of its row.
 
-The steps stay in view above what it printed. A closed card shows `chat-shell-steps-shown` of them
+On an open card, the steps stay in view above what it printed. Until opened, one shows `chat-shell-steps-shown` of them
 (6, fewer if they run past 10 lines); opened, or waiting for your approval, all. `chat-shell-steps`
 turns this off.
 

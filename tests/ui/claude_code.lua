@@ -326,7 +326,7 @@ local steps = {
   function()
     T.check("its own turn shows, after what started it", has("Background command finished: sleep then echo bg-done"), true)
     T.check("with what it said", has("The background command finished: bg-done."), true)
-    T.check("and its card says how it ended", has("completed (exit code 0)"), true)
+    T.check("and its card says how it ended, closed to its line", has("✓  sleep then echo bg-done"), true)
   end,
   function(go)
     -- Thinking that isn't sent still shows: a Thinking… line, with how much so far.

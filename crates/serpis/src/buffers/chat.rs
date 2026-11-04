@@ -141,6 +141,8 @@ pub struct ChatBuffer {
 }
 
 const PREVIEW_LINES: usize = 10;
+/// How much of a command with no description a closed card's one line shows.
+const COMPACT_COMMAND_CHARS: usize = 100;
 
 impl ChatBuffer {
     /// A chat buffer. `params`: `machine` (default: this one), and what it shows: `chat`, a chat
@@ -622,6 +624,8 @@ impl ChatBuffer {
         let output_lines = ed.var("chat-task-output-lines").and_then(Value::as_u64).unwrap_or(8) as usize;
         let shell_steps = ed.var("chat-shell-steps").and_then(Value::as_bool).unwrap_or(true);
         let shell_steps_shown = ed.var("chat-shell-steps-shown").and_then(Value::as_u64).unwrap_or(6) as usize;
+        let tool_compact = ed.var("chat-tool-compact").and_then(Value::as_bool).unwrap_or(true);
+        let tool_spinner = ed.var("chat-tool-spinner").and_then(Value::as_bool).unwrap_or(true);
         let mut thinking_lines = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
@@ -748,7 +752,9 @@ impl ChatBuffer {
                         }
                     }
                     // Usage closes an answer; turns that only call tools don't repeat it.
-                    let calls_tools = blocks.iter().any(|b| matches!(b, AssistantContent::ToolCall(_)));
+                    // A turn that goes on to tools has its usage in the composer's total, so a run
+                    // of them reads as a list. (Its calls are entries of their own by now.)
+                    let calls_tools = blocks.iter().any(|b| matches!(b, AssistantContent::ToolCall(_))) || (tool_compact && matches!(self.entries.get(ei + 1), Some(Entry::Tool { .. })));
                     if let Some(u) = usage.as_ref().filter(|_| !calls_tools || error.is_some()) {
                         if u.total_tokens > 0 {
                             let mut line = StyledLine::new(format_usage(u), Face::Meta).gap(8.0 * k);
@@ -770,11 +776,18 @@ impl ChatBuffer {
                 }
                 Entry::Tool { name, args, partial, result, elapsed_ms, ask, task, steps, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
-                    let side = Side { task: task.as_deref(), steps, output_lines, shell_steps, shell_steps_shown };
+                    // The request behind this call missed the cache: said by the card (below).
+                    let cache_miss = match self.entries.get(ei + 1) {
+                        Some(Entry::Info { text, .. }) if tool_compact && crate::cache_watch::is_miss_notice(text) => Some(text.as_str()),
+                        _ => None,
+                    };
+                    let side = Side { task: task.as_deref(), steps, output_lines, shell_steps, shell_steps_shown, tool_compact, tool_spinner, cache_miss };
                     for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), ask.as_ref(), side, v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
+                // A run of tools stays a list: its card has a warning sign that says this.
+                Entry::Info { text, .. } if tool_compact && prev_tool && crate::cache_watch::is_miss_notice(text) => continue,
                 Entry::Info { text, tone } => {
                     let face = match tone {
                         Tone::Meta => Face::Meta,
@@ -1573,6 +1586,12 @@ struct Side<'a> {
     /// (`chat-shell-steps-shown`).
     shell_steps: bool,
     shell_steps_shown: usize,
+    /// Commands and lookups that went well close to their header (`chat-tool-compact`).
+    tool_compact: bool,
+    /// What is running shows a spinner (`chat-tool-spinner`).
+    tool_spinner: bool,
+    /// The notice of a prompt cache miss on the request that made this call.
+    cache_miss: Option<&'a str>,
 }
 
 /// How work on the side is going, in a few words: "in background · 12s", "3 tools · 1.2k
@@ -1681,30 +1700,52 @@ fn tool_lines(
     let card = Block::new(t.tool_bg).border(t.border);
     // What it would do is what you need to see to allow it.
     let expanded = expanded.unwrap_or_else(|| ask.is_some() || default_expanded(name, result));
+    // Running, shown turning (the character stays in the text, unseen, for copying).
+    let spinning = side.tool_spinner && ask.is_none() && if result.is_some() { working } else { started.is_some() };
     let mut header = format!("{icon}  ");
-    let mut spans = vec![(0..icon.len(), icon_face)];
+    let mut spans = vec![(0..icon.len(), if spinning { Face::Unseen } else { icon_face })];
+    // What a command is for, in the agent's words, says it better than the tool's name.
+    let description = if name == "bash" { arg(args, "description").lines().next().unwrap_or("").trim() } else { "" };
     let s0 = header.len();
-    header.push_str(name);
+    header.push_str(if description.is_empty() { name } else { description });
     spans.push((s0..header.len(), Face::ToolHeader));
+    // Done and fine: just its line, opened to see how.
+    let closes = side.tool_compact && matches!(name, "bash" | "read" | "grep" | "find" | "ls" | "web_search") && side.steps.is_empty();
+    let compact = closes && !expanded && result.is_some_and(|r| !r.is_error) && !side.task.is_some_and(|t| t.running() || t.status == "failed");
     let summary = serpis_chat::tool_summary(name, args);
     // A command reads as one: its lines highlighted together (the first is the header's).
     let command: Vec<&str> = if name == "bash" { arg(args, "command").lines().collect() } else { Vec::new() };
     let command_hl = crate::highlight::shell(&command).unwrap_or_default();
-    // A chain of commands: its steps show in rows of their own, so the header just counts them.
-    let chain = if name == "bash" && side.shell_steps { crate::shell_steps::split(arg(args, "command")) } else { None };
+    // A chain of commands: its steps show in rows of their own. A described command's show the
+    // same way, as the header no longer has it.
+    let whole = arg(args, "command");
+    let chain = if name == "bash" && side.shell_steps { crate::shell_steps::split(whole) } else { None };
+    let step_list = chain.clone().or_else(|| (!description.is_empty() && !whole.trim().is_empty()).then(|| vec![crate::shell_steps::Step { op: None, range: 0..whole.len() }]));
+    if description.is_empty() {
+        // Not described: what it does, as a chain's first step that isn't just a cd, in a line.
+        let first_step = chain.as_ref().map(|steps| {
+            let step = steps.iter().find(|s| !whole[s.range.clone()].starts_with("cd ")).unwrap_or(&steps[0]);
+            whole[step.range.clone()].lines().next().unwrap_or("").to_string()
+        });
+        let line = first_step.as_deref().unwrap_or(&summary);
+        let cut = if compact && line.chars().count() > COMPACT_COMMAND_CHARS { Some(format!("{}…", line.chars().take(COMPACT_COMMAND_CHARS).collect::<String>())) } else { None };
+        let shown = cut.as_deref().unwrap_or(line);
+        if !shown.is_empty() {
+            header.push_str("  ");
+            let s1 = header.len();
+            header.push_str(shown);
+            let hl = if shown == summary { command_hl.first().cloned() } else if name == "bash" { crate::highlight::shell(&[shown]).and_then(|h| h.into_iter().next()) } else { None };
+            match hl {
+                Some(hl) => spans.extend(shift(Some(&hl), s1)),
+                None => spans.push((s1..header.len(), Face::ToolArgs)),
+            }
+        }
+    }
     if let Some(steps) = &chain {
-        header.push_str("  ");
+        header.push_str("   ");
         let s1 = header.len();
         header.push_str(&format!("{} steps", steps.len()));
         spans.push((s1..header.len(), Face::Meta));
-    } else if !summary.is_empty() {
-        header.push_str("  ");
-        let s1 = header.len();
-        header.push_str(&summary);
-        match command_hl.first() {
-            Some(hl) => spans.extend(shift(Some(hl), s1)),
-            None => spans.push((s1..header.len(), Face::ToolArgs)),
-        }
     }
     let time = match (elapsed, started) {
         _ if ask.is_some() => "waiting for you".to_string(),
@@ -1718,6 +1759,16 @@ fn tool_lines(
         let s2 = header.len();
         header.push_str(&time);
         spans.push((s2..header.len(), Face::Meta));
+    }
+
+    let mut hint = None;
+    if let Some(miss) = side.cache_miss {
+        header.push_str("   ");
+        let s3 = header.len();
+        header.push('⚠');
+        spans.push((s3..header.len(), Face::MetaWarn));
+        let at = header[..s3].chars().count();
+        hint = Some((at..at + 1, miss.to_string()));
     }
 
     // Body lines, each with an optional row tint (diffs).
@@ -1847,7 +1898,7 @@ fn tool_lines(
         } else if name == "bash" || name == "serpis_lua" {
             // The rest of the command (or Lua code), then what it printed.
             let cmd = arg(args, if name == "bash" { "command" } else { "code" });
-            for (i, l) in cmd.lines().enumerate().skip(1).filter(|_| chain.is_none()) {
+            for (i, l) in cmd.lines().enumerate().skip(1).filter(|_| step_list.is_none()) {
                 body.push((StyledLine::new(l, Face::ToolArgs).spans(command_hl.get(i).cloned().unwrap_or_default()), None));
             }
             let out = result.map(|r| tool_text(r)).or(partial.map(str::to_string)).unwrap_or_default();
@@ -1913,8 +1964,11 @@ fn tool_lines(
         }
     }
 
-    // A chain's steps stay in view above what it printed, however much that is.
-    let mut rows = chain.as_ref().map(|steps| chain_rows(arg(args, "command"), steps, &command_hl, if expanded { usize::MAX } else { side.shell_steps_shown }, t)).unwrap_or_default();
+    if compact {
+        slice.clear();
+    }
+    // A command's steps stay in view above what it printed, however much that is.
+    let mut rows = step_list.as_ref().filter(|_| !compact).map(|steps| chain_rows(whole, steps, &command_hl, if expanded { usize::MAX } else { side.shell_steps_shown }, t)).unwrap_or_default();
     if let (Some(last), Some((first, _))) = (rows.last_mut(), slice.first_mut()) {
         last.rule_below = Some(t.border);
         last.pad_bottom = 7.0 * k;
@@ -1924,6 +1978,8 @@ fn tool_lines(
 
     let n = slice.len() + 1;
     let mut head = StyledLine::new(header, Face::ToolArgs).spans(spans).block(card.nth(0, n)).indent(12.0 * k).gap(gap).pad(7.0 * k, 7.0 * k);
+    head.spinner = spinning.then_some(t.accent);
+    head.hint = hint;
     if n > 1 {
         head.rule_below = Some(t.border);
     }
@@ -1949,7 +2005,8 @@ fn tool_lines(
 /// copied still runs the same.
 fn chain_rows(cmd: &str, steps: &[crate::shell_steps::Step], hl: &[crate::highlight::Spans], shown: usize, t: &crate::theme::Theme) -> Vec<StyledLine> {
     let k = t.ui_scale();
-    let gutter = (t.mono_size * 1.2).ceil() + 8.0;
+    // A lone step has no operators to hang.
+    let gutter = if steps.len() > 1 { (t.mono_size * 1.2).ceil() + 8.0 } else { 0.0 };
     // Each line of the command, and where it starts.
     let lines: Vec<(usize, &str)> = cmd.lines().map(|l| (l.as_ptr() as usize - cmd.as_ptr() as usize, l)).collect();
     let mut rows = Vec::new();
@@ -1968,6 +2025,11 @@ fn chain_rows(cmd: &str, steps: &[crate::shell_steps::Step], hl: &[crate::highli
             let (a, b) = (step.range.start.max(*start), step.range.end.min(start + line.len()));
             if a > b || (a == b && !step.range.contains(start)) {
                 continue;
+            }
+            // A step running long (a heredoc's text) is cut too.
+            if shown != usize::MAX && rows.len() >= PREVIEW_LINES {
+                rows.push(StyledLine::new(format!("{} more lines · TAB or click to expand", lines.len() - n), Face::Meta).indent(gutter).pad(3.0 * k, 0.0));
+                return rows;
             }
             let spans = hl.get(n).into_iter().flatten().filter_map(|(r, f)| {
                 let (x, y) = (r.start + start, r.end + start);

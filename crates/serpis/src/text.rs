@@ -415,6 +415,10 @@ pub struct StyledLine {
     pub marker: Option<(String, Face)>,
     /// An image shown instead of text: store id (`crate::images`) and size in points.
     pub image: Option<(u64, egui::Vec2)>,
+    /// A spinner of this color over the line's first character, turning while it is on screen.
+    pub spinner: Option<Color32>,
+    /// What hovering these characters of the line says.
+    pub hint: Option<(Range<usize>, String)>,
 }
 
 impl StyledLine {
@@ -479,6 +483,7 @@ impl StyledLine {
         }
         self.marker.as_ref().map(|(m, f)| (m, *f as u8)).hash(&mut h);
         self.image.map(|(id, s)| (id, s.x.to_bits(), s.y.to_bits())).hash(&mut h);
+        self.spinner.map(|c| c.to_array()).hash(&mut h);
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -1120,6 +1125,21 @@ impl DocView {
                 }
                 None => {
                     painter.galley(origin, g.clone(), theme.fg);
+                }
+            }
+            if let (Some(color), Some(row)) = (line.spinner, g.rows.first()) {
+                let width = row.glyphs.first().map_or(row.rect().height(), |g| g.advance_width);
+                let time = painter.ctx().input(|i| i.time);
+                crate::chrome::spinner(&painter, origin + egui::vec2(width / 2.0, row.rect().height() / 2.0), row.rect().height() * 0.26, time, color);
+                // Only asked for while it is on screen.
+                painter.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            if let Some((range, text)) = &line.hint {
+                for r in range_rects(&g, range.start, range.end, false) {
+                    let area = r.translate(origin.to_vec2()).expand(4.0).intersect(rect);
+                    if area.is_positive() {
+                        ui.interact(area, ui.scope_id().with(("line-hint", i)), egui::Sense::hover()).on_hover_text(text);
+                    }
                 }
             }
             if let Some(b) = block {

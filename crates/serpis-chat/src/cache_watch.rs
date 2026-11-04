@@ -79,9 +79,16 @@ pub struct Miss {
     pub cost: f64,
 }
 
+/// Whether a chat's notice is a miss's ([`Miss::notice`]).
+pub fn is_miss_notice(text: &str) -> bool {
+    text.starts_with(MISS_NOTICE)
+}
+
+const MISS_NOTICE: &str = "cache miss: ";
+
 impl Miss {
     pub fn notice(&self) -> String {
-        format!("cache miss: {}; rewrote {} tokens ({})", self.cause.describe(), fmt_tokens(self.tokens), fmt_cost(self.cost))
+        format!("{MISS_NOTICE}{}; rewrote {} tokens ({})", self.cause.describe(), fmt_tokens(self.tokens), fmt_cost(self.cost))
     }
 }
 
