@@ -43,4 +43,27 @@ final class SerpisTests: XCTestCase {
         let text = styledMarkdown("## Steps\n\nA **bold** and `code` word.\n\n```sh\necho **raw** *\n```\n\nThe [end](https://example.com).").string
         XCTAssertEqual(text, "Steps\n\nA bold and code word.\n\necho **raw** *\n\nThe end.")
     }
+
+    func testMarkdownBlocks() {
+        let blocks = MarkdownBlock.parse("# Title\n\nSome **text**.\n\n1. One\n   - [x] done\n\n> said\n\n---\n\n| A | B |\n|---|--:|\n| 1 |  |\n\n```sh\nls\n```")
+        func described(_ b: MarkdownBlock) -> String {
+            switch b.kind {
+            case .heading(let l, let t): "h\(l) \(String(t.characters))"
+            case .text(let t, let depth, let marker, let quoted): "p\(depth) \(marker.map { "\($0)" } ?? "-") \(quoted) \(String(t.characters))"
+            case .code(let language, let code): "code \(language) \(code)"
+            case .table(let columns, let rows): "table \(columns.count) \(rows.map { $0.map { String($0.characters) } })"
+            case .rule: "rule"
+            }
+        }
+        XCTAssertEqual(blocks.map(described), [
+            "h1 Title",
+            "p0 - false Some text.",
+            #"p1 number("1.") false One"#,
+            "p2 task(done: true) false done",
+            "p0 - true said",
+            "rule",
+            #"table 2 [["A", "B"], ["1", ""]]"#,
+            "code sh ls",
+        ])
+    }
 }

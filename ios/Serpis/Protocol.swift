@@ -276,6 +276,8 @@ enum Event: Decodable {
     }
 }
 
+extension Event: @unchecked Sendable {}
+
 /// A chat open on a machine now.
 struct ChatSummary: Decodable {
     var chat: String

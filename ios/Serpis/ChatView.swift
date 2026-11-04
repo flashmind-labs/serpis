@@ -17,18 +17,7 @@ struct ChatView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 20) {
-                    let items = Item.of(chat.entries)
-                    ForEach(items) { item in
-                        switch item {
-                        case .entry(_, let entry): EntryView(entry: entry)
-                        case .work(_, let entries): WorkView(entries: entries, live: chat.running && item.id == items.last?.id)
-                        }
-                    }
-                    if chat.running, ChatView.waitingOnReply(chat.entries.last) {
-                        Working(thinking: chat.state?.thinkingTokens)
-                    }
-                }
+                TranscriptRows(chat: chat)
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
@@ -47,7 +36,7 @@ struct ChatView: View {
             } action: { _, end in
                 atBottom = end
             }
-            .onChange(of: chat.entries) { _, _ in
+            .onChange(of: chat.revision) { _, _ in
                 if atBottom { position.scrollTo(edge: .bottom) }
             }
             .overlay {
@@ -69,24 +58,27 @@ struct ChatView: View {
                     .foregroundStyle(.secondary)
                 }
             }
-            if !atBottom && !chat.entries.isEmpty {
-                Button {
-                    withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
-                } label: {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 38, height: 38)
-                        .background(.regularMaterial, in: Circle())
-                        .overlay(Circle().strokeBorder(Color.hairline, lineWidth: 0.5))
-                        .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
+            // (Animated here alone: over the whole chat, the transcript would animate with it.)
+            ZStack {
+                if !atBottom && !chat.entries.isEmpty {
+                    Button {
+                        withAnimation(.snappy) { position.scrollTo(edge: .bottom) }
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(width: 38, height: 38)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(Color.hairline, lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 10)
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    .accessibilityLabel("Scroll to the bottom")
                 }
-                .buttonStyle(.plain)
-                .padding(.bottom, 10)
-                .transition(.scale(scale: 0.8).combined(with: .opacity))
-                .accessibilityLabel("Scroll to the bottom")
             }
+            .animation(.snappy, value: atBottom)
         }
-        .animation(.snappy, value: atBottom)
         .safeAreaInset(edge: .bottom) { composer }
         .navigationTitle(chat.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -463,6 +455,27 @@ struct ChatView: View {
             }
         }
         images = out
+    }
+}
+
+/// The transcript's rows. A view of its own so that what changes around it (what you type, say)
+/// doesn't touch them.
+private struct TranscriptRows: View {
+    let chat: ChatModel
+
+    var body: some View {
+        let items = chat.items
+        LazyVStack(alignment: .leading, spacing: 20) {
+            ForEach(items) { item in
+                switch item {
+                case .entry(_, let entry): EntryView(entry: entry).equatable()
+                case .work(_, let entries): WorkView(entries: entries, live: chat.running && item.id == items.last?.id).equatable()
+                }
+            }
+            if chat.running, ChatView.waitingOnReply(chat.entries.last) {
+                Working(thinking: chat.state?.thinkingTokens)
+            }
+        }
     }
 }
 

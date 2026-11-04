@@ -15,6 +15,7 @@ struct SerpisApp: App {
                 }
             }
             .environment(app)
+            .onAppear { FrameProbe.startIfAsked() }
             // A desktop's pairing code (the Camera app opens it here).
             .onOpenURL { url in
                 if url.scheme == "serpis", url.host() == "pair" { app.pair(url.absoluteString, label: UIDevice.current.name) }

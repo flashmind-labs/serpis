@@ -9,7 +9,17 @@ import Observation
 final class ChatModel: Identifiable {
     let machine: String
     private(set) var chat: String
-    private(set) var entries: [Entry] = []
+    private(set) var entries: [Entry] = [] { didSet { derive() } }
+    /// What the transcript shows, and what its tool calls add up to: worked out once per change.
+    private(set) var items: [Item] = []
+    /// The first tool call waiting for the person to allow it.
+    private(set) var waiting: Tool?
+    /// Tool calls whose work runs on in the background (Claude Code's commands, agents).
+    private(set) var background: [Tool] = []
+    /// What it waits on now: a command or subagent that can move to the background.
+    private(set) var foreground: [Tool] = []
+    /// Goes up whenever the transcript changes.
+    private(set) var revision = 0
     private(set) var state: ChatState?
     /// Its transcript hasn't come yet, the first time it is asked for.
     private(set) var loading = true
@@ -46,8 +56,8 @@ final class ChatModel: Identifiable {
     /// Follow the chat: opened again from its session when its machine had closed it.
     func attach() async {
         guard let app else { return }
+        // (Attached, its transcript comes as a splice: `take` ends this.)
         loading = entries.isEmpty
-        defer { loading = false }
         do {
             _ = try await app.call(machine, ["op": "attach", "chat": chat])
             connected = true
@@ -60,9 +70,11 @@ final class ChatModel: Identifiable {
                     connected = true
                 } catch {
                     notice = AppModel.describe(error)
+                    loading = false
                 }
             } else {
                 notice = AppModel.describe(error)
+                loading = false
             }
         }
         if models.isEmpty, let a = try? await app.call(machine, ["op": "models"]) {
@@ -103,19 +115,13 @@ final class ChatModel: Identifiable {
         _ = try? await app?.call(machine, ["op": "abort", "chat": chat])
     }
 
-    /// The first tool call waiting for the person to allow it.
-    var waiting: Tool? {
-        entries.lazy.compactMap(Tool.init).first { $0.ask != nil }
-    }
-
-    /// Tool calls whose work runs on in the background (Claude Code's commands, agents).
-    var background: [Tool] {
-        entries.compactMap(Tool.init).filter { $0.working && $0.side.task?.background == true }
-    }
-
-    /// What it waits on now: a command or subagent that can move to the background.
-    var foreground: [Tool] {
-        entries.compactMap(Tool.init).filter { $0.result == nil && $0.side.task?.running == true && $0.side.task?.background == false }
+    private func derive() {
+        revision += 1
+        items = Item.of(entries)
+        let tools = entries.compactMap(Tool.init)
+        waiting = tools.first { $0.ask != nil }
+        background = tools.filter { $0.working && $0.side.task?.background == true }
+        foreground = tools.filter { $0.result == nil && $0.side.task?.running == true && $0.side.task?.background == false }
     }
 
     /// Move what `tool` runs to the background (Claude Code's Ctrl+B): the turn goes on.

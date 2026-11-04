@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 // How a chat's transcript reads: your messages in bubbles on the right, the agent's answers as
@@ -54,7 +55,7 @@ extension Entry {
 }
 
 /// One entry that isn't work.
-struct EntryView: View {
+struct EntryView: View, Equatable {
     let entry: Entry
 
     var body: some View {
@@ -83,14 +84,8 @@ struct UserBubble: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
-            ForEach(images, id: \.self) { image in
-                if let data = Data(base64Encoded: image.data), let ui = UIImage(data: data) {
-                    Image(uiImage: ui)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(maxWidth: 220, maxHeight: 220)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                }
+            ForEach(images.indices, id: \.self) { i in
+                SentImageView(image: images[i])
             }
             if !text.isEmpty {
                 Text(text)
@@ -108,6 +103,38 @@ struct UserBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 56)
+    }
+}
+
+/// A picture you sent: decoded away from the main thread, at the size it shows, once.
+struct SentImageView: View {
+    let image: SentImage
+    @State private var shown: UIImage?
+    private static let cache = NSCache<NSString, UIImage>()
+
+    var body: some View {
+        Group {
+            if let shown {
+                Image(uiImage: shown).resizable().scaledToFill()
+            } else {
+                Rectangle().fill(.quaternary)
+            }
+        }
+        .frame(width: 220, height: 220)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .task(id: image.data.count) {
+            let data = image.data
+            if let hit = Self.cache.object(forKey: data as NSString) { shown = hit; return }
+            let made = await Task.detached(priority: .userInitiated) { Self.thumbnail(data) }.value
+            if let made { Self.cache.setObject(made, forKey: data as NSString) }
+            shown = made
+        }
+    }
+
+    private nonisolated static func thumbnail(_ base64: String) -> UIImage? {
+        guard let data = Data(base64Encoded: base64), let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true, kCGImageSourceThumbnailMaxPixelSize: 660] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options).map { UIImage(cgImage: $0) }
     }
 }
 
@@ -211,11 +238,13 @@ struct Working: View {
 // MARK: Work
 
 /// A stretch of work: one line saying what was done, opening onto each step.
-struct WorkView: View {
+struct WorkView: View, Equatable {
     let entries: [Entry]
     /// The chat is still working on this stretch.
     let live: Bool
     @State private var open: Bool?
+
+    nonisolated static func == (a: WorkView, b: WorkView) -> Bool { a.live == b.live && a.entries == b.entries }
 
     private var tools: [Tool] {
         entries.compactMap(Tool.init)
@@ -667,8 +696,11 @@ struct DiffView: View {
     }
 
     static func counts(_ diff: String) -> (Int, Int) {
-        let ls = lines(diff)
-        return (ls.filter { $0.sign == "+" }.count, ls.filter { $0.sign == "-" }.count)
+        var (added, removed) = (0, 0)
+        for line in diff.split(separator: "\n") {
+            if line.first == "+" { added += 1 } else if line.first == "-" { removed += 1 }
+        }
+        return (added, removed)
     }
 
     var body: some View {

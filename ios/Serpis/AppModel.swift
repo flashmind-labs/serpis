@@ -309,8 +309,7 @@ final class AppModel {
         chats[chat.machine + "/" + chat.chat] = nil
     }
 
-    fileprivate func heard(_ machine: String, _ json: String) {
-        guard let event = try? JSONDecoder().decode(Event.self, from: Data(json.utf8)) else { return }
+    fileprivate func heard(_ machine: String, _ event: Event) {
         let chat: String
         switch event {
         case .splice(let c, _), .state(let c, _), .closed(let c), .notice(let c, _, _): chat = c
@@ -332,7 +331,9 @@ private final class Bridge: Listener, @unchecked Sendable {
     @MainActor init(_ app: AppModel) { self.app = app }
 
     func event(machine: String, event: String) {
-        Task { @MainActor [weak app] in app?.heard(machine, event) }
+        // Read here, off the main thread: a long chat's transcript is a lot of JSON.
+        guard let decoded = try? JSONDecoder().decode(Event.self, from: Data(event.utf8)) else { return }
+        Task { @MainActor [weak app] in app?.heard(machine, decoded) }
     }
 
     func closed(machine: String, reason: String) {

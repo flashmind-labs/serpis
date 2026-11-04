@@ -5,11 +5,6 @@ options:
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
-packages:
-  # Markdown as answers use it, tables included (GitHub's dialect, through cmark-gfm).
-  MarkdownUI:
-    url: https://github.com/gonzalezreal/swift-markdown-ui
-    exactVersion: 2.4.1
 configFiles:
   Debug: Serpis.xcconfig
   Release: Serpis.xcconfig
@@ -28,7 +23,6 @@ targets:
       - path: build/SerpisCore.swift
         group: Generated
     dependencies:
-      - package: MarkdownUI
       - framework: build/SerpisCore.xcframework
         embed: false
       # What the core's randomness and the device key's keeping draw on.
