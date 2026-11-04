@@ -371,6 +371,26 @@ pub fn dots(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
     }
 }
 
+/// A warning: a triangle with an exclamation mark.
+pub fn warning(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let at = |x: f32, y: f32| c + egui::vec2(x * size, y * size);
+    let s = Stroke::new((size * 0.09).max(1.2), color);
+    p.add(egui::Shape::closed_line(vec![at(0.0, -0.46), at(0.5, 0.42), at(-0.5, 0.42)], s));
+    p.line_segment([at(0.0, -0.14), at(0.0, 0.12)], s);
+    p.circle_filled(at(0.0, 0.27), (size * 0.05).max(0.9), color);
+}
+
+/// A plus over a minus: changes to review.
+pub fn diff(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.4, c);
+    let arm = r.width() * 0.26;
+    let top = egui::pos2(r.center().x, r.center().y - r.height() * 0.17);
+    p.line_segment([top - egui::vec2(arm, 0.0), top + egui::vec2(arm, 0.0)], s);
+    p.line_segment([top - egui::vec2(0.0, arm), top + egui::vec2(0.0, arm)], s);
+    let y = r.center().y + r.height() * 0.33;
+    p.line_segment([egui::pos2(r.center().x - arm, y), egui::pos2(r.center().x + arm, y)], s);
+}
+
 pub fn plus(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(1.4, c);
     p.line_segment([r.center_top(), r.center_bottom()], s);

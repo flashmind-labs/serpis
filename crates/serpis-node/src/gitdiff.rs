@@ -4,11 +4,13 @@
 //! client, so comparing works the same for any machine.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use serpis_proto::wire::{DiffBranch, DiffEntry, DiffList, DiffRefs, DiffSide, DiffSpec, DiffText, Request, Response};
+use serpis_proto::wire::{DiffBranch, DiffEntry, DiffList, DiffRefs, DiffSide, DiffSpec, DiffText, DiffUpstream, Request, Response};
 
 /// A version larger than this isn't read: nobody reviews it line by line.
 pub const MAX_FILE: usize = 8 << 20;
@@ -19,6 +21,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 pub fn answer(request: &Request) -> anyhow::Result<Response> {
     Ok(match request {
         Request::DiffRefs { dir } => Response::DiffRefs { refs: refs(Path::new(dir))? },
+        Request::DiffUpstream { dir, branch, tip } => Response::DiffUpstream { upstream: upstream(Path::new(dir), branch, tip.as_deref())? },
         Request::DiffList { dir, spec } => Response::DiffList { list: list(Path::new(dir), spec)? },
         Request::DiffFile { dir, spec, path, old_path } => {
             let (old, new) = file(Path::new(dir), spec, path, old_path.as_deref())?;
@@ -95,6 +98,101 @@ pub fn refs(dir: &Path) -> anyhow::Result<DiffRefs> {
         }
     }
     Ok(DiffRefs { root: root.to_string_lossy().into_owned(), head, detached, default_branch, branches, worktrees })
+}
+
+/// How long a remote gets to answer.
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The commit `refname` is on at `remote`, asked of the remote: nothing changes here, and nobody
+/// is prompted. None when the remote doesn't have it; an error when it can't be asked.
+fn remote_tip(root: &Path, remote: &str, refname: &str) -> anyhow::Result<Option<String>> {
+    let ssh = std::env::var("GIT_SSH_COMMAND").ok().or_else(|| git(root, &["config", "core.sshCommand"]).ok().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).unwrap_or_else(|| "ssh".into());
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-remote", "--", remote, refname])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .env("GIT_SSH_COMMAND", format!("{ssh} -o BatchMode=yes"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("running git")?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= REMOTE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{remote} didn't answer");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if !status.success() {
+        bail!("couldn't ask {remote}");
+    }
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_string(&mut out)?;
+    }
+    Ok(out.split_whitespace().next().map(str::to_string))
+}
+
+/// How local `branch` stands against what it follows, or `origin`'s branch of the same name when
+/// it follows nothing. With `tip`, that commit stands for the remote's and nothing is asked.
+pub fn upstream(dir: &Path, branch: &str, tip: Option<&str>) -> anyhow::Result<Option<DiffUpstream>> {
+    check_rev(branch)?;
+    let root = root_of(dir)?;
+    let local = format!("refs/heads/{branch}");
+    let Ok(here) = git(&root, &["rev-parse", "--verify", "--quiet", &format!("{local}^{{commit}}")]) else {
+        return Ok(None); // A remote's branch itself: nothing local to be behind.
+    };
+    let here = here.trim();
+    let format = "--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:short)";
+    let tracking = git(&root, &["for-each-ref", format, &local])?;
+    let fields: Vec<&str> = tracking.trim_end().split('\0').collect();
+    let (remote, refname, name) = match fields[..] {
+        // A branch following another branch here has no remote to fall behind.
+        ["." | "", ..] | [_] | [] => {
+            if fields.first() == Some(&".") || git(&root, &["remote", "get-url", "origin"]).is_err() {
+                return Ok(None);
+            }
+            ("origin".to_string(), local.clone(), format!("origin/{branch}"))
+        }
+        [remote, refname, name, ..] => (remote.to_string(), refname.to_string(), name.to_string()),
+        [_, _] => return Ok(None),
+    };
+    let (tip, checked) = match tip {
+        Some(t) => {
+            if !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+                bail!("{t:?} isn't a commit");
+            }
+            (t.to_string(), true)
+        }
+        None => match remote_tip(&root, &remote, &refname) {
+            Ok(Some(t)) => (t, true),
+            Ok(None) => return Ok(None),
+            // Offline, or not allowed: what the last fetch saw.
+            Err(_) => match git(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{name}^{{commit}}")]) {
+                Ok(t) => (t.trim().to_string(), false),
+                Err(_) => return Ok(None),
+            },
+        },
+    };
+    if tip == here {
+        return Ok(Some(DiffUpstream { upstream: name, tip, ahead: 0, behind: 0, unfetched: false, checked }));
+    }
+    let known = raw(&root, &["cat-file", "-e", &format!("{tip}^{{commit}}")]).is_ok_and(|o| o.status.success());
+    if !known {
+        return Ok(Some(DiffUpstream { upstream: name, tip, ahead: 0, behind: 0, unfetched: true, checked }));
+    }
+    let counts = git(&root, &["rev-list", "--left-right", "--count", &format!("{here}...{tip}")])?;
+    let mut counts = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
+    let (ahead, behind) = (counts.next().unwrap_or(0), counts.next().unwrap_or(0));
+    Ok(Some(DiffUpstream { upstream: name, tip, ahead, behind, unfetched: false, checked }))
 }
 
 /// The commit a side of a comparison stands on, for finding where it forked.
@@ -366,6 +464,78 @@ mod tests {
         assert!(r.branches.iter().any(|b| b.name == "main" && !b.current));
         assert!(!r.worktrees.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A throwaway `origin`, a clone of it with `main` and `work`, and a second clone to push from.
+    fn with_origin(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let top = std::env::temp_dir().join(format!("serpis-upstream-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(&top).unwrap();
+        let sh = |cmd: &str| assert!(Command::new("sh").arg("-c").arg(cmd).current_dir(&top).output().unwrap().status.success(), "{cmd}");
+        let id = "git config user.email t@t && git config user.name t";
+        sh("git init -q --bare -b main origin.git");
+        sh(&format!("git clone -q origin.git here 2>/dev/null; cd here && {id} && git checkout -q -b main && git commit -q --allow-empty -m one && git push -q -u origin main && git checkout -q -b work"));
+        sh(&format!("git clone -q origin.git there && cd there && {id}"));
+        (top.join("here"), top.join("there"), top)
+    }
+    fn sh_in(dir: &Path, cmd: &str) {
+        let o = Command::new("sh").arg("-c").arg(cmd).current_dir(dir).output().unwrap();
+        assert!(o.status.success(), "{cmd}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+    fn counts(u: &DiffUpstream) -> (u32, u32, bool, bool) {
+        (u.ahead, u.behind, u.unfetched, u.checked)
+    }
+
+    #[test]
+    fn a_branch_against_its_remote() {
+        let (here, there, top) = with_origin("states");
+        let now = |tip| upstream(&here, "main", tip).unwrap().unwrap();
+        assert_eq!(now(None).upstream, "origin/main");
+        assert_eq!(counts(&now(None)), (0, 0, false, true), "up to date");
+
+        // The remote moves: nothing here knows that commit yet, and asking fetches nothing.
+        sh_in(&there, "git commit -q --allow-empty -m two && git push -q origin main");
+        let before = git(&here, &["rev-parse", "refs/remotes/origin/main"]).unwrap();
+        let moved = now(None);
+        assert_eq!(counts(&moved), (0, 0, true, true), "not fetched");
+        assert_eq!(git(&here, &["rev-parse", "refs/remotes/origin/main"]).unwrap(), before, "asking changes no refs");
+
+        // Fetched, but the local branch hasn't moved. Given the tip, nothing is asked.
+        sh_in(&here, "git fetch -q origin");
+        assert_eq!(counts(&now(None)), (0, 1, false, true), "behind");
+        assert_eq!(counts(&now(Some(moved.tip.as_str()))), (0, 1, false, true), "behind, from the tip given");
+
+        // Its own commits too.
+        sh_in(&here, "git checkout -q main && git commit -q --allow-empty -m mine");
+        assert_eq!(counts(&now(None)), (1, 1, false, true), "diverged");
+        sh_in(&here, "git reset -q --hard origin/main && git commit -q --allow-empty -m mine");
+        assert_eq!(counts(&now(None)), (1, 0, false, true), "ahead only");
+        let _ = std::fs::remove_dir_all(&top);
+    }
+
+    #[test]
+    fn a_branch_against_a_remote_that_cant_be_reached_or_followed() {
+        let (here, there, top) = with_origin("odd");
+        // Follows nothing: origin's branch of the same name stands in.
+        sh_in(&there, "git commit -q --allow-empty -m two && git push -q origin main");
+        sh_in(&here, "git branch --unset-upstream main");
+        assert_eq!(upstream(&here, "main", None).unwrap().unwrap().upstream, "origin/main");
+        assert!(upstream(&here, "main", None).unwrap().unwrap().unfetched);
+        // Not on the remote at all, or not a local branch.
+        assert_eq!(upstream(&here, "work", None).unwrap(), None);
+        assert_eq!(upstream(&here, "origin/main", None).unwrap(), None);
+        assert_eq!(upstream(&here, "nope", None).unwrap(), None);
+        assert!(upstream(&here, "-x", None).is_err());
+        // Following a branch here: no remote to fall behind.
+        sh_in(&here, "git branch --set-upstream-to=main work");
+        assert_eq!(upstream(&here, "work", None).unwrap(), None);
+        // Unreachable: what the last fetch saw, marked as such.
+        sh_in(&here, "git fetch -q origin && git branch -u origin/main main && git remote set-url origin /nonexistent/origin.git");
+        assert_eq!(counts(&upstream(&here, "main", None).unwrap().unwrap()), (0, 1, false, false));
+        // No remote at all.
+        sh_in(&here, "git remote remove origin");
+        assert_eq!(upstream(&here, "main", None).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&top);
     }
 
     #[test]

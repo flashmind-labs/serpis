@@ -135,6 +135,10 @@ leaves. Hover buttons and right-click menus (`sidebar-buffer-menu`, `sidebar-pro
 `sidebar-worktree-menu`) start chats and terminals in a project or worktree, create and remove
 worktrees and kill buffers.
 
+The buttons at the top of the sidebar, and those on a project's or worktree's row when you hover
+over it, include Review changes (`±`), which opens `diff-view` for the current folder, or for that
+row's project or worktree.
+
 Every project can have any number of chats. `worktree-new-chat` (`s-N`) asks for a branch,
 runs `git worktree add` under `worktree-directory` (default `~/.serpis/worktrees/<project>/<branch>`)
 and opens a chat there; `worktree-remove` kills the worktree's buffers and removes it after
@@ -286,6 +290,14 @@ A review waits until it is sent. Comments not sent yet, a comment still being wr
 compared, the file showing and viewed marks are kept per worktree under `reviews/` in the config
 folder: quit, come back, and `s-D` carries on where you stopped. Sent and resolved comments show
 until the page closes and aren't kept.
+
+The `vs <branch>` button compares with your local branch, not the remote's. A warning icon beside
+it says when that branch is out of date, and hovering says by how much and whether to fetch or
+pull. The page asks the remote with `git ls-remote` when it opens and every
+`diff-upstream-check-seconds` (300) while on screen. That changes nothing in the repository and
+never prompts: when the remote can't be reached, it goes by the last fetch, and the icon's text
+says so. A branch following nothing is compared with `origin`'s of the same name. 0 turns this off,
+and scripts read it from `serpis.diff.info().upstream`.
 
 The other settings are `diff-view-style`, `diff-split-min-width`, `diff-wrap`,
 `diff-context-lines`, `diff-file-tree`, `diff-tree-width`, `diff-default-source`,
@@ -690,7 +702,8 @@ and shell its node has, and its zsh gets serpis's prompt marks (`terminal-shell-
   extension in `~/.config/serpis/extensions/` (`name.lua` or `name/init.lua`), loaded after it.
   `reload-config` reloads them all, as does saving any of them with `config-auto-reload` on. Commands, keymaps, hooks, settings, buffers, windows, chats (model,
   usage, abort, session entries) and agent tools; the reference is `crates/serpis/src/extend.rs`. See
-  `examples/extensions/` for ports of pi's max-money and model-presets extensions. One rule keeps
+  `examples/extensions/` for ports of pi's max-money and model-presets extensions, and `checklist`,
+  a list to tick off before starting a task and before shipping it, from a pill in a chat's header. One rule keeps
   prompt caching working: hooks and tools may block or add, never rewrite what a chat already sent
   (earlier messages, the system prompt, tool definitions), or every turn rewrites the cache.
   `serpis.chat.cache` and the `cache-miss` hook show what an extension does to it.

@@ -77,10 +77,10 @@ local function done_count()
   return n
 end
 local function click(rect)
-  local x, y = (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2
+  local x, y = rect.x + rect.w / 2, rect.y + rect.h / 2
   d.mouse_move(x, y)
-  d.mouse_button(x, y, "primary", true)
-  d.mouse_button(x, y, "primary", false)
+  d.mouse_button(x, y, "left", true)
+  d.mouse_button(x, y, "left", false)
 end
 list = {
   function()
@@ -119,7 +119,7 @@ list = {
   end,
   function()
     T.check("j moves on and RET ticks the next, keeping the place", d.candidates()[2].checked, true)
-    d.screenshot((os.getenv("CHECKLIST_SHOTS") or out) .. ".pill.png")
+    d.screenshot(out .. ".pill.png")
     T.press("k")
   end,
   function()

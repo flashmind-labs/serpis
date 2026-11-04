@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use egui::text::LayoutJob;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, TextFormat};
-use serpis_proto::wire::{DiffEntry, DiffRefs, DiffSide, DiffSpec, Request, Response};
+use serpis_proto::wire::{DiffEntry, DiffRefs, DiffSide, DiffSpec, DiffUpstream, Request, Response};
 
 use super::engine::{self, FileDiff, Kind, Options, Row, Whitespace};
 use super::review::{self, Ask, Comment, Saved, State, Which};
@@ -186,6 +186,13 @@ pub struct DiffBuffer {
     pub root: String,
     pub spec: Option<DiffSpec>,
     pub refs: Option<DiffRefs>,
+    /// How the branch "vs" compares with stands against its remote, and which branch that was.
+    pub upstream: Option<DiffUpstream>,
+    upstream_for: Option<String>,
+    upstream_asking: bool,
+    /// When the remote was last asked, and when the answer was last looked at again.
+    pub(crate) upstream_asked: Option<Instant>,
+    upstream_looked: Option<Instant>,
     pub merge_base: Option<String>,
     pub files: Vec<DiffEntry>,
     pub error: Option<String>,
@@ -260,6 +267,11 @@ impl DiffBuffer {
             dir,
             spec,
             refs: None,
+            upstream: None,
+            upstream_for: None,
+            upstream_asking: false,
+            upstream_asked: None,
+            upstream_looked: None,
             merge_base: None,
             files: Vec::new(),
             error: None,
@@ -379,6 +391,61 @@ impl DiffBuffer {
     }
 
     /// Read the list of files again.
+    /// The branch the upstream answer is about.
+    pub fn upstream_base(&self) -> Option<String> {
+        self.upstream_for.clone()
+    }
+
+    /// Keep up with how the base branch stands against its remote: the remote is asked every
+    /// `diff-upstream-check-seconds`, and while it warns, the answer is looked at again as the
+    /// page refreshes, so it clears as soon as the branch is pulled.
+    fn check_upstream(&mut self, ed: &mut Editor, refresh: f64) {
+        let Some(id) = self.id else { return };
+        let every = ed.var("diff-upstream-check-seconds").and_then(serde_json::Value::as_f64).unwrap_or(300.0);
+        let branch = ed.var_str("diff-base-branch").filter(|b| !b.is_empty()).or_else(|| self.refs.as_ref().and_then(|r| r.default_branch.clone()));
+        if every <= 0.0 || branch.is_none() {
+            self.upstream = None;
+            self.upstream_for = None;
+            self.upstream_asked = None;
+            return;
+        }
+        if self.upstream_asking || self.root.is_empty() {
+            return;
+        }
+        if self.upstream_for != branch {
+            self.upstream = None;
+            self.upstream_for = branch.clone();
+            self.upstream_asked = None;
+        }
+        let ask_remote = self.upstream_asked.is_none_or(|t| t.elapsed() >= Duration::from_secs_f64(every));
+        let warns = self.upstream.as_ref().is_some_and(|u| u.unfetched || u.behind > 0);
+        let look = refresh > 0.0 && warns && self.upstream_looked.is_none_or(|t| t.elapsed() >= Duration::from_secs_f64(refresh));
+        if !ask_remote && !look {
+            return;
+        }
+        let Some(branch) = branch else { return };
+        let tip = if ask_remote { None } else { self.upstream.as_ref().map(|u| u.tip.clone()) };
+        self.upstream_asking = true;
+        let request = Request::DiffUpstream { dir: self.root.clone(), branch: branch.clone(), tip };
+        ask(ed, self.machine.as_deref(), request, move |ed, r| {
+            ed.with_buffer_as::<DiffBuffer, _>(id, |b, _| {
+                b.upstream_asking = false;
+                let now = Instant::now();
+                b.upstream_looked = Some(now);
+                if ask_remote {
+                    b.upstream_asked = Some(now);
+                }
+                // A node too old for this, or a git error: nothing to warn about.
+                if b.upstream_for.as_deref() == Some(branch.as_str()) {
+                    match r {
+                        Ok(Response::DiffUpstream { upstream }) => b.upstream = upstream,
+                        _ => b.upstream = None,
+                    }
+                }
+            });
+        });
+    }
+
     pub fn refresh(&mut self, ed: &mut Editor) {
         let (Some(id), Some(spec)) = (self.id, self.spec.clone()) else {
             self.start(ed);
@@ -1100,6 +1167,21 @@ thread_local! {
     static CONTEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(3) };
 }
 
+/// What to tell the person when local `branch` is out of date with its remote.
+pub fn upstream_warning(branch: &str, u: &DiffUpstream) -> Option<String> {
+    let commits = |n: u32| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+    let what = if u.unfetched {
+        format!("{} has commits that local {branch} doesn't, and they haven't been fetched. Fetch or pull to include them.", u.upstream)
+    } else if u.behind > 0 {
+        let own = if u.ahead > 0 { format!(", and has {} of its own", commits(u.ahead)) } else { String::new() };
+        format!("Local {branch} is {} behind {}{own}. Pull to include them.", commits(u.behind), u.upstream)
+    } else {
+        return None;
+    };
+    let when = if u.checked { "" } else { " As of the last fetch: the remote couldn't be reached." };
+    Some(format!("{what} This page compares with local {branch}, so it may show changes already upstream.{when}"))
+}
+
 /// Which comparison a page starts with (`diff-default-source`).
 pub fn default_spec(ed: &Editor, refs: &DiffRefs) -> DiffSpec {
     let set = ed.var_str("diff-default-source").unwrap_or_else(|| "auto".into());
@@ -1350,6 +1432,15 @@ impl Controls<'_> {
     }
 
     /// A button that opens a list: a chevron after its label.
+    /// A warning icon explained on hover.
+    fn warning(&mut self, key: &str, tip: &str) {
+        let k = self.t.ui_scale();
+        let r = self.place(18.0 * k);
+        let _ = self.ui.interact(r, self.id.with(key), Sense::hover()).on_hover_text(tip);
+        chrome::warning(self.painter, r.center(), 16.0 * k, self.t.yellow);
+        self.hits.push((key.to_string(), r));
+    }
+
     fn menu_button(&mut self, key: &str, label: &str, tip: &str, on: bool) -> bool {
         let k = self.t.ui_scale();
         let w = self.width(label) + 14.0 * k;
@@ -1388,7 +1479,11 @@ impl Buffer for DiffBuffer {
     fn poll(&mut self, ed: &mut Editor) {
         let Some(id) = self.id else { return };
         let every = ed.var("diff-refresh-seconds").and_then(serde_json::Value::as_f64).unwrap_or(2.0);
-        if every <= 0.0 || self.listing || self.spec.is_none() || !ed.visible_buffers().contains(&id) {
+        if !ed.visible_buffers().contains(&id) {
+            return;
+        }
+        self.check_upstream(ed, every);
+        if every <= 0.0 || self.listing || self.spec.is_none() {
             return;
         }
         // Rewriting history can't happen under a fixed pair of commits, but a branch moves.
@@ -1433,6 +1528,9 @@ impl Buffer for DiffBuffer {
                 if c.button("branch", &format!("vs {b}"), "What this branch would bring, from where it forked", on) {
                     pick_source = Some(against(b));
                 }
+                if let Some(tip) = self.upstream.as_ref().filter(|_| self.upstream_for.as_ref() == Some(b)).and_then(|u| upstream_warning(b, u)) {
+                    c.warning("upstream-warning", &tip);
+                }
             }
             let view = if self.split_now { "Side by side" } else { "Unified" };
             let tip = if unified_only { "Too narrow for side by side (diff-split-min-width)" } else { "Side by side or unified (diff-toggle-view, s)" };
@@ -1445,6 +1543,11 @@ impl Buffer for DiffBuffer {
             let toggle_tree = c.button("tree", "Files", "The list of files (diff-toggle-tree, b)", self.show_tree);
             (c.next_row(), toggle_split, toggle_wrap, toggle_all, toggle_tree)
         };
+        if let Some((_, r)) = hits.iter().find(|(key, _)| key == "upstream-warning") {
+            ed.debug_rects.insert("diff-upstream-warning", *r);
+        } else {
+            ed.debug_rects.remove("diff-upstream-warning");
+        }
         if let Some(s) = pick_source {
             self.set_spec(ed, s);
         }
