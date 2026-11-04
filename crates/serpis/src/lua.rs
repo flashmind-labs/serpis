@@ -946,12 +946,18 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     // UI segments.
     let ui = lua.create_table()?;
     for (key, header) in [("status", false), ("header", true)] {
-        ui.set(key, lua.create_function(move |lua, (name, f): (String, Function)| {
+        ui.set(key, lua.create_function(move |lua, (name, f, opts): (String, Function, Option<Table>)| {
             let lua = lua.clone();
-            ed(|e| e.add_segment(header, &name, OWNER, move |e, buf| {
-                let arg = buf.map(|b| json!(buffer_id_to_u64(b))).unwrap_or(Value::Null);
-                call(e, &lua, &f, &arg).and_then(|v| v.as_str().map(str::to_string))
-            }))
+            let command: Option<String> = opts.and_then(|o| o.get("command").ok());
+            ed(|e| {
+                e.add_segment(header, &name, OWNER, move |e, buf| {
+                    let arg = buf.map(|b| json!(buffer_id_to_u64(b))).unwrap_or(Value::Null);
+                    call(e, &lua, &f, &arg).and_then(|v| v.as_str().map(str::to_string))
+                });
+                if header {
+                    e.set_segment_command(&name, command);
+                }
+            })
         })?)?;
     }
     s.set("ui", ui)?;
@@ -966,10 +972,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                 match v? {
                     LuaValue::String(s) => cands.push(crate::minibuffer::Candidate::new(s.to_string_lossy().to_string())),
                     LuaValue::Table(t) => {
-                        let label: String = t.get("label")?;
-                        let value: Option<String> = t.get("value")?;
-                        let detail: Option<String> = t.get("detail")?;
-                        cands.push(crate::minibuffer::Candidate::new(label.clone()).value(value.unwrap_or(label)).detail(detail.unwrap_or_default()));
+                        cands.push(candidate_of(&t)?);
                     }
                     _ => {}
                 }
@@ -982,6 +985,8 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let on_select: Option<Function> = spec.get("on_select").ok();
         let on_cancel: Option<Function> = spec.get("on_cancel").ok();
         let frecency: Option<String> = spec.get("frecency").ok();
+        let on_toggle: Option<Function> = spec.get("on_toggle").ok();
+        let searchable = spec.get::<Option<bool>>("search").ok().flatten().unwrap_or(true);
         let l = lua.clone();
         ed(|e| {
             let la = l.clone();
@@ -1007,6 +1012,15 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                 })
             });
             e.minibuffer_preview(select, cancel, keep_order);
+            let lt = l.clone();
+            if let Some(m) = e.minibuffer.as_mut() {
+                m.searchable = searchable;
+                m.on_toggle = on_toggle.map(|f| -> crate::minibuffer::ToggleFn {
+                    std::rc::Rc::new(move |e: &mut Editor, c: &crate::minibuffer::Candidate| {
+                        call(e, &lt, &f, &json!(c.value));
+                    })
+                });
+            }
             if let Some(cat) = &frecency {
                 e.minibuffer_frecency(cat, !keep_order);
             }
@@ -1038,10 +1052,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             match v? {
                 LuaValue::String(s) => cands.push(crate::minibuffer::Candidate::new(s.to_string_lossy().to_string())),
                 LuaValue::Table(t) => {
-                    let label: String = t.get("label")?;
-                    let value: Option<String> = t.get("value")?;
-                    let detail: Option<String> = t.get("detail")?;
-                    cands.push(crate::minibuffer::Candidate::new(label.clone()).value(value.unwrap_or(label)).detail(detail.unwrap_or_default()));
+                    cands.push(candidate_of(&t)?);
                 }
                 _ => {}
             }
@@ -1568,7 +1579,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     // The open prompt's visible candidates, best first: {label, detail}.
     debug.set("candidates", lua.create_function(|lua, ()| {
         let v = ed(|e| {
-            e.minibuffer.as_ref().map(|m| m.filtered.iter().map(|(i, _)| json!({"label": m.candidates[*i].label, "detail": m.candidates[*i].detail})).collect::<Vec<_>>()).unwrap_or_default()
+            e.minibuffer.as_ref().map(|m| m.filtered.iter().map(|(i, _)| json!({"label": m.candidates[*i].label, "detail": m.candidates[*i].detail, "checked": m.candidates[*i].checked, "section": m.candidates[*i].section})).collect::<Vec<_>>()).unwrap_or_default()
         })?;
         lua_of(lua, &v)
     })?)?;
@@ -1823,4 +1834,15 @@ pub fn poll_reload(ed: &mut Editor) {
     } else if rt.changed_at.is_some() {
         ed.ctx.request_repaint_after(Duration::from_millis(160));
     }
+}
+
+/// A prompt's candidate from Lua's {label, value?, detail?, checked?, section?}.
+fn candidate_of(t: &Table) -> mlua::Result<crate::minibuffer::Candidate> {
+    let label: String = t.get("label")?;
+    let value: Option<String> = t.get("value")?;
+    let detail: Option<String> = t.get("detail")?;
+    let mut c = crate::minibuffer::Candidate::new(label.clone()).value(value.unwrap_or(label)).detail(detail.unwrap_or_default());
+    c.checked = t.get("checked")?;
+    c.section = t.get("section")?;
+    Ok(c)
 }

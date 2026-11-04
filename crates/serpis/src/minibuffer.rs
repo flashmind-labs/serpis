@@ -12,6 +12,10 @@ pub struct Candidate {
     pub detail: String,
     /// Value returned on accept; defaults to the label.
     pub value: String,
+    /// Drawn as a checkbox, ticked or not.
+    pub checked: Option<bool>,
+    /// The heading this candidate falls under, drawn above the first of each.
+    pub section: Option<String>,
 }
 
 impl Candidate {
@@ -21,6 +25,8 @@ impl Candidate {
             value: label.clone(),
             label,
             detail: String::new(),
+            checked: None,
+            section: None,
         }
     }
     pub fn detail(mut self, d: impl Into<String>) -> Self {
@@ -37,6 +43,8 @@ pub type AcceptFn = Box<dyn FnOnce(&mut Editor, Option<Candidate>, String)>;
 /// Called whenever the selected candidate changes (live preview, like consult's `:state`).
 pub type SelectFn = std::rc::Rc<dyn Fn(&mut Editor, Option<&Candidate>)>;
 pub type CancelFn = Box<dyn FnOnce(&mut Editor)>;
+/// Called on RET or a click instead of accepting: the prompt stays open.
+pub type ToggleFn = std::rc::Rc<dyn Fn(&mut Editor, &Candidate)>;
 pub type CandidatesFn = Box<dyn Fn(&str) -> Vec<Candidate>>;
 
 pub struct Minibuffer {
@@ -72,6 +80,11 @@ pub struct Minibuffer {
     pub cycle: Option<CycleFn>,
     /// More candidates are on their way (a list fetched from elsewhere): shown as a moving bar.
     pub loading: bool,
+    /// Instead of accepting, RET and clicks call this and the prompt stays open.
+    pub on_toggle: Option<ToggleFn>,
+    /// No search field: a list to go through. SPC does what RET does, `j` and `k` move, and
+    /// other typing is ignored.
+    pub searchable: bool,
 }
 
 /// Replaces the open prompt's candidates for the next (+1) or previous (-1) set.
@@ -204,6 +217,8 @@ impl Editor {
             on_select: None,
             on_cancel: None,
             keep_order: false,
+            on_toggle: None,
+            searchable: true,
             previewed: None,
             instant: false,
             prefer_input: true,
@@ -240,6 +255,8 @@ impl Editor {
             on_select: None,
             on_cancel: None,
             keep_order: false,
+            on_toggle: None,
+            searchable: true,
             previewed: None,
             instant: false,
             prefer_input: true,
@@ -266,6 +283,14 @@ impl Editor {
 pub fn accept(ed: &mut Editor) {
     let Some(mut mb) = ed.minibuffer.take() else { return };
     mb.refilter();
+    if let Some(f) = mb.on_toggle.clone() {
+        let cand = mb.current().cloned();
+        ed.minibuffer = Some(mb);
+        if let Some(c) = cand {
+            f(ed, &c);
+        }
+        return;
+    }
     let input = mb.input.text();
     let cand = mb.current().cloned();
     if mb.require_match && cand.is_none() {
@@ -367,6 +392,15 @@ pub fn notify_selection(ed: &mut Editor) {
 }
 
 pub fn insert_text(ed: &mut Editor, text: &str) {
+    if ed.minibuffer.as_ref().is_some_and(|mb| !mb.searchable) {
+        match text {
+            " " => accept(ed),
+            "j" => move_sel(ed, 1),
+            "k" => move_sel(ed, -1),
+            _ => {}
+        }
+        return;
+    }
     if let Some(mb) = &mut ed.minibuffer {
         let text = text.replace('\n', " ");
         let c = mb.input.cursor();

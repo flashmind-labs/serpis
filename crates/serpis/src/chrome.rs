@@ -344,6 +344,18 @@ pub fn check(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
     p.add(egui::Shape::line(vec![at(-0.36, 0.02), at(-0.1, 0.28), at(0.38, -0.28)], Stroke::new((size * 0.14).max(1.2), color)));
 }
 
+/// A checkbox: an outline, or filled with a tick.
+pub fn checkbox(p: &egui::Painter, c: Pos2, size: f32, checked: bool, t: &Theme) {
+    let r = Rect::from_center_size(c, egui::vec2(size, size));
+    let radius = (size * 0.24).round() as u8;
+    if checked {
+        p.rect_filled(r, radius, t.accent);
+        check(p, c, size * 0.8, on(t.accent, t));
+    } else {
+        p.rect_stroke(r, radius, Stroke::new(1.5, t.fg_faint), egui::StrokeKind::Inside);
+    }
+}
+
 /// A speech bubble: a comment.
 pub fn bubble(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
     let at = |x: f32, y: f32| c + egui::vec2(x * size, y * size);

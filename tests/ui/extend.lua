@@ -238,7 +238,7 @@ steps({
   function()
     local r = requests()
     T.check("serpis_api: guide names the extensions dir", r[11]:find("/extensions/NAME.lua", 1, true) ~= nil, true)
-    T.check("serpis_api: guide lists loaded extensions", r[11]:find("Loaded now: max-money, model-presets", 1, true) ~= nil, true)
+    T.check("serpis_api: guide lists loaded extensions", r[11]:find("Loaded now: checklist, max-money, model-presets", 1, true) ~= nil, true)
     serpis.chat.prompt(other, "API:hooks")
   end,
   function(go)

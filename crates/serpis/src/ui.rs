@@ -494,7 +494,7 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     let mut status_left = bx;
     let entries: Vec<(&String, Option<&String>)> = header_extra
         .iter()
-        .map(|s| (s, None))
+        .map(|(s, cmd)| (s, cmd.as_ref()))
         .chain(modeline.status.iter().enumerate().map(|(i, s)| (s, modeline.status_commands.get(i).and_then(Option::as_ref))))
         .collect();
     // Entries with a command become buttons once the header's own click area exists (they
@@ -756,7 +756,21 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
     let input_h = (46.0 * k).round();
     let max_rows = 10usize;
     let n = mb.filtered.len().min(max_rows);
-    let list_h = if n > 0 { n as f32 * row_h + 12.0 * k } else { 0.0 };
+    let start = mb.selected.saturating_sub(max_rows - 1);
+    // Section headings, above the first shown row of each.
+    let section_h = (28.0 * k).round();
+    let mut headings = vec![None; n];
+    let mut last = None;
+    for (slot, (ci, _)) in headings.iter_mut().zip(mb.filtered.iter().skip(start)) {
+        let section = mb.candidates[*ci].section.clone();
+        if section.is_some() && section != last {
+            *slot = section.clone();
+        }
+        last = section;
+    }
+    let headings_h = headings.iter().flatten().count() as f32 * section_h;
+    let hint_h = if mb.searchable { 0.0 } else { (30.0 * k).round() };
+    let list_h = if n > 0 { n as f32 * row_h + headings_h + 12.0 * k + hint_h } else { 0.0 };
     let card = Rect::from_min_size(egui::pos2(full.center().x - w / 2.0, full.top() + (full.height() * 0.12).max(40.0)), egui::vec2(w, input_h + list_h));
     let radius = (12.0 * k).round() as u8;
     let shadow = egui::epaint::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if t.dark { 140 } else { 50 }) };
@@ -767,21 +781,30 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
     // Input row: icon, prompt, text, count.
     let input = Rect::from_min_size(card.min, egui::vec2(w, input_h));
     let cy = input.center().y;
-    chrome::magnifier(&painter, egui::pos2(input.left() + 20.0 * k, cy - 1.0), 5.5 * k, t.fg_faint);
+    if mb.searchable {
+        chrome::magnifier(&painter, egui::pos2(input.left() + 20.0 * k, cy - 1.0), 5.5 * k, t.fg_faint);
+    }
     let prompt = mb.prompt.trim_end().trim_end_matches(':').trim_end().to_string();
     let small = FontId::proportional(t.font_size - 2.0);
-    let mut x = input.left() + 38.0 * k;
-    if !prompt.is_empty() {
+    let mut x = input.left() + if mb.searchable { 38.0 } else { 18.0 } * k;
+    if !mb.searchable {
+        x += chrome::text(&painter, egui::pos2(x, cy), &prompt, FontId::proportional(t.font_size), t.fg, w / 2.0);
+    } else if !prompt.is_empty() {
         let pr = chrome::pill(&painter, x, cy, &prompt, small.clone(), t.accent, chrome::tint(t.accent, 0.14), false);
         x = pr.right() + 8.0 * k;
     }
-    let count = if !mb.candidates.is_empty() || mb.dynamic.is_some() { format!("{} of {}", mb.filtered.len(), mb.candidates.len()) } else { String::new() };
+    let ticked = mb.candidates.iter().filter(|c| c.checked == Some(true)).count();
+    let count = if mb.candidates.iter().any(|c| c.checked.is_some()) && !mb.searchable {
+        format!("{ticked} of {} done", mb.candidates.len())
+    } else if !mb.candidates.is_empty() || mb.dynamic.is_some() { format!("{} of {}", mb.filtered.len(), mb.candidates.len()) } else { String::new() };
     let count_w = chrome::text_width(&painter, &count, small.clone());
     let input_rect = Rect::from_min_max(egui::pos2(x, input.top()), egui::pos2(input.right() - count_w - 24.0 * k, input.bottom()));
     mb.input.view.padding = egui::vec2(2.0, (input_h - t.font_size * 1.4) / 2.0);
     mb.input.view.wrap = false;
-    let src = PlainLines { lines: &mb.input.doc.lines, face: Face::Default };
-    mb.input.view.show(&mut pui, input_rect, &src, t, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true, selection: Default::default() });
+    if mb.searchable {
+        let src = PlainLines { lines: &mb.input.doc.lines, face: Face::Default };
+        mb.input.view.show(&mut pui, input_rect, &src, t, &ViewOptions { focused: true, cursor: CursorShape::Bar, show_cursor: true, selection: Default::default() });
+    }
     if !count.is_empty() {
         chrome::text(&painter, egui::pos2(input.right() - 16.0 * k - count_w, cy), &count, small.clone(), t.fg_faint, count_w + 1.0);
     }
@@ -797,31 +820,47 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
     let mut clicked = None;
     if n > 0 {
         painter.hline(card.left()..=card.right(), input.bottom(), Stroke::new(1.0, t.border));
-        let start = mb.selected.saturating_sub(max_rows - 1);
         let font = FontId::proportional(t.font_size - 0.5);
+        let mut y = input.bottom() + 6.0 * k;
         for (i, (ci, positions)) in mb.filtered.iter().enumerate().skip(start).take(max_rows) {
             let c = &mb.candidates[*ci];
-            let y = input.bottom() + 6.0 * k + (i - start) as f32 * row_h;
+            if let Some(section) = &headings[i - start] {
+                chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, y + section_h * 0.58), section, small.clone(), t.fg_faint, w - 36.0 * k);
+                y += section_h;
+            }
+            let row_y = y;
+            y += row_h;
+            let y = row_y;
             let r = Rect::from_min_size(egui::pos2(card.left() + 6.0 * k, y), egui::vec2(w - 12.0 * k, row_h));
             let resp = pui.interact(r, egui::Id::unique(("palette-row", i)), Sense::click());
             if i == mb.selected {
                 painter.rect_filled(r, 8.0 * k, chrome::selected_bg(t));
+                ed.debug_rects.insert("palette-selected-row", r);
             } else if resp.hovered() {
                 painter.rect_filled(r, 8.0 * k, chrome::hover_bg(t));
             }
             if resp.clicked() {
                 clicked = Some(i);
             }
+            let mut label_x = r.left() + 12.0 * k;
+            if let Some(checked) = c.checked {
+                chrome::checkbox(&painter, egui::pos2(label_x + 8.0 * k, r.center().y), 16.0 * k, checked, t);
+                label_x += 26.0 * k;
+            }
             let mut job = egui::text::LayoutJob::default();
             for (ix, ch) in c.label.chars().enumerate() {
                 let mut f = t.format(if positions.contains(&ix) { Face::Bold } else { Face::Default });
                 f.font_id = font.clone();
-                f.color = if positions.contains(&ix) { t.accent } else { t.fg };
+                f.color = if positions.contains(&ix) { t.accent } else if c.checked == Some(true) { t.fg_dim } else { t.fg };
                 job.append(&ch.to_string(), 0.0, f);
             }
+            if c.checked.is_some() {
+                let detail_w = if c.detail.is_empty() { 0.0 } else { chrome::text_width(&painter, &c.detail, small.clone()) + 24.0 * k };
+                job.wrap = egui::text::TextWrapping::truncate_at_width((r.right() - 10.0 * k - detail_w - label_x).max(40.0));
+            }
             let g = painter.layout_job(job);
-            let label_w = g.size().x;
-            painter.galley(egui::pos2(r.left() + 12.0 * k, r.center().y - g.size().y / 2.0), g, t.fg);
+            let label_w = g.size().x + label_x - (r.left() + 12.0 * k);
+            painter.galley(egui::pos2(label_x, r.center().y - g.size().y / 2.0), g, t.fg);
             if !c.detail.is_empty() {
                 // "s-| Split the window" → a keycap on the right, the description before it.
                 let (keys, doc) = match c.detail.split_once("   ") {
@@ -840,6 +879,12 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
                 }
             }
         }
+    }
+    if n > 0 && !mb.searchable {
+        // What the keys do, along the bottom: there's no search field to say it's a prompt.
+        let cy = card.bottom() - hint_h / 2.0;
+        painter.hline(card.left()..=card.right(), card.bottom() - hint_h, Stroke::new(1.0, t.border));
+        chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, cy), "SPC or RET ticks  ·  j k move  ·  ESC closes", small.clone(), t.fg_faint, w - 36.0 * k);
     }
     // A click outside the palette dismisses it.
     let outside = pui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !card.contains(p)));
@@ -890,6 +935,11 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
         if resp.clicked() {
             clicked = Some(k);
         }
+        let mut label_x = rrect.left() + 10.0;
+        if let Some(checked) = c.checked {
+            crate::chrome::checkbox(&painter, egui::pos2(label_x + 7.0, rrect.center().y), 14.0, checked, &theme);
+            label_x += 22.0;
+        }
         // Highlight matched characters.
         let mut job = egui::text::LayoutJob::default();
         for (i, ch) in c.label.chars().enumerate() {
@@ -901,8 +951,8 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
             });
         }
         let g = painter.layout_job(job);
-        let label_w = g.size().x;
-        painter.galley(egui::pos2(rrect.left() + 10.0, rrect.center().y - g.size().y / 2.0), g, theme.fg);
+        let label_w = g.size().x + label_x - (rrect.left() + 10.0);
+        painter.galley(egui::pos2(label_x, rrect.center().y - g.size().y / 2.0), g, theme.fg);
         if !c.detail.is_empty() {
             let max_w = rrect.width() - label_w - 40.0;
             if max_w > 40.0 {
