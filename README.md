@@ -313,6 +313,19 @@ serpis.hook.add("diff-review-send", function(p)
 end)
 ```
 
+## Shell commands in chats
+
+A bash card shows a chain of commands (`cd x && make 2>&1 | tail; echo done`) a step per row, with
+the operator joining each to the last in a gutter on the left, so you can read it at a glance and
+see what depends on what. Its header counts the steps. Pipelines, loops, subshells, quotes and
+heredocs stay whole, and a command that can't be fully understood shows as written. Only the
+display changes: what runs is the command as written. Selected and copied, the rows still run the
+same, with each operator at the end of its row.
+
+The steps stay in view above what it printed. A closed card shows `chat-shell-steps-shown` of them
+(6, fewer if they run past 10 lines); opened, or waiting for your approval, all. `chat-shell-steps`
+turns this off.
+
 ## Log
 
 `log-view` opens the `*Log*` page: what serpis logs (also printed to the terminal it was started

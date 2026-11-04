@@ -620,6 +620,8 @@ impl ChatBuffer {
         let t = &ed.theme;
         let show_thinking = ed.var_bool("chat-show-thinking");
         let output_lines = ed.var("chat-task-output-lines").and_then(Value::as_u64).unwrap_or(8) as usize;
+        let shell_steps = ed.var("chat-shell-steps").and_then(Value::as_bool).unwrap_or(true);
+        let shell_steps_shown = ed.var("chat-shell-steps-shown").and_then(Value::as_u64).unwrap_or(6) as usize;
         let mut thinking_lines = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
@@ -768,7 +770,7 @@ impl ChatBuffer {
                 }
                 Entry::Tool { name, args, partial, result, elapsed_ms, ask, task, steps, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
-                    let side = Side { task: task.as_deref(), steps, output_lines };
+                    let side = Side { task: task.as_deref(), steps, output_lines, shell_steps, shell_steps_shown };
                     for l in tool_lines(name, args, partial.as_deref(), result.as_ref(), ask.as_ref(), side, v.expanded, v.started, elapsed_ms.map(Duration::from_millis), t, gap) {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
@@ -1567,6 +1569,10 @@ struct Side<'a> {
     steps: &'a [Entry],
     /// Lines of a command's output its card shows (`chat-task-output-lines`; opened: all kept).
     output_lines: usize,
+    /// A chain of commands shows a step a row (`chat-shell-steps`), this many on a closed card
+    /// (`chat-shell-steps-shown`).
+    shell_steps: bool,
+    shell_steps_shown: usize,
 }
 
 /// How work on the side is going, in a few words: "in background · 12s", "3 tools · 1.2k
@@ -1684,7 +1690,14 @@ fn tool_lines(
     // A command reads as one: its lines highlighted together (the first is the header's).
     let command: Vec<&str> = if name == "bash" { arg(args, "command").lines().collect() } else { Vec::new() };
     let command_hl = crate::highlight::shell(&command).unwrap_or_default();
-    if !summary.is_empty() {
+    // A chain of commands: its steps show in rows of their own, so the header just counts them.
+    let chain = if name == "bash" && side.shell_steps { crate::shell_steps::split(arg(args, "command")) } else { None };
+    if let Some(steps) = &chain {
+        header.push_str("  ");
+        let s1 = header.len();
+        header.push_str(&format!("{} steps", steps.len()));
+        spans.push((s1..header.len(), Face::Meta));
+    } else if !summary.is_empty() {
         header.push_str("  ");
         let s1 = header.len();
         header.push_str(&summary);
@@ -1834,7 +1847,7 @@ fn tool_lines(
         } else if name == "bash" || name == "serpis_lua" {
             // The rest of the command (or Lua code), then what it printed.
             let cmd = arg(args, if name == "bash" { "command" } else { "code" });
-            for (i, l) in cmd.lines().enumerate().skip(1) {
+            for (i, l) in cmd.lines().enumerate().skip(1).filter(|_| chain.is_none()) {
                 body.push((StyledLine::new(l, Face::ToolArgs).spans(command_hl.get(i).cloned().unwrap_or_default()), None));
             }
             let out = result.map(|r| tool_text(r)).or(partial.map(str::to_string)).unwrap_or_default();
@@ -1900,6 +1913,15 @@ fn tool_lines(
         }
     }
 
+    // A chain's steps stay in view above what it printed, however much that is.
+    let mut rows = chain.as_ref().map(|steps| chain_rows(arg(args, "command"), steps, &command_hl, if expanded { usize::MAX } else { side.shell_steps_shown }, t)).unwrap_or_default();
+    if let (Some(last), Some((first, _))) = (rows.last_mut(), slice.first_mut()) {
+        last.rule_below = Some(t.border);
+        last.pad_bottom = 7.0 * k;
+        first.pad_top = 7.0 * k;
+    }
+    slice.splice(0..0, rows.drain(..).map(|l| (l, None)));
+
     let n = slice.len() + 1;
     let mut head = StyledLine::new(header, Face::ToolArgs).spans(spans).block(card.nth(0, n)).indent(12.0 * k).gap(gap).pad(7.0 * k, 7.0 * k);
     if n > 1 {
@@ -1908,7 +1930,8 @@ fn tool_lines(
     let mut lines = vec![head];
     for (i, (l, tint)) in slice.into_iter().enumerate() {
         let blk = Block { bg: tint.map(|c| blend(t.tool_bg, c)).unwrap_or(t.tool_bg), ..card.nth(i + 1, n) };
-        let mut l = l.block(blk).indent(12.0 * k);
+        let indent = l.indent;
+        let mut l = l.block(blk).indent(indent + 12.0 * k);
         if i == 0 {
             l.pad_top = 6.0 * k;
         }
@@ -1918,6 +1941,54 @@ fn tool_lines(
         lines.push(l);
     }
     lines
+}
+
+/// A chain's steps as rows: each operator hangs in a gutter left of its step, so long steps wrap
+/// clear of it and the steps line up. Closed, `shown` steps show (fewer when they run long).
+/// Each operator is also in the text, unseen, after the step before it: what is selected and
+/// copied still runs the same.
+fn chain_rows(cmd: &str, steps: &[crate::shell_steps::Step], hl: &[crate::highlight::Spans], shown: usize, t: &crate::theme::Theme) -> Vec<StyledLine> {
+    let k = t.ui_scale();
+    let gutter = (t.mono_size * 1.2).ceil() + 8.0;
+    // Each line of the command, and where it starts.
+    let lines: Vec<(usize, &str)> = cmd.lines().map(|l| (l.as_ptr() as usize - cmd.as_ptr() as usize, l)).collect();
+    let mut rows = Vec::new();
+    let mut steps_shown = 0;
+    for (i, step) in steps.iter().enumerate() {
+        let room = steps_shown < shown && (shown == usize::MAX || rows.len() < PREVIEW_LINES);
+        if !room {
+            let hidden = steps.len() - i;
+            let more = if hidden == 1 { "1 more step".to_string() } else { format!("{hidden} more steps") };
+            rows.push(StyledLine::new(format!("{more} · TAB or click to expand"), Face::Meta).indent(gutter).pad(3.0 * k, 0.0));
+            break;
+        }
+        steps_shown += 1;
+        let first = rows.len();
+        for (n, (start, line)) in lines.iter().enumerate() {
+            let (a, b) = (step.range.start.max(*start), step.range.end.min(start + line.len()));
+            if a > b || (a == b && !step.range.contains(start)) {
+                continue;
+            }
+            let spans = hl.get(n).into_iter().flatten().filter_map(|(r, f)| {
+                let (x, y) = (r.start + start, r.end + start);
+                (x.max(a) < y.min(b)).then(|| (x.max(a) - a..y.min(b) - a, *f))
+            });
+            rows.push(StyledLine::new(&cmd[a..b], Face::ToolArgs).spans(spans.collect()).indent(gutter));
+        }
+        if first > 0 {
+            rows[first].pad_top = 4.0 * k;
+        }
+        if let Some(op) = step.op {
+            rows[first].marker = Some((op.to_string(), Face::SynKeyword));
+            // The step before says it, for copying.
+            let before = &mut rows[first - 1];
+            let s = before.text.len();
+            before.text.push(' ');
+            before.text.push_str(op);
+            before.spans.push((s..before.text.len(), Face::Unseen));
+        }
+    }
+    rows
 }
 
 /// `over` (translucent) painted on `base`, as an opaque color.

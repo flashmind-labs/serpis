@@ -44,6 +44,8 @@ pub enum Face {
     MetaWarn,
     /// Small medium-weight labels (who is speaking, card titles).
     Label,
+    /// Text that is there to be copied, not read.
+    Unseen,
     /// Syntax highlighting (monospace, colored from the theme's palette).
     SynKeyword,
     SynString,
@@ -295,6 +297,7 @@ impl Theme {
             Face::MetaGood => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.green, t),
             Face::MetaWarn => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.yellow, t),
             Face::Label => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.fg_dim, t),
+            Face::Unseen => (self.mono(), Color32::TRANSPARENT, t),
             Face::SynKeyword => (self.mono(), self.purple, t),
             Face::SynString => (self.mono(), self.green, t),
             Face::SynComment => (self.mono(), self.fg_faint, t),

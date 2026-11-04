@@ -270,7 +270,7 @@ local steps = {
     serpis.defer(700, function()
       T.check("a click on the background work shows it, and doesn't stop it", (serpis.chat.info() or {}).background, 1)
       local line = serpis.buffer.line((serpis.buffer.cursor())) or ""
-      T.check("the cursor is on its card", line:find("sleep", 1, true) ~= nil, true)
+      T.check("the cursor is on its card", line:find("2 steps", 1, true) ~= nil, true)
       T.press("C-c C-k")
       when(function() return d.composer()["background"] == nil and has("Stopped") end, go)
     end)
@@ -404,7 +404,7 @@ local steps = {
     -- A message typed while it works goes to it at once, in the same turn.
     d.text("a long task")
     T.press("RET")
-    when(function() return has("sleep 1; echo long-done") end, go)
+    when(function() return has("sleep 1 ;") and has("echo long-done") end, go)
     return false
   end,
   function(go)

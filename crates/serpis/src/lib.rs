@@ -49,6 +49,7 @@ pub mod project;
 pub use serpis_chat::session;
 pub mod session_ui;
 pub mod sidebar;
+pub mod shell_steps;
 pub mod text;
 pub mod theme;
 pub mod themes;
@@ -170,6 +171,8 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("claude-code-skills-restart", json!(false), "When serpis's skills change, a Claude Code chat's claude restarts with its next message (resuming its session, which re-caches its prompt) to see them. Off, it sees them the next time it starts.");
     ed.defvar("agent-skills-claude", json!(false), "Chats on serpis's own agent also have Claude Code's skills (~/.claude/skills, the project's .claude/skills), after pi's when two share a name. Off by default: those synced from the Claude apps are written for tools serpis's agent doesn't have.");
     ed.defvar("claude-code-task-output-interval", json!(1000), "Milliseconds between reads of what a Claude Code chat's commands print while they run (shown on their cards, live); 0 doesn't read it. Taken up when its claude starts.");
+    ed.defvar("chat-shell-steps", json!(true), "A bash card shows a chain of commands (cd x && make; echo done) a step per row, with the operators between them in a gutter. Only how it is shown: what runs is the command as written.");
+    ed.defvar("chat-shell-steps-shown", json!(6), "Steps of a chain of commands a closed card shows (chat-shell-steps; fewer when they run past 10 lines). Opened or waiting for your approval, it shows them all.");
     ed.defvar("chat-task-output-lines", json!(8), "Lines of a running command's output its card shows (opened, the card shows all that is kept: its last 40).");
     ed.defvar("claude-code-thinking-display", json!("summarized"), "How Claude Code chats send their thinking: \"summarized\" (a summary of it, shown like any chat's thinking: chat-show-thinking), \"omitted\" (none: a Thinking… line with its token count shows instead) or \"highlights\"; \"\" leaves the flag out, for a claude too old to know it.");
     ed.defvar("claude-code-permission-mode-cycle", json!(["default", "acceptEdits", "plan", "auto"]), "The permission modes chat-cycle-permission-mode (S-TAB in a Claude Code chat) goes through, in order. Add \"bypassPermissions\" or \"dontAsk\" to reach those too.");
