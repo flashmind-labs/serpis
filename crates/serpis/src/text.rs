@@ -951,8 +951,12 @@ impl DocView {
                 self.scroll_y = self.scroll_target.take().unwrap_or(self.scroll_y) - dy;
                 self.scroll_vel = 0.0;
                 if dy > 0.0 {
-                    self.follow_tail = false;
+                    // With nowhere to scroll to, a nudge up doesn't let go of the end.
+                    self.follow_tail &= max_scroll <= 0.0;
                     resp.scrolled = true;
+                } else if self.scroll_y >= max_scroll - 1.0 {
+                    // Scrolling back to the end picks following up again.
+                    self.follow_tail = true;
                 }
             }
         }
@@ -1013,9 +1017,6 @@ impl DocView {
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
         if let Some(t) = SCROLL_TRACE.lock().unwrap().as_mut() {
             t.push((ui.input(|i| i.time), self.scroll_y));
-        }
-        if self.scroll_y >= max_scroll - 1.0 && resp.scrolled {
-            // Scrolling back to the end re-enables following.
         }
 
         // Layout visible lines.

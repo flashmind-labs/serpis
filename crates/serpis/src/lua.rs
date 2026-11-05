@@ -1497,6 +1497,17 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         e.injected_events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
         e.ctx.request_repaint();
     }))?)?;
+    // A wheel or trackpad scroll under the pointer: positive moves the content down (back in a chat).
+    debug.set("wheel", lua.create_function(|_, dy: f32| ed(|e| {
+        e.injected_events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Trackpad,
+            modifiers: egui::Modifiers::NONE,
+        });
+        e.ctx.request_repaint();
+    }))?)?;
     debug.set("mouse_button", lua.create_function(|_, (x, y, button, pressed, mods): (f32, f32, String, bool, Option<Vec<String>>)| {
         let button = match button.as_str() {
             "right" => egui::PointerButton::Secondary,
