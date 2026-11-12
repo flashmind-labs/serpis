@@ -10,6 +10,7 @@
 //! Both form one composite [`TextSurface`] (transcript lines first, then prompt lines), so
 //! motions, vim, search and yank move seamlessly between them.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -632,6 +633,21 @@ impl ChatBuffer {
         // A readable line for prose: chat-measure characters of the reading font, an average
         // character being a 26th of its lowercase alphabet (as in Bringhurst's copyfitting).
         let measure = ed.var("chat-measure").and_then(Value::as_f64).filter(|n| *n > 0.0).map(|n| n as f32 * m.width("abcdefghijklmnopqrstuvwxyz", Face::AssistantText) / 26.0);
+        // The report each finished run ends with (chat-report): entry index → its words.
+        let reports = if ed.var_bool("chat-report") {
+            let min_words = ed.var("chat-report-min-words").and_then(Value::as_u64).unwrap_or(80) as usize;
+            report_entries(&self.entries, self.running(), min_words)
+        } else {
+            HashMap::new()
+        };
+        // The report's surface: chat-report-background, a color or "none" (a rule above it
+        // instead); unset, the theme's own (report_bg).
+        let report_bg = match ed.var("chat-report-background") {
+            Some(Value::String(s)) if s == "none" => None,
+            Some(Value::String(s)) => crate::themes::parse_hex(s).or(Some(t.report_bg)),
+            _ => Some(t.report_bg),
+        };
+        let report_scale = ed.var("chat-report-scale").and_then(Value::as_f64).filter(|s| *s > 0.0).unwrap_or(1.0) as f32;
         let mut out: Vec<StyledLine> = Vec::new();
         let mut owner: Vec<Option<usize>> = Vec::new();
         let push = |out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, l: StyledLine, e: Option<usize>| {
@@ -684,7 +700,23 @@ impl ChatBuffer {
                     let fold = &v.thinking;
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
-                    if !continuation && (has_content || *streaming || error.is_some()) {
+                    let report = reports.get(&ei).copied();
+                    let report_start = out.len();
+                    if let Some(words) = report {
+                        // Set apart from the steps before it, on its own surface (or after a rule),
+                        // headed by what it is and how long it takes to read (230 words a minute).
+                        if report_bg.is_none() {
+                            push(&mut out, &mut owner, StyledLine::new("", Face::Meta).rule(t.border).gap(30.0 * k).pad(0.0, 14.0 * k), Some(ei));
+                        }
+                        let minutes = words.div_ceil(230).max(1);
+                        let label = format!("Report  ·  {}  ·  {words} words, about {minutes} min", short_model(model));
+                        let mut head = StyledLine::new(label, Face::Label).spans(vec![(0.."Report".len(), Face::Accent)]).pad(0.0, 4.0 * k);
+                        if report_bg.is_some() {
+                            head = head.gap(30.0 * k);
+                            head.pad_top = 16.0 * k;
+                        }
+                        push(&mut out, &mut owner, head, Some(ei));
+                    } else if !continuation && (has_content || *streaming || error.is_some()) {
                         let label = format!("◆  {}", short_model(model));
                         let diamond = "◆".len();
                         push(&mut out, &mut owner, StyledLine::new(label, Face::Label).spans(vec![(0..diamond, Face::Accent)]).gap(26.0 * k).pad(0.0, 4.0 * k), Some(ei));
@@ -731,10 +763,14 @@ impl ChatBuffer {
                                 }
                             }
                             AssistantContent::Text { text, .. } => {
+                                let scale = if report.is_some() { report_scale } else { 1.0 };
                                 for mut l in markdown_lines(text, t, &m, self.text_w) {
                                     // Prose (not code, tables or cards) wraps at chat-measure.
                                     if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
-                                        l.measure = measure;
+                                        l.measure = measure.map(|w| w * scale);
+                                        if scale != 1.0 {
+                                            l.scale = Some(scale);
+                                        }
                                     }
                                     push(&mut out, &mut owner, l, Some(ei));
                                 }
@@ -778,6 +814,20 @@ impl ChatBuffer {
                                 line.spans.push((start..line.text.len(), face));
                             }
                             push(&mut out, &mut owner, line, Some(ei));
+                        }
+                    }
+                    // A report's lines, its usage included, make one panel.
+                    if let (Some(_), Some(bg)) = (report, report_bg) {
+                        let n = out.len() - report_start;
+                        let panel = match t.report_border {
+                            Some(c) => Block::new(bg).border(c),
+                            None => Block::new(bg),
+                        };
+                        for (i, l) in out[report_start..].iter_mut().enumerate() {
+                            l.backdrop = Some(panel.nth(i, n));
+                        }
+                        if let Some(l) = out.last_mut() {
+                            l.pad_bottom += 16.0 * k;
                         }
                     }
                 }
@@ -1325,6 +1375,37 @@ fn list_item(raw: &str) -> Option<(usize, String, &str)> {
 }
 
 /// Markdown to styled lines for a column `avail` points wide.
+/// The reports in a transcript: in each run (from a prompt to the next), the last assistant
+/// message with text, once the run is over and if it has at least `min_words`. Entry index →
+/// its words. Prompts sent while a run goes on (queued) steer it rather than end it.
+fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap<usize, usize> {
+    let words = |e: &Entry| match e {
+        Entry::Assistant { blocks, .. } => blocks.iter().map(|b| if let AssistantContent::Text { text, .. } = b { text.split_whitespace().count() } else { 0 }).sum(),
+        _ => 0,
+    };
+    let mut out = HashMap::new();
+    let mut last: Option<usize> = None;
+    let mut finish = |last: &mut Option<usize>| {
+        if let Some(i) = last.take() {
+            let n = words(&entries[i]);
+            if n >= min_words {
+                out.insert(i, n);
+            }
+        }
+    };
+    for (i, e) in entries.iter().enumerate() {
+        match e {
+            Entry::User { queued: false, .. } => finish(&mut last),
+            Entry::Assistant { .. } if words(e) > 0 => last = Some(i),
+            _ => {}
+        }
+    }
+    if !running {
+        finish(&mut last);
+    }
+    out
+}
+
 fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) -> Vec<StyledLine> {
     let k = m.scale();
     let mut out: Vec<StyledLine> = Vec::new();
@@ -1404,7 +1485,8 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
             let level = 1 + h.chars().take_while(|c| *c == '#').count();
             let (s, spans) = inline_spans(h.trim_start_matches('#').trim());
             let face = if level <= 2 { Face::Heading } else { Face::Bold };
-            out.push(StyledLine::new(s, face).spans(spans).gap(gap.max(if level <= 2 { 18.0 } else { 14.0 } * k)).pad(0.0, 4.0 * k));
+            // More room above than below, so a heading reads as the start of its section.
+            out.push(StyledLine::new(s, face).spans(spans).gap(gap.max(if level <= 2 { 30.0 } else { 22.0 } * k)).pad(0.0, 2.0 * k));
             gap = 0.0;
             prev_list = false;
             continue;
@@ -2177,8 +2259,16 @@ impl Buffer for ChatBuffer {
             }
         }
         let show_thinking = self.show_thinking as u64;
-        let measure = ed.var("chat-measure").and_then(Value::as_f64).unwrap_or(0.0).to_bits();
-        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ measure.rotate_left(17);
+        // Settings that change how the transcript is laid out.
+        let settings = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for name in ["chat-measure", "chat-report", "chat-report-min-words", "chat-report-scale", "chat-report-background"] {
+                ed.var(name).map(Value::to_string).hash(&mut h);
+            }
+            h.finish()
+        };
+        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ settings.rotate_left(17);
         if style_key != self.style_key {
             self.style_key = style_key;
             self.dirty = true;
@@ -2946,6 +3036,27 @@ mod tests {
     /// Lines that belong to the table (they carry a bordered card).
     fn table(lines: &[StyledLine]) -> Vec<&StyledLine> {
         lines.iter().filter(|l| l.block.is_some_and(|b| b.border.is_some())).collect()
+    }
+
+    #[test]
+    fn a_finished_run_ends_with_its_report() {
+        use super::report_entries;
+        let user = |t: &str, queued: bool| Entry::User { text: t.into(), queued, images: Vec::new() };
+        let said = |t: &str| Entry::Assistant { blocks: vec![AssistantContent::Text { text: t.into(), text_signature: None }], model: "m".into(), streaming: false, continuation: false, usage: None, error: None, cache: None };
+        let long = "word ".repeat(100);
+        let entries = vec![user("go", false), said("Looking."), said(&long), user("again", false), said("done"), user("more", false), said(&long)];
+        // The first run's last message is long: its report. "done" is too short. The last run
+        // still goes on.
+        assert_eq!(report_entries(&entries, true, 80).into_iter().collect::<Vec<_>>(), vec![(2, 100)]);
+        let mut done = report_entries(&entries, false, 80).into_iter().collect::<Vec<_>>();
+        done.sort();
+        assert_eq!(done, vec![(2, 100), (6, 100)]);
+        // Only the last message of a run: narration before it is not a report.
+        let entries = vec![user("go", false), said(&long), said("short"), user("next", false)];
+        assert!(report_entries(&entries, false, 80).is_empty());
+        // A prompt queued while it runs steers the run; it does not end it.
+        let entries = vec![user("go", false), said(&long), user("also this", true), said(&long)];
+        assert_eq!(report_entries(&entries, false, 80).into_keys().collect::<Vec<_>>(), vec![3]);
     }
 
     #[test]

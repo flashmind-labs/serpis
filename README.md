@@ -88,6 +88,13 @@ spaces UI text (`font-tracking`). Markdown tables in chats render as aligned gri
 width of a chat's reading column, and `chat-measure` the longest line of an agent's prose in it
 (70 characters by default; 45 to 75 read best), while code, tables and cards keep the whole column.
 
+When an agent finishes a run, its last message is its report (`chat-report`; 80 words or more,
+`chat-report-min-words`): it sits on its own surface, a size up (`chat-report-scale`), under a
+header with its length and reading time, so it doesn't read like the steps before it. Each theme
+has a color for it (`bg_report` in a palette; derived from its colors otherwise: lifted in dark
+themes, outlined paper in light ones); `chat-report-background` overrides it, or `"none"` puts a
+rule above the report instead.
+
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the
 prompt's first line moves up into the transcript and `j` on its last line comes back down. Clicks,

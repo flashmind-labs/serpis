@@ -422,6 +422,11 @@ pub struct StyledLine {
     /// The widest it wraps at, in points, however wide the column (prose kept to a readable
     /// line length while code and cards use the whole column).
     pub measure: Option<f32>,
+    /// Text drawn this much larger than its face (an agent's report reads a size up).
+    pub scale: Option<f32>,
+    /// A surface behind the line's whole slot, under its card, a little wider than the column:
+    /// successive lines with one join into a single rounded panel (an agent's report).
+    pub backdrop: Option<Block>,
 }
 
 impl StyledLine {
@@ -492,6 +497,8 @@ impl StyledLine {
         self.image.map(|(id, s)| (id, s.x.to_bits(), s.y.to_bits())).hash(&mut h);
         self.spinner.map(|c| c.to_array()).hash(&mut h);
         self.measure.map(f32::to_bits).hash(&mut h);
+        self.scale.map(f32::to_bits).hash(&mut h);
+        self.backdrop.map(|b| (b.bg.to_array(), b.top, b.bottom, b.border.map(|c| c.to_array()))).hash(&mut h);
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -506,7 +513,7 @@ pub fn layout_job(line: &StyledLine, theme: &Theme, wrap_width: f32) -> LayoutJo
 /// Lay out a line; a `fit` line is shrunk (to half size at most) rather than wrapped.
 pub fn layout_line(painter: &egui::Painter, line: &StyledLine, theme: &Theme, wrap_width: f32) -> std::sync::Arc<Galley> {
     if !line.fit {
-        return painter.layout_job(layout_job(line, theme, wrap_width));
+        return painter.layout_job(layout_job_scaled(line, theme, wrap_width, line.scale.unwrap_or(1.0)));
     }
     let g = painter.layout_job(layout_job(line, theme, f32::INFINITY));
     if g.size().x <= wrap_width || !wrap_width.is_finite() {
@@ -1035,6 +1042,17 @@ impl DocView {
         let radius = theme.radius + 4;
         // Outline of the card being drawn: top edge and horizontal extent.
         let mut outline: Option<(f32, f32, f32, Color32)> = None;
+        // Outline of the backdrop panel being drawn: top edge, extent, color, edge to edge.
+        let mut panel: Option<(f32, f32, f32, Color32, bool)> = None;
+        let stroke_panel = |painter: &egui::Painter, (top, x0, x1, c, band): (f32, f32, f32, Color32, bool), bottom: f32| {
+            let stroke = Stroke::new(1.0, c);
+            if band {
+                painter.hline(x0..=x1, top + 0.5, stroke);
+                painter.hline(x0..=x1, bottom - 0.5, stroke);
+            } else {
+                painter.rect_stroke(Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, bottom)), radius, stroke, egui::StrokeKind::Inside);
+            }
+        };
         // Width of the shrink-to-fit card a line belongs to.
         let mut shrink_w: Option<f32> = None;
         for i in 0..n {
@@ -1080,6 +1098,22 @@ impl DocView {
             };
             let g = layout_line(&painter, &line, theme, wrap_of(&line));
             let slot_top = y + line.gap_above;
+            if let Some(b) = line.backdrop {
+                // A rounded panel 20pt out past the column, from the first line's text down
+                // through the last line's slot; where the view's margin has no room for that, a
+                // band from edge to edge (a panel crammed against the edges looks like a mistake).
+                let band = side < 28.0;
+                let (x0, x1) = if band { (rect.left(), rect.right()) } else { (col_left - 20.0, col_right + 20.0) };
+                let r = Rect::from_min_max(egui::pos2(x0, if b.top { slot_top } else { y }), egui::pos2(x1, y + h));
+                let round = |edge: bool| if edge && !band { radius } else { 0 };
+                let cr = egui::CornerRadius { nw: round(b.top), ne: round(b.top), sw: round(b.bottom), se: round(b.bottom) };
+                painter.rect_filled(r, cr, b.bg);
+                if let Some(c) = b.border {
+                    if b.top || panel.is_none() {
+                        panel = Some((if b.top { slot_top } else { rect.top() - 40.0 }, x0, x1, c, band));
+                    }
+                }
+            }
             let origin = egui::pos2(if block.is_some() { bx0 + line.indent } else { col_left + line.indent }, slot_top + line.pad_top);
             let line_rect = Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), y + h));
             if let Some(b) = block {
@@ -1159,6 +1193,11 @@ impl DocView {
                     shrink_w = None;
                 }
             }
+            if line.backdrop.is_some_and(|b| b.bottom) {
+                if let Some(p) = panel.take() {
+                    stroke_panel(&painter, p, y + h);
+                }
+            }
             self.placed.push(Placed {
                 line: i,
                 origin,
@@ -1166,6 +1205,10 @@ impl DocView {
                 rect: line_rect,
             });
             y += h;
+        }
+        // A panel running past the bottom edge.
+        if let Some(p) = panel {
+            stroke_panel(&painter, p, rect.bottom() + 40.0);
         }
         // A card running past the bottom edge.
         if let Some((top, x0, x1, c)) = outline {

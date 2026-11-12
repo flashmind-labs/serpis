@@ -136,6 +136,10 @@ pub fn bootstrap(ed: &mut Editor) {
         }
         None
     });
+    ed.defvar("chat-report", json!(true), "Set an agent's report apart: the last message of a finished run, when it has chat-report-min-words or more, gets a rule above it and a header saying it is the report, with its length and reading time.");
+    ed.defvar("chat-report-min-words", json!(80), "Words a run's last message needs to count as a report (chat-report); shorter endings such as \"done\" stay as they are.");
+    ed.defvar("chat-report-background", Value::Null, "The surface a report sits on (chat-report): a color (\"#22242e\"), or \"none\" for a rule above it instead. Unset: the theme's own (its palette's bg_report, else a faint accent tint of its background).");
+    ed.defvar("chat-report-scale", json!(1.1), "Size of a report's prose relative to the rest of the chat (1.1, the default: a tenth larger; 1: the same). Code and tables in it keep their size.");
     ed.defvar("chat-measure", json!(70), "Longest line of an agent's prose in a chat, in characters of the reading font (45 to 75 read best; 66 is the classic ideal). Code, tables and cards still use the whole column (chat-max-width). 0 or null: the whole column.");
     ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
