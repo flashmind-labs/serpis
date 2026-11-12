@@ -13,6 +13,8 @@ serpis.agent.reload_models()
 serpis.agent.model("mock/m")
 serpis.var.set("remote-rayfish", false)
 serpis.var.set("sidebar-visible", false)
+-- Scrolling jumps: a drag aimed at text must land on it, not where it scrolled to.
+serpis.var.set("scroll-animation-time", 0)
 
 local chat
 local function keys(text)

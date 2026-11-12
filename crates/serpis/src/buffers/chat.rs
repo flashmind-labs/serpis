@@ -129,6 +129,8 @@ pub struct ChatBuffer {
     review_open: bool,
     /// Transcript lines that show a comment: (line, its id), to change it on a click.
     comment_lines: Vec<(usize, u64)>,
+    /// Where `find:<i>` links go: (text to find, entry, after it rather than before it).
+    find_targets: Vec<(String, usize, bool)>,
     /// The comment text last saved while writing, and when.
     writing_saved: (String, Option<Instant>),
     /// Transcript lines that belong to thinking blocks (click or TAB folds them).
@@ -206,6 +208,7 @@ impl ChatBuffer {
             commenting: None,
             review_open: false,
             comment_lines: Vec::new(),
+            find_targets: Vec::new(),
             writing_saved: (String::new(), None),
             style_key: 0,
             composer_hits: Vec::new(),
@@ -668,6 +671,8 @@ impl ChatBuffer {
         let tool_compact = ed.var("chat-tool-compact").and_then(Value::as_bool).unwrap_or(true);
         let tool_spinner = ed.var("chat-tool-spinner").and_then(Value::as_bool).unwrap_or(true);
         let mut thinking_lines = Vec::new();
+        // Where in-chat links go (a review's places, a reply): see `find_targets`.
+        let mut find_targets: Vec<(String, usize, bool)> = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
         // A readable line for prose: chat-measure characters of the reading font, an average
@@ -719,7 +724,11 @@ impl ChatBuffer {
                     {
                         l.pad_bottom = 8.0 * k;
                     }
-                    lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText)));
+                    // A review serpis sent (of the agent's text, or a diff page's): drawn as one.
+                    match crate::chat_review::parse_sent(text) {
+                        Some(sent) => lines.extend(review_bubble_lines(&sent, ei, &mut find_targets, k)),
+                        None => lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText))),
+                    }
                     if lines.is_empty() {
                         lines.push(StyledLine::new("", Face::UserText));
                     }
@@ -926,11 +935,12 @@ impl ChatBuffer {
             push(&mut out, &mut owner, StyledLine::new("", Face::Default), None);
         }
         // Review comments: what they quote marked, each shown under it.
-        self.comment_lines = self.place_comments(&mut out, &mut owner, &mut thinking_lines, t, k);
+        self.comment_lines = self.place_comments(&mut out, &mut owner, &mut thinking_lines, &mut find_targets, t, k);
+        self.find_targets = find_targets;
         // Places in the code are links, wherever they are in the chat.
         for l in &mut out {
             if l.image.is_none() {
-                l.links = code_links(&l.text);
+                l.links.extend(code_links(&l.text));
             }
         }
         self.lines = out;
@@ -2510,6 +2520,57 @@ enum ReviewAct {
     Delete(u64),
 }
 
+/// A review serpis sent, drawn in your bubble: what it is, then each comment (its kind, where it
+/// is as a link back to it, what it quotes, what you wrote), then what was typed with it.
+fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut Vec<(String, usize, bool)>, k: f32) -> Vec<StyledLine> {
+    use crate::chat_review::Ask;
+    let mut out = Vec::new();
+    let questions = sent.items.iter().filter(|i| i.ask == Ask::Question).count();
+    let changes = sent.items.len() - questions;
+    let mut parts = Vec::new();
+    if questions > 0 {
+        parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
+    }
+    if changes > 0 {
+        parts.push(format!("{changes} {}", if sent.compared.is_some() { if changes == 1 { "fix" } else { "fixes" } } else if changes == 1 { "change" } else { "changes" }));
+    }
+    let head = match &sent.compared {
+        Some(c) => format!("Review of {c}"),
+        None => "Review".to_string(),
+    };
+    let text = if parts.is_empty() { head.clone() } else { format!("{head}  ·  {}", parts.join(", ")) };
+    out.push(StyledLine::new(text, Face::Label).spans(vec![(0..head.len(), Face::Accent)]));
+    for it in &sent.items {
+        let (kind, face) = match (it.ask, sent.compared.is_some()) {
+            (Ask::Question, _) => ("Question", Face::Accent),
+            (Ask::Fix, true) => ("Fix", Face::MetaWarn),
+            (Ask::Fix, false) => ("Change", Face::MetaWarn),
+        };
+        let place = if sent.compared.is_some() { it.place.clone() } else if it.place.is_empty() { "↑ in the report".to_string() } else { format!("↑ {}", it.place) };
+        let mut l = StyledLine::new(format!("{kind}   {place}"), Face::Meta).spans(vec![(0..kind.len(), face)]);
+        l.pad_top = 10.0 * k;
+        if sent.compared.is_none() && !it.quote.is_empty() {
+            targets.push((it.quote.join("\n"), ei, false));
+            let at = kind.chars().count() + 3;
+            l.links.push((at..at + place.chars().count(), format!("find:{}", targets.len() - 1)));
+        }
+        out.push(l);
+        let shown = it.quote.len().min(3);
+        for (j, q) in it.quote.iter().take(shown).enumerate() {
+            let more = if j + 1 == shown && it.quote.len() > shown { " …" } else { "" };
+            out.push(StyledLine::new(format!("│ {q}{more}"), if it.code { Face::CodeDim } else { Face::Dim }));
+        }
+        out.extend(it.text.lines().map(|t| StyledLine::new(t, Face::UserText)));
+    }
+    if !sent.also.is_empty() {
+        let mut l = StyledLine::new("Also", Face::Label);
+        l.pad_top = 10.0 * k;
+        out.push(l);
+        out.extend(sent.also.lines().map(|t| StyledLine::new(t, Face::UserText)));
+    }
+    out
+}
+
 /// The text of an assistant entry (its text blocks).
 fn entry_text(e: &Entry) -> String {
     match e {
@@ -2784,40 +2845,83 @@ impl ChatBuffer {
         self.persist_review(ed);
     }
 
-    /// Mark what each comment quotes and show it under that (cards), and the quote of one being
-    /// written. Lines are inserted into `out` (with `owner` and the thinking lines moved along);
-    /// returns the lines that show a comment, with its id.
-    fn place_comments(&self, out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, thinking: &mut [usize], t: &crate::theme::Theme, k: f32) -> Vec<(usize, u64)> {
+    /// Mark what each comment quotes and show it under that (cards): the review's drafts, the
+    /// quote of one being written, and comments already sent (read from the review messages in
+    /// the transcript, so they last), each of those with a link to the agent's answer once it
+    /// quotes it, and that quote in the answer marked with a link back. Lines are inserted into
+    /// `out` (with `owner` and the thinking lines moved along); returns the lines that show a
+    /// draft, with its id (a click changes it).
+    #[allow(clippy::too_many_arguments)]
+    fn place_comments(&self, out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, thinking: &mut [usize], targets: &mut Vec<(String, usize, bool)>, t: &crate::theme::Theme, k: f32) -> Vec<(usize, u64)> {
         use crate::chat_review::{Ask, State};
         let color = |ask: Ask| if ask == Ask::Question { t.accent } else { t.yellow };
         let editing = self.commenting.as_ref().and_then(|(w, _)| w.id);
-        // (entry, quote, kind, the comment shown under it)
-        let mut places: Vec<(usize, &str, Ask, Option<&crate::chat_review::Comment>)> = self.review.comments.iter().map(|c| (c.entry, c.quote.as_str(), c.ask, Some(c))).collect();
-        if let Some((w, _)) = self.commenting.as_ref().filter(|(w, _)| w.id.is_none()) {
-            places.push((w.entry, w.quote.as_str(), w.ask, None));
+        struct Card {
+            id: Option<u64>,
+            state: String,
+            text: String,
+            /// The answer: a `find:` target.
+            reply: Option<usize>,
         }
-        let mut inserts: Vec<(usize, Vec<StyledLine>, u64)> = Vec::new();
-        for (entry, quote, ask, comment) in places {
+        // (entry it was on, the quote, kind, its card)
+        let mut places: Vec<(usize, String, Ask, Option<Card>)> = Vec::new();
+        for c in self.review.comments.iter().filter(|c| c.state == State::Draft) {
+            let state = if editing == Some(c.id) { "being changed in the composer" } else { "draft · click to change" };
+            places.push((c.entry, c.quote.clone(), c.ask, Some(Card { id: Some(c.id), state: state.into(), text: c.text.clone(), reply: None })));
+        }
+        if let Some((w, _)) = self.commenting.as_ref().filter(|(w, _)| w.id.is_none()) {
+            places.push((w.entry, w.quote.clone(), w.ask, None));
+        }
+        let assistant = |range: &mut dyn Iterator<Item = usize>| -> Vec<usize> { range.filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. }))).collect() };
+        for (ei, e) in self.entries.iter().enumerate() {
+            let Entry::User { text, .. } = e else { continue };
+            let Some(sent) = crate::chat_review::parse_sent(text).filter(|s| s.compared.is_none()) else { continue };
+            for it in sent.items.iter().filter(|it| !it.quote.is_empty()) {
+                let quote = it.quote.join("\n");
+                // What it was about: the agent's message before the review that has it.
+                let Some(on) = assistant(&mut (0..ei).rev()).into_iter().find(|a| locate_quote(out, owner, *a, &quote).is_some()) else { continue };
+                // The answer: a message after it that quotes it (its first line, at least).
+                let first = it.quote[0].trim();
+                let answer = assistant(&mut (ei + 1..self.entries.len())).into_iter().find_map(|a| locate_quote(out, owner, a, first));
+                let reply = answer.as_ref().map(|segments| {
+                    targets.push((first.to_string(), ei, true));
+                    let to = targets.len() - 1;
+                    // The quote in the answer: marked, a link back to what it is about.
+                    targets.push((quote.clone(), ei, false));
+                    let back = format!("find:{}", targets.len() - 1);
+                    for (line, _) in segments {
+                        let l = &mut out[*line];
+                        l.marker = Some(("↑".into(), Face::Accent));
+                        let n = l.text.chars().count();
+                        l.links.push((0..n, back.clone()));
+                    }
+                    to
+                });
+                let state = if reply.is_some() { "sent  ·  answered ↓" } else { "sent" };
+                places.push((on, quote, it.ask, Some(Card { id: None, state: state.into(), text: it.text.clone(), reply })));
+            }
+        }
+        let mut inserts: Vec<(usize, Vec<StyledLine>, Option<u64>)> = Vec::new();
+        for (entry, quote, ask, card) in places {
             // Where it was, else where that text is now (the transcript moved: a compaction).
-            let found = locate_quote(out, owner, entry, quote).or_else(|| {
-                let assistant: Vec<usize> = self.entries.iter().enumerate().rev().filter(|(_, e)| matches!(e, Entry::Assistant { .. })).map(|(i, _)| i).collect();
-                assistant.into_iter().find_map(|e| locate_quote(out, owner, e, quote))
-            });
+            let found = locate_quote(out, owner, entry, &quote).or_else(|| assistant(&mut (0..self.entries.len()).rev()).into_iter().find_map(|e| locate_quote(out, owner, e, &quote)));
             let Some(segments) = found else { continue };
             for (line, r) in &segments {
                 out[*line].marks.push((r.clone(), color(ask)));
             }
-            let (Some(c), Some((last, _))) = (comment, segments.last()) else { continue };
-            let kind = if c.ask == Ask::Question { "Question" } else { "Change" };
-            let state = if editing == Some(c.id) {
-                "being changed in the composer"
-            } else if c.state == State::Sent {
-                "sent"
-            } else {
-                "draft · click to change"
-            };
-            let head = format!("{kind}  ·  {state}");
-            let mut lines = vec![StyledLine::new(head, Face::Meta).spans(vec![(0..kind.len(), if c.ask == Ask::Question { Face::Accent } else { Face::MetaWarn })])];
+            let (Some(c), Some((last, _))) = (card, segments.last()) else { continue };
+            let kind = if ask == Ask::Question { "Question" } else { "Change" };
+            let head = format!("{kind}  ·  {}", c.state);
+            let mut first = StyledLine::new(head.clone(), Face::Meta).spans(vec![(0..kind.len(), if ask == Ask::Question { Face::Accent } else { Face::MetaWarn })]);
+            if let Some(to) = c.reply {
+                let label = "answered ↓";
+                if let Some(at) = head.find(label) {
+                    let (s, e) = (head[..at].chars().count(), head[..at].chars().count() + label.chars().count());
+                    first.links.push((s..e, format!("find:{to}")));
+                    first.spans.push((at..at + label.len(), Face::Accent));
+                }
+            }
+            let mut lines = vec![first];
             lines.extend(c.text.lines().map(|l| StyledLine::new(l, Face::UserText)));
             let card = Block::new(t.bg_elevated).border(t.border);
             let n = lines.len();
@@ -2860,7 +2964,9 @@ impl ChatBuffer {
             for th in thinking.iter_mut().filter(|th| **th >= at) {
                 *th += n;
             }
-            placed.extend((at..at + n).map(|i| (i, id)));
+            if let Some(id) = id {
+                placed.extend((at..at + n).map(|i| (i, id)));
+            }
             shift += n;
         }
         placed
@@ -3035,6 +3141,21 @@ impl ChatBuffer {
         act
     }
 
+    /// Follow a `find:` link: to the text it names, in the agent's messages before the review
+    /// that has it (or after it, for an answer).
+    fn jump_to_find(&mut self, i: usize) {
+        let Some((text, ei, after)) = self.find_targets.get(i).cloned() else { return };
+        let order: Vec<usize> = if after { (ei + 1..self.entries.len()).collect() } else { (0..ei).rev().collect() };
+        let found = order.into_iter().filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. }))).find_map(|e| locate_quote(&self.lines, &self.line_entry, e, &text));
+        if let Some((line, r)) = found.and_then(|s| s.into_iter().next()) {
+            self.view.anchor = None;
+            self.view.cursor = Pos::new(line, r.start);
+            self.view.follow_tail = false;
+            self.view.reveal_cursor();
+            self.focus = Focus::Transcript;
+        }
+    }
+
     /// Height of the composer's header: the comment being written, or the review's row.
     fn review_header_h(&self, k: f32) -> f32 {
         if let Some((w, _)) = &self.commenting {
@@ -3166,9 +3287,13 @@ impl Buffer for ChatBuffer {
                 }
             }
         }
+        // A link within the chat: what a review's comment is about, or the answer to it.
+        if let Some(i) = resp.link.as_deref().and_then(|l| l.strip_prefix("find:")).and_then(|i| i.parse::<usize>().ok()) {
+            self.jump_to_find(i);
+        }
         // A code reference: that line, in the diff page of the chat's folder (or the file).
         // (Its folder is asked for from the main loop: while drawn, the chat is out of its slot.)
-        if let Some((path, line)) = resp.link.as_deref().and_then(code_ref) {
+        if let Some((path, line)) = resp.link.as_deref().filter(|l| !l.starts_with("find:")).and_then(code_ref) {
             ed.main_sender().send(move |ed| match ed.buffer_directory(id) {
                 Some(dir) => crate::diff::show_line(ed, ed.buffer_machine(id), dir.to_string_lossy().into_owned(), &path, line),
                 None => ed.message("This chat has no folder to look in"),

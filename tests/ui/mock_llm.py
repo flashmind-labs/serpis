@@ -11,6 +11,8 @@ models.json). What it says depends on the last user message:
   REPORT          reply with report.md (beside this file): an agent's summary of a code review
   REPORT:<name>   reply with report-<name>.md: the same review written another way (skill: by
                   skills/report/SKILL.md)
+  Review comments on what you wrote. ...   (a review serpis sent) answer each comment,
+                  quoting it as asked: "> quote" then "Answer N."
   READ:<path>     call read on that path
   SHELL:<command> call bash with that command
   DESCRIBED:<description>|<command> the same, saying what it is for
@@ -92,6 +94,15 @@ class Handler(BaseHTTPRequestHandler):
                     if i % 5 == 0:
                         parts.append("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |")
                 delta["content"] = "\n\n".join(parts)
+            if prompt.startswith("Review comments on what you wrote."):
+                answers, group = [], []
+                for line in prompt.split("\n") + [""]:
+                    if line.startswith("> "):
+                        group.append(line)
+                    elif group:
+                        answers.append("\n".join(group) + f"\n\nAnswer {len(answers) + 1}.")
+                        group = []
+                delta["content"] = "\n\n".join(answers) or "ok"
             if prompt.startswith("REPORT"):
                 variant = prompt[len("REPORT:"):].strip() if prompt.startswith("REPORT:") else ""
                 name = f"report-{variant}.md" if variant.isidentifier() else "report.md"

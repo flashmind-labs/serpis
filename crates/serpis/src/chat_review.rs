@@ -126,6 +126,115 @@ pub fn prompt(comments: &[&Comment], also: &str) -> String {
     out
 }
 
+/// A review message as sent, read back from the transcript: what each comment asked, where and
+/// about what. A chat's review (of what the agent wrote) or a diff page's (of code).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Sent {
+    /// A diff page's review: what it compared (`main → the worktree`). None: a chat's.
+    pub compared: Option<String>,
+    pub items: Vec<SentItem>,
+    /// What was typed with it.
+    pub also: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SentItem {
+    pub ask: Ask,
+    /// Where: `Changed 1`, `Needs you 3` (a chat's), or `src/a.rs:12` with its notes (a diff's).
+    pub place: String,
+    /// What it is about: the quoted text, or the code.
+    pub quote: Vec<String>,
+    /// The quote is code (a diff's).
+    pub code: bool,
+    pub text: String,
+}
+
+/// `text` read as a review message serpis sent (`prompt` here, or a diff page's): None for
+/// anything else.
+pub fn parse_sent(text: &str) -> Option<Sent> {
+    let text = text.trim_start();
+    let compared = if text.starts_with("Review comments on what you wrote.") {
+        None
+    } else {
+        let rest = text.strip_prefix("Review comments on ")?;
+        let first = rest.lines().next()?;
+        if !first.contains("Line numbers are") {
+            return None;
+        }
+        Some(first.split_once(" in ")?.0.to_string())
+    };
+    let diff = compared.is_some();
+    let mut out = Sent { compared, ..Default::default() };
+    let mut ask: Option<Ask> = None;
+    let mut also: Option<Vec<&str>> = None;
+    let mut item: Option<SentItem> = None;
+    let mut in_code = false;
+    let mut text_lines: Vec<&str> = Vec::new();
+    let finish = |out: &mut Sent, item: &mut Option<SentItem>, text_lines: &mut Vec<&str>| {
+        if let Some(mut it) = item.take() {
+            it.text = text_lines.join("\n").trim().to_string();
+            out.items.push(it);
+        }
+        text_lines.clear();
+    };
+    for line in text.lines().skip(1) {
+        if let Some(a) = also.as_mut() {
+            a.push(line);
+            continue;
+        }
+        if in_code {
+            if line.starts_with("```") {
+                in_code = false;
+            } else if let Some(it) = item.as_mut() {
+                it.quote.push(line.to_string());
+            }
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("## ") {
+            finish(&mut out, &mut item, &mut text_lines);
+            match h.trim() {
+                "Questions" => ask = Some(Ask::Question),
+                "Changes asked for" | "Fix" => ask = Some(Ask::Fix),
+                "Also" => also = Some(Vec::new()),
+                _ => ask = None,
+            }
+            continue;
+        }
+        let Some(kind) = ask else { continue };
+        // Where a comment starts: a chat's place line ends with a colon; a diff's is `path:line`.
+        let place = if diff {
+            (line.starts_with('`') && !line.starts_with("``")).then(|| line.to_string()).filter(|l| l[1..].contains('`'))
+        } else {
+            (line.ends_with(':') && (line.starts_with("In your message that starts") || line == "On this:" || !line.contains(' ') || line.split(' ').last().is_some_and(|w| w.trim_end_matches(':').chars().all(|c| c.is_ascii_digit())))).then(|| {
+                let l = line.trim_end_matches(':');
+                match l.strip_prefix("In your message that starts \"").and_then(|r| r.rsplit_once("\", ")) {
+                    Some((_, label)) => label.to_string(),
+                    None if l.starts_with("In your message that starts") || l == "On this" => String::new(),
+                    None => l.to_string(),
+                }
+            })
+        };
+        if let Some(place) = place {
+            finish(&mut out, &mut item, &mut text_lines);
+            item = Some(SentItem { ask: kind, place: place.replace('`', ""), code: diff, ..Default::default() });
+            continue;
+        }
+        let Some(it) = item.as_mut() else { continue };
+        if diff && line.starts_with("```") && it.quote.is_empty() && text_lines.is_empty() {
+            in_code = true;
+        } else if let Some(q) = line.strip_prefix("> ").filter(|_| !diff && text_lines.is_empty()) {
+            it.quote.push(q.to_string());
+        } else if line.starts_with("… ") && diff && text_lines.is_empty() {
+            it.quote.push(line.to_string());
+        } else {
+            text_lines.push(line);
+        }
+    }
+    finish(&mut out, &mut item, &mut text_lines);
+    out.also = also.map(|a| a.join("\n").trim().to_string()).unwrap_or_default();
+    (!out.items.is_empty() || !out.also.is_empty()).then_some(out)
+}
+
 /// Where a chat's review is kept: one file per session (and machine), under the config folder.
 fn path_of(machine: Option<&str>, session: &str) -> PathBuf {
     let safe = |s: &str| s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect::<String>();
@@ -269,6 +378,30 @@ mod tests {
         );
         // Nothing typed: no "Also".
         assert!(!prompt(&[&q], "  ").contains("## Also"));
+    }
+
+    #[test]
+    fn sent_reviews_are_read_back() {
+        let q = Comment { quote: "This is the likely cause\nof the flake.".into(), label: "Changed 1".into(), opening: "Done: the retry change".into(), text: "Did you reproduce it?\nAnd how?".into(), ask: Ask::Question, ..Default::default() };
+        let f = Comment { quote: "Its output changed.".into(), label: "Needs you 2".into(), text: "Update the parser.".into(), ask: Ask::Fix, ..Default::default() };
+        let o = Comment { quote: "Something.".into(), text: "Hm?".into(), ask: Ask::Question, ..Default::default() };
+        let sent = parse_sent(&prompt(&[&q, &f, &o], "Then run the tests.")).unwrap();
+        assert_eq!(sent.compared, None);
+        assert_eq!(sent.items.len(), 3);
+        assert_eq!((sent.items[0].ask, sent.items[0].place.as_str(), sent.items[0].text.as_str()), (Ask::Question, "Changed 1", "Did you reproduce it?\nAnd how?"));
+        assert_eq!(sent.items[0].quote, vec!["This is the likely cause", "of the flake."]);
+        assert_eq!((sent.items[1].place.as_str(), sent.items[2].place.as_str()), ("", "Needs you 2"));
+        assert_eq!(sent.items[2].ask, Ask::Fix);
+        assert_eq!(sent.also, "Then run the tests.");
+        // A diff page's.
+        let diff = "Review comments on main → the worktree in /w. Line numbers are the current file's, except where a comment says it is on the old version.\n\n## Fix\nFix these.\n\n`src/a.rs:12-13`\n```rs\nlet x = 1;\nlet y = 2;\n```\nUse a constant.\n\n## Questions\nAnswer these.\n\n`src/a.rs:30` (on the old version)\nWhy run it here?\n";
+        let sent = parse_sent(diff).unwrap();
+        assert_eq!(sent.compared.as_deref(), Some("main → the worktree"));
+        assert_eq!(sent.items.len(), 2);
+        assert_eq!((sent.items[0].place.as_str(), sent.items[0].quote.clone(), sent.items[0].text.as_str(), sent.items[0].code), ("src/a.rs:12-13", vec!["let x = 1;".to_string(), "let y = 2;".to_string()], "Use a constant.", true));
+        assert_eq!((sent.items[1].ask, sent.items[1].place.as_str(), sent.items[1].text.as_str()), (Ask::Question, "src/a.rs:30 (on the old version)", "Why run it here?"));
+        assert!(parse_sent("Review comments on the plan, please").is_none());
+        assert!(parse_sent("Hello").is_none());
     }
 
     #[test]

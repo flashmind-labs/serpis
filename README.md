@@ -107,6 +107,12 @@ under what it is about (click to change it). The composer keeps its text box, wi
 a row above it, and sending sends the review with what you typed, as one message. The review is
 kept between runs, a comment half written included (`serpis.chat.review()` reads it).
 
+A review once sent shows as one in your message (each comment with what it quotes, where it is
+as a link back, and what you wrote; a diff page's review the same, with the code and its
+`path:line`), and its comments stay on the report, marked "sent", with a link to the agent's
+answer once it quotes them; the quote in the answer links back. All of it is read from the
+transcript, so it lasts as long as the chat.
+
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the
 prompt's first line moves up into the transcript and `j` on its last line comes back down. Clicks,
