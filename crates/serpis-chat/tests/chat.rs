@@ -182,7 +182,7 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     // APPEND_SYSTEM.md is added to serpis's prompt; the project's AGENTS.md is in it too.
     assert!(system.contains("You are an expert coding assistant") && system.contains("Always answer in British English.") && system.contains("Run the tests before saying it works."), "{system}");
     // Last, the one serpis comes with, and the rule to end each task with a report written so.
-    assert_eq!(chat.skills(&host).iter().map(|s| (s.name.as_str(), s.source.as_str())).collect::<Vec<_>>(), [("review", "user"), ("grill", "pi"), ("deploy", "project"), ("report", "serpis")]);
+    assert_eq!(chat.skills(&host).iter().map(|s| (s.name.as_str(), s.source.as_str())).collect::<Vec<_>>(), [("review", "user"), ("grill", "pi"), ("deploy", "project"), ("report", "serpis"), ("diagrams", "serpis")]);
     assert!(system.contains("<name>report</name>") && system.contains("your last message is a report"), "{system}");
     // /skill:name sends its instructions with what follows; the transcript shows it as typed.
     chat.submit(&mut host, "/skill:review the last commit".into(), vec![], false, None).unwrap();

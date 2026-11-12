@@ -1697,8 +1697,9 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32, 
                 let font_px = t.format(Face::AssistantText).font_id.size;
                 match crate::diagram::layout(&src, font_px, &mut |s| m.width(s, Face::AssistantText), avail) {
                     Ok(placed) => {
-                        let first = code.iter().find(|l| !l.trim().is_empty()).map_or("", |l| l.trim());
-                        out.push(StyledLine::new(format!("[diagram: {first}]"), Face::Meta).diagram(placed).gap(gap.max(16.0 * k)).pad(4.0 * k, 4.0 * k));
+                        // Centered in the column, like a figure; copied, it is its source again.
+                        let side = ((avail - placed.size().x) / 2.0).max(0.0);
+                        out.push(StyledLine::new(format!("```mermaid\n{src}\n```"), Face::Meta).diagram(placed).indent(side).gap(gap.max(16.0 * k)).pad(4.0 * k, 4.0 * k));
                         gap = 16.0 * k;
                         prev_list = false;
                         continue;
@@ -2688,6 +2689,7 @@ impl ChatBuffer {
                             "nodes": d.diagram.nodes.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
                         })),
                         "column": self.text_w,
+                        "indent": l.indent,
                     })
                 })
                 .collect(),

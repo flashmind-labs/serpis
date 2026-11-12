@@ -42,20 +42,25 @@ pub struct Places {
     pub claude: bool,
     /// The home directory (`~/.agents/skills`, `~/.claude/skills`).
     pub home: PathBuf,
-    /// Also the skills serpis comes with ([`BUILTIN`]), after all the others: one of yours by
-    /// the same name is used instead.
-    pub builtin: bool,
+    /// Which of the skills serpis comes with ([`BUILTIN`]) to add, by name, after all the
+    /// others: one of yours by the same name is used instead.
+    pub builtin: Vec<String>,
 }
 
 /// The skills serpis comes with: (name, its SKILL.md). `report`: how to write the message that
-/// ends a task (serpis draws one written that way as its parts).
-pub const BUILTIN: &[(&str, &str)] = &[("report", include_str!("../../../skills/report/SKILL.md"))];
+/// ends a task (serpis draws one written that way as its parts). `diagrams`: when to draw a
+/// diagram, and how to write one so serpis draws it.
+pub const BUILTIN: &[(&str, &str)] = &[
+    ("report", include_str!("../../../skills/report/SKILL.md")),
+    ("diagrams", include_str!("../../../skills/diagrams/SKILL.md")),
+];
 
 /// The skills serpis comes with, as files in `agent_dir`'s `builtin-skills` (a model reads a
 /// skill from its file): written there, or rewritten when serpis's copy changed.
-fn builtin_skills(agent_dir: &Path) -> Vec<Skill> {
+fn builtin_skills(agent_dir: &Path, wanted: &[String]) -> Vec<Skill> {
     BUILTIN
         .iter()
+        .filter(|(name, _)| wanted.iter().any(|w| w == name))
         .filter_map(|(name, text)| {
             let file = agent_dir.join("builtin-skills").join(name).join("SKILL.md");
             if std::fs::read_to_string(&file).ok().as_deref() != Some(*text) {
@@ -114,11 +119,9 @@ pub fn discover(p: &Places) -> Vec<Skill> {
             }
         }
     }
-    if p.builtin {
-        for s in builtin_skills(&p.agent_dir) {
-            if names.insert(s.name.clone()) {
-                found.push(s);
-            }
+    for s in builtin_skills(&p.agent_dir, &p.builtin) {
+        if names.insert(s.name.clone()) {
+            found.push(s);
         }
     }
     found
@@ -308,7 +311,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let (agent, cwd) = (root.join("agent"), root.join("project"));
         std::fs::create_dir_all(cwd.join(".git")).unwrap();
-        let places = Places { agent_dir: agent.clone(), cwd: cwd.clone(), home: root.join("home"), builtin: true, ..Default::default() };
+        let places = Places { agent_dir: agent.clone(), cwd: cwd.clone(), home: root.join("home"), builtin: vec!["report".into(), "diagrams".into()], ..Default::default() };
         let skills = discover(&places);
         let report = skills.iter().find(|s| s.name == "report").expect("the report skill");
         assert_eq!(report.source, "serpis");
@@ -324,7 +327,12 @@ mod tests {
         assert_eq!((mine.source.as_str(), mine.description.as_str()), ("user", "Mine."));
         // Off: neither it nor the rule.
         std::fs::remove_dir_all(agent.join("skills")).unwrap();
-        let none = discover(&Places { builtin: false, ..places.clone() });
+        let diagrams = skills.iter().find(|s| s.name == "diagrams").expect("the diagrams skill");
+        assert_eq!(std::fs::read_to_string(&diagrams.file).unwrap(), BUILTIN[1].1);
+        // Each on its own: only the diagrams skill.
+        let only = discover(&Places { builtin: vec!["diagrams".into()], ..places.clone() });
+        assert_eq!(only.iter().filter(|s| s.source == "serpis").map(|s| s.name.as_str()).collect::<Vec<_>>(), ["diagrams"]);
+        let none = discover(&Places { builtin: vec![], ..places.clone() });
         assert!(none.iter().all(|s| s.name != "report"));
         assert_eq!(report_rule(&none, &HashSet::new()), None);
         // Claude Code's own skill of that name counts.
@@ -362,7 +370,7 @@ mod tests {
         write(&cwd.join(".agents/skills/review/SKILL.md"), "---\nname: review\ndescription: Another.\n---\n");
         // pi's own folder, after serpis's.
         write(&root.join("pi/skills/pi-only/SKILL.md"), "---\ndescription: From pi.\n---\n");
-        let skills = discover(&Places { agent_dir: agent.clone(), pi_dir: Some(root.join("pi")), cwd: cwd.clone(), paths: vec![], claude: false, home: root.join("home"), builtin: false });
+        let skills = discover(&Places { agent_dir: agent.clone(), pi_dir: Some(root.join("pi")), cwd: cwd.clone(), paths: vec![], claude: false, home: root.join("home"), builtin: vec![] });
         let names: Vec<(&str, &str)> = skills.iter().map(|s| (s.name.as_str(), s.source.as_str())).collect();
         assert_eq!(names, [("review", "user"), ("quiet", "user"), ("pi-only", "pi"), ("deploy", "project")], "named by their folder when frontmatter doesn't");
         let prompt = for_prompt(&skills, "read");

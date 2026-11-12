@@ -1188,7 +1188,13 @@ impl DocView {
                             (if i == a.line { a.col } else { 0 }, if i == b.line { end } else { len + 1 })
                         }
                     };
-                    paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection);
+                    match &line.diagram {
+                        // A diagram is selected whole: tinted behind it.
+                        Some(d) => {
+                            painter.rect_filled(Rect::from_min_size(origin, d.size()).expand(4.0), 6.0, theme.selection);
+                        }
+                        None => paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection),
+                    }
                 }
             }
             if let Some(d) = &line.diagram {

@@ -124,7 +124,9 @@ Mermaid diagrams (` ```mermaid ` blocks) in a chat are drawn as part of the page
 picture: ariel-rs lays them out, and serpis paints the boxes, lines and text in its own font and
 the theme's colors (`diagram.rs`). Flowcharts, sequence and state diagrams draw; a
 flowchart too wide for the column is drawn top to bottom; a node under the mouse is lit with its
-lines. A block that can't be drawn stays as code, saying why; `chat-diagrams` off, all of them do.
+lines; copied, a diagram is its source. A block that can't be drawn stays as code, saying why.
+Chats' agents also get a `diagrams` skill (`skills/diagrams`): when a diagram helps, and how to
+write one that draws. `chat-diagrams` off: neither, and every block is code.
 
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the

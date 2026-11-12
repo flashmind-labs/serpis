@@ -24,9 +24,9 @@ models.json). What it says depends on the last user message:
 
 After a tool result it replies "done". Each request is logged as one JSON line to the file
 given as the second argument: {"n", "last_role", "tool_content", "tools", "images", "text",
-"skills", "serpis_docs", "report_skill", "report_rule"} (images: how many the last message carries; text: its text; skills:
+"skills", "serpis_docs", "report_skill", "report_rule", "diagrams_skill"} (images: how many the last message carries; text: its text; skills:
 whether the system prompt lists skills; serpis_docs: whether it points requests about serpis at
-serpis_api; report_skill, report_rule: whether it offers the report skill and says to end
+serpis_api; diagrams_skill: whether it offers the diagrams skill; report_skill, report_rule: whether it offers the report skill and says to end
 each task with a report).
 
   python3 mock_llm.py <port-file> <log-file>    (listens on a free port, written to port-file)
@@ -69,6 +69,7 @@ class Handler(BaseHTTPRequestHandler):
                 "serpis_docs": "Call serpis_api first" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
                 "report_skill": "<name>report</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
                 "report_rule": "your last message is a report" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
+                "diagrams_skill": "<name>diagrams</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
             }) + "\n")
 
         delta, finish = {"role": "assistant", "content": "ok"}, "stop"

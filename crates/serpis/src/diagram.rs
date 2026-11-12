@@ -853,7 +853,10 @@ pub fn paint(painter: &egui::Painter, origin: Pos2, p: &Placed, theme: &crate::t
     let lit = |node: Option<usize>, edge: Option<(usize, usize)>| hovered.is_some() && (node == hovered || edge.is_some_and(|(a, b)| Some(a) == hovered || Some(b) == hovered));
     let family = theme.format(crate::theme::Face::AssistantText).font_id.family;
     let radius = (theme.radius as f32).clamp(4.0, 8.0) * k;
-    for item in &d.items {
+    // Shapes, then text over them: a label is never under a line drawn after it.
+    let shapes = d.items.iter().filter(|i| !matches!(i, Item::Text { .. }));
+    let texts = d.items.iter().filter(|i| matches!(i, Item::Text { .. }));
+    for item in shapes.chain(texts) {
         match item {
             Item::Rect { r, rx, fill, stroke, dash, node } => {
                 let rect = Rect::from_min_max(at(r.min), at(r.max));
@@ -924,10 +927,20 @@ pub fn paint(painter: &egui::Painter, origin: Pos2, p: &Placed, theme: &crate::t
                     Baseline::Middle => p0.y - total / 2.0,
                     Baseline::Hanging => p0.y,
                 };
-                for (j, g) in galleys.into_iter().enumerate() {
-                    let w = g.size().x;
+                let placed: Vec<(Pos2, Arc<egui::Galley>)> = galleys.into_iter().enumerate().map(|(j, g)| {
                     let y = top + j as f32 * row + (row - g.size().y) / 2.0;
-                    painter.galley(pos2(p0.x - w * anchor, y), g, color);
+                    (pos2(p0.x - g.size().x * anchor, y), g)
+                }).collect();
+                // Text on its own (a message's, a block's) gets the surface behind it, as a line's
+                // label does, so the lines it crosses (a lifeline, a self-message) don't run
+                // through its letters.
+                if *ink == Ink::Text && node.is_none() {
+                    for (at, g) in &placed {
+                        painter.rect_filled(Rect::from_min_size(*at, g.size()).expand2(vec2(3.0 * k, 0.0)), 3.0 * k, surface);
+                    }
+                }
+                for (at, g) in placed {
+                    painter.galley(at, g, color);
                 }
             }
         }
