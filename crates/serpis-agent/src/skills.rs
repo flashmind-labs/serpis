@@ -42,6 +42,37 @@ pub struct Places {
     pub claude: bool,
     /// The home directory (`~/.agents/skills`, `~/.claude/skills`).
     pub home: PathBuf,
+    /// Also the skills serpis comes with ([`BUILTIN`]), after all the others: one of yours by
+    /// the same name is used instead.
+    pub builtin: bool,
+}
+
+/// The skills serpis comes with: (name, its SKILL.md). `report`: how to write the message that
+/// ends a task (serpis draws one written that way as its parts).
+pub const BUILTIN: &[(&str, &str)] = &[("report", include_str!("../../../skills/report/SKILL.md"))];
+
+/// The skills serpis comes with, as files in `agent_dir`'s `builtin-skills` (a model reads a
+/// skill from its file): written there, or rewritten when serpis's copy changed.
+fn builtin_skills(agent_dir: &Path) -> Vec<Skill> {
+    BUILTIN
+        .iter()
+        .filter_map(|(name, text)| {
+            let file = agent_dir.join("builtin-skills").join(name).join("SKILL.md");
+            if std::fs::read_to_string(&file).ok().as_deref() != Some(*text) {
+                std::fs::create_dir_all(file.parent()?).ok()?;
+                std::fs::write(&file, text).ok()?;
+            }
+            load(&file, "serpis")
+        })
+        .collect()
+}
+
+/// The line that has a model end each task with a report written as the `report` skill says,
+/// when it has that skill (`skills`, or `also` by name: one it has itself).
+pub fn report_rule(skills: &[Skill], also: &HashSet<String>) -> Option<String> {
+    (skills.iter().any(|s| s.name == "report" && !s.explicit_only) || also.contains("report")).then(|| {
+        "When you finish a task, or stop before it is done, your last message is a report: load the `report` skill and write it exactly as it says, every time.".to_string()
+    })
 }
 
 /// Every skill the places hold, the first of each name kept.
@@ -79,6 +110,13 @@ pub fn discover(p: &Places) -> Vec<Skill> {
         for s in here {
             let real = std::fs::canonicalize(&s.file).unwrap_or_else(|_| s.file.clone());
             if seen_files.insert(real) && names.insert(s.name.clone()) {
+                found.push(s);
+            }
+        }
+    }
+    if p.builtin {
+        for s in builtin_skills(&p.agent_dir) {
+            if names.insert(s.name.clone()) {
                 found.push(s);
             }
         }
@@ -265,6 +303,36 @@ mod tests {
     }
 
     #[test]
+    fn serpis_comes_with_the_report_skill() {
+        let root = std::env::temp_dir().join(format!("serpis-builtin-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (agent, cwd) = (root.join("agent"), root.join("project"));
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        let places = Places { agent_dir: agent.clone(), cwd: cwd.clone(), home: root.join("home"), builtin: true, ..Default::default() };
+        let skills = discover(&places);
+        let report = skills.iter().find(|s| s.name == "report").expect("the report skill");
+        assert_eq!(report.source, "serpis");
+        // A file the model can read, as serpis has it.
+        assert_eq!(std::fs::read_to_string(&report.file).unwrap(), BUILTIN[0].1);
+        assert!(report_rule(&skills, &HashSet::new()).is_some_and(|r| r.contains("`report` skill")));
+        // An old copy is brought up to date.
+        std::fs::write(&report.file, "---\ndescription: old\n---\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&discover(&places).into_iter().find(|s| s.name == "report").unwrap().file).unwrap(), BUILTIN[0].1);
+        // One of yours by that name is used instead.
+        write(&agent.join("skills/report/SKILL.md"), "---\nname: report\ndescription: Mine.\n---\n");
+        let mine = discover(&places).into_iter().find(|s| s.name == "report").unwrap();
+        assert_eq!((mine.source.as_str(), mine.description.as_str()), ("user", "Mine."));
+        // Off: neither it nor the rule.
+        std::fs::remove_dir_all(agent.join("skills")).unwrap();
+        let none = discover(&Places { builtin: false, ..places.clone() });
+        assert!(none.iter().all(|s| s.name != "report"));
+        assert_eq!(report_rule(&none, &HashSet::new()), None);
+        // Claude Code's own skill of that name counts.
+        assert!(report_rule(&none, &HashSet::from(["report".to_string()])).is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn frontmatter_reads_the_usual_forms() {
         let (f, body) = frontmatter("---\nname: pdf\ndescription: >\n  Extract text.\n  Use for PDFs.\nquoted: \"a \\\"b\\\"\"\nflag: true\n---\n# Body\n").unwrap();
         let get = |k: &str| f.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
@@ -294,7 +362,7 @@ mod tests {
         write(&cwd.join(".agents/skills/review/SKILL.md"), "---\nname: review\ndescription: Another.\n---\n");
         // pi's own folder, after serpis's.
         write(&root.join("pi/skills/pi-only/SKILL.md"), "---\ndescription: From pi.\n---\n");
-        let skills = discover(&Places { agent_dir: agent.clone(), pi_dir: Some(root.join("pi")), cwd: cwd.clone(), paths: vec![], claude: false, home: root.join("home") });
+        let skills = discover(&Places { agent_dir: agent.clone(), pi_dir: Some(root.join("pi")), cwd: cwd.clone(), paths: vec![], claude: false, home: root.join("home"), builtin: false });
         let names: Vec<(&str, &str)> = skills.iter().map(|s| (s.name.as_str(), s.source.as_str())).collect();
         assert_eq!(names, [("review", "user"), ("quiet", "user"), ("pi-only", "pi"), ("deploy", "project")], "named by their folder when frontmatter doesn't");
         let prompt = for_prompt(&skills, "read");

@@ -137,6 +137,7 @@ pub fn bootstrap(ed: &mut Editor) {
         }
         None
     });
+    ed.defvar("chat-report-skill", json!(true), "Chats' agents (serpis's, Claude Code, Codex) have the report skill serpis comes with (unless you have one named report), and are told to end every task with a report written as it says: the outcome first, then what needs you, what changed, how it was checked, what's left. serpis draws such a report as its parts (chat-report). Off: neither.");
     ed.defvar("chat-report", json!(true), "Set an agent's report apart: the last message of a finished run, when it has chat-report-min-words or more, gets a rule above it and a header saying it is the report, with its length and reading time.");
     ed.defvar("chat-report-min-words", json!(80), "Words a run's last message needs to count as a report (chat-report); shorter endings such as \"done\" stay as they are.");
     ed.defvar("chat-report-background", Value::Null, "The surface a report sits on (chat-report): a color (\"#22242e\"), or \"none\" for a rule above it instead. Unset: the theme's own (its palette's bg_report, else a faint accent tint of its background).");

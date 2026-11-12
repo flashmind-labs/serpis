@@ -88,6 +88,13 @@ spaces UI text (`font-tracking`). Markdown tables in chats render as aligned gri
 width of a chat's reading column, and `chat-measure` the longest line of an agent's prose in it
 (70 characters by default; 45 to 75 read best), while code, tables and cards keep the whole column.
 
+Chats' agents (serpis's own, Claude Code, Codex) come with a report skill (`skills/report`, kept
+in the agent directory's `builtin-skills`) and are told to end every task with a report written as
+it says: `Done`, `Partly done` or `Blocked` and the result first, then what needs you (each with a
+recommendation), what changed, how it was checked and what wasn't, what's left; each claim saying
+how it is known, in short plain sentences (after ASD-STE100). A skill of yours named `report` is
+used instead; `chat-report-skill` off, neither.
+
 When an agent finishes a run, its last message is its report (`chat-report`; 80 words or more,
 `chat-report-min-words`): it sits on its own surface, a size up (`chat-report-scale`), under a
 header with its length and reading time, so it doesn't read like the steps before it. Each theme
