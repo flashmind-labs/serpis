@@ -417,7 +417,7 @@ pub struct StyledLine {
     pub image: Option<(u64, egui::Vec2)>,
     /// A spinner of this color over the line's first character, turning while it is on screen.
     pub spinner: Option<Color32>,
-    /// What hovering these characters of the line says.
+    /// What hovering these characters of the line says (character columns, as `links`).
     pub hint: Option<(Range<usize>, String)>,
     /// The widest it wraps at, in points, however wide the column (prose kept to a readable
     /// line length while code and cards use the whole column).
