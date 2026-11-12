@@ -885,6 +885,12 @@ impl ChatBuffer {
         if out.is_empty() {
             push(&mut out, &mut owner, StyledLine::new("", Face::Default), None);
         }
+        // Places in the code are links, wherever they are in the chat.
+        for l in &mut out {
+            if l.image.is_none() {
+                l.links = code_links(&l.text);
+            }
+        }
         self.lines = out;
         self.line_entry = owner;
         self.thinking_lines = thinking_lines;
@@ -1712,6 +1718,39 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
     out
 }
 
+/// The places in the code a line of a chat names (`src/main.rs:12`, in prose or inline code,
+/// your messages, thinking, or what a tool printed: grep's `src/a.rs:12:`, a compiler's
+/// `--> src/main.rs:12:5`), as links: character columns and the reference.
+fn code_links(text: &str) -> Vec<(Range<usize>, String)> {
+    let mut out = Vec::new();
+    let mut col = 0;
+    for word in text.split_inclusive(char::is_whitespace) {
+        let n = word.chars().count();
+        // Brackets, quotes and punctuation around it aren't part of it.
+        let core = word.trim_end().trim_start_matches(['(', '[', '{', '<', '"', '\'', '`']).trim_end_matches([')', ']', '}', '>', '"', '\'', '`', ',', ';', '.', ':']);
+        if let Some(at) = word.find(core).filter(|_| code_ref(core).is_some()) {
+            let start = col + word[..at].chars().count();
+            out.push((start..start + core.chars().count(), core.to_string()));
+        }
+        col += n;
+    }
+    out
+}
+
+/// A place in the code, as agents cite it: `path:line`, also `path:line-line` and
+/// `path:line:column`. The path has a `/` or a `.` and no spaces. (path, line).
+fn code_ref(s: &str) -> Option<(String, u32)> {
+    let (path, rest) = s.trim().split_once(':')?;
+    if path.is_empty() || path.contains(char::is_whitespace) || !(path.contains('/') || path.contains('.')) {
+        return None;
+    }
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let line: u32 = rest[..digits].parse().ok().filter(|n| *n > 0)?;
+    let tail = &rest[digits..];
+    let ok = tail.is_empty() || ((tail.starts_with('-') || tail.starts_with(':')) && tail.len() > 1 && tail[1..].chars().all(|c| c.is_ascii_digit()));
+    ok.then(|| (path.trim_start_matches("./").to_string(), line))
+}
+
 /// Highlight spans moved right by `by` bytes (past a prefix the code didn't have).
 fn shift(spans: Option<&crate::highlight::Spans>, by: usize) -> crate::highlight::Spans {
     spans.map(|s| s.iter().map(|(r, f)| (r.start + by..r.end + by, *f)).collect()).unwrap_or_default()
@@ -2517,6 +2556,14 @@ impl Buffer for ChatBuffer {
                 self.toggle_fold_at(l);
             }
         }
+        // A code reference: that line, in the diff page of the chat's folder (or the file).
+        // (Its folder is asked for from the main loop: while drawn, the chat is out of its slot.)
+        if let Some((path, line)) = resp.link.as_deref().and_then(code_ref) {
+            ed.main_sender().send(move |ed| match ed.buffer_directory(id) {
+                Some(dir) => crate::diff::show_line(ed, ed.buffer_machine(id), dir.to_string_lossy().into_owned(), &path, line),
+                None => ed.message("This chat has no folder to look in"),
+            });
+        }
 
         let painter = ui.painter().clone();
         let p_focus = focused && self.focus == Focus::Prompt;
@@ -3276,6 +3323,28 @@ mod tests {
         assert_eq!(check_mark("Lint: failed on 2 files").map(|m| m.0), Some("✗"));
         assert_eq!(check_mark("Not checked: the dashboards").map(|m| m.0), Some("○"));
         assert_eq!(check_mark("Benchmarks: 120 ms → 40 ms"), None);
+    }
+
+    #[test]
+    fn code_references_are_links() {
+        use super::code_ref;
+        assert_eq!(code_ref("src/queue.rs:142"), Some(("src/queue.rs".into(), 142)));
+        assert_eq!(code_ref("./main.rs:3-9"), Some(("main.rs".into(), 3)));
+        assert_eq!(code_ref("lib.rs:7:12"), Some(("lib.rs".into(), 7)));
+        for no in ["RequestQueue::retry", "localhost:8080", "a b.rs:3", "x.rs:", "x.rs:0", "x.rs:12abc", "Ordering::AcqRel"] {
+            assert_eq!(code_ref(no), None, "{no}");
+        }
+        use super::code_links;
+        let link = |text: &str| code_links(text).into_iter().map(|(r, s)| (r.start, s)).collect::<Vec<_>>();
+        // Inline code (its backticks gone when drawn) and plain prose.
+        assert_eq!(link("Fixed (src/queue.rs:142) in RequestQueue::retry."), vec![(7, "src/queue.rs:142".into())]);
+        assert_eq!(link("See src/a.rs:3, then lib.rs:7:2."), vec![(4, "src/a.rs:3".into()), (21, "lib.rs:7:2".into())]);
+        // What tools print: grep, a compiler.
+        assert_eq!(link("src/a.rs:12:    let x = 1;"), vec![(0, "src/a.rs:12".into())]);
+        assert_eq!(link("  --> src/main.rs:12:5"), vec![(6, "src/main.rs:12:5".into())]);
+        // Columns count characters, not bytes.
+        assert_eq!(link("é → src/a.rs:1"), vec![(4, "src/a.rs:1".into())]);
+        assert!(code_links("at 12:30, Ordering::AcqRel, https://example.com/x").is_empty());
     }
 
     #[test]

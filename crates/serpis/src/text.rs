@@ -427,6 +427,9 @@ pub struct StyledLine {
     /// A surface behind the line's whole slot, under its card, a little wider than the column:
     /// successive lines with one join into a single rounded panel (an agent's report).
     pub backdrop: Option<Block>,
+    /// Parts of the line that are links: character columns and what they point at (a code
+    /// reference such as `src/main.rs:12`). Hovered, they underline; clicked, the view says so.
+    pub links: Vec<(Range<usize>, String)>,
 }
 
 impl StyledLine {
@@ -499,6 +502,9 @@ impl StyledLine {
         self.measure.map(f32::to_bits).hash(&mut h);
         self.scale.map(f32::to_bits).hash(&mut h);
         self.backdrop.map(|b| (b.bg.to_array(), b.top, b.bottom, b.border.map(|c| c.to_array()))).hash(&mut h);
+        for (r, target) in &self.links {
+            (r.start, r.end, target).hash(&mut h);
+        }
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -747,6 +753,8 @@ pub struct ViewResponse {
     pub clicked: bool,
     /// The user scrolled up away from the tail.
     pub scrolled: bool,
+    /// A link was clicked: what it points at.
+    pub link: Option<String>,
 }
 
 impl DocView {
@@ -1176,6 +1184,20 @@ impl DocView {
                 crate::chrome::spinner(&painter, origin + egui::vec2(width / 2.0, row.rect().height() / 2.0), row.rect().height() * 0.26, time, color);
                 // Only asked for while it is on screen.
                 painter.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            // Links: a pointing hand and an underline under the pointer, and the click reported.
+            for (range, target) in &line.links {
+                for r in range_rects(&g, range.start, range.end, false) {
+                    let r = r.translate(origin.to_vec2());
+                    let over = response.hover_pos().is_some_and(|p| r.expand2(egui::vec2(1.0, 2.0)).contains(p));
+                    if over {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.0, theme.format(Face::InlineCode).color));
+                    }
+                    if response.clicked() && response.interact_pointer_pos().is_some_and(|p| r.expand2(egui::vec2(1.0, 2.0)).contains(p)) {
+                        resp.link = Some(target.clone());
+                    }
+                }
             }
             if let Some((range, text)) = &line.hint {
                 for r in range_rects(&g, range.start, range.end, false) {

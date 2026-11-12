@@ -95,6 +95,11 @@ has a color for it (`bg_report` in a palette; derived from its colors otherwise:
 themes, outlined paper in light ones); `chat-report-background` overrides it, or `"none"` puts a
 rule above the report instead.
 
+A place in the code named anywhere in a chat (`src/queue.rs:142`, also `path:12-20` and
+`path:12:5`: in the agent's text, your messages, thinking, or what a tool printed, such as grep's
+or a compiler's) is a link: clicked, the diff page of the chat's folder opens on that line
+(`diff-show-line`), or the file itself when it has no changes there.
+
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the
 prompt's first line moves up into the transcript and `j` on its last line comes back down. Clicks,
