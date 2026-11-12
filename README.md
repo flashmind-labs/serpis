@@ -100,6 +100,13 @@ A place in the code named anywhere in a chat (`src/queue.rs:142`, also `path:12-
 or a compiler's) is a link: clicked, the diff page of the chat's folder opens on that line
 (`diff-show-line`), or the file itself when it has no changes there.
 
+To review what an agent wrote, select part of it: a bar beside the selection asks about it (`a`,
+`chat-ask`) or asks for a change (`c`, `chat-comment`). The comment is written in the composer
+under what it quotes; RET saves it to the chat's review (Send now sends just that one), shown
+under what it is about (click to change it). The composer keeps its text box, with the review in
+a row above it, and sending sends the review with what you typed, as one message. The review is
+kept between runs, a comment half written included (`serpis.chat.review()` reads it).
+
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the
 prompt's first line moves up into the transcript and `j` on its last line comes back down. Clicks,

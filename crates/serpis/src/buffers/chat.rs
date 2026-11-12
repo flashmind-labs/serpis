@@ -118,6 +118,19 @@ pub struct ChatBuffer {
     pub prompt: TextArea,
     lines: Vec<StyledLine>,
     line_entry: Vec<Option<usize>>,
+    /// The review of what the agent wrote ([`crate::chat_review`]), read once for this chat.
+    review: crate::chat_review::Saved,
+    /// The chat id the review was read for (a restored chat may start under another).
+    review_key: Option<String>,
+    /// A comment being written in the composer (the prompt holds its text), and what was being
+    /// typed before it, put back after.
+    commenting: Option<(crate::chat_review::Writing, String)>,
+    /// The review's comments listed in the composer.
+    review_open: bool,
+    /// Transcript lines that show a comment: (line, its id), to change it on a click.
+    comment_lines: Vec<(usize, u64)>,
+    /// The comment text last saved while writing, and when.
+    writing_saved: (String, Option<Instant>),
     /// Transcript lines that belong to thinking blocks (click or TAB folds them).
     thinking_lines: Vec<usize>,
     /// chat-show-thinking as last drawn; changing it unfolds what was folded by hand.
@@ -188,6 +201,12 @@ impl ChatBuffer {
             prompt_history: Vec::new(),
             history_index: None,
             text_w: 0.0,
+            review: Default::default(),
+            review_key: None,
+            commenting: None,
+            review_open: false,
+            comment_lines: Vec::new(),
+            writing_saved: (String::new(), None),
             style_key: 0,
             composer_hits: Vec::new(),
             attachments: Vec::new(),
@@ -457,13 +476,34 @@ impl ChatBuffer {
 
     /// Send the prompt: start a run, or steer the running one.
     pub fn send(&mut self, ed: &mut Editor, follow_up: bool) {
+        // Writing a comment: sending saves it to the review.
+        if self.commenting.is_some() {
+            self.save_comment(ed);
+            return;
+        }
         let text = self.prompt.text().trim().to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        let review = !self.review.drafts().is_empty();
+        if text.is_empty() && self.attachments.is_empty() && !review {
             return;
         }
         self.prompt.clear();
-        self.prompt_history.push(text.clone());
+        if !text.is_empty() {
+            self.prompt_history.push(text.clone());
+        }
         self.history_index = None;
+        // A review waiting: it goes with what was typed, as one message.
+        let text = if review {
+            let message = crate::chat_review::prompt(&self.review.drafts(), &text);
+            for c in self.review.comments.iter_mut().filter(|c| c.state == crate::chat_review::State::Draft) {
+                c.state = crate::chat_review::State::Sent;
+            }
+            self.review_open = false;
+            self.dirty = true;
+            self.persist_review(ed);
+            message
+        } else {
+            text
+        };
         self.submit(ed, text, follow_up);
     }
 
@@ -885,6 +925,8 @@ impl ChatBuffer {
         if out.is_empty() {
             push(&mut out, &mut owner, StyledLine::new("", Face::Default), None);
         }
+        // Review comments: what they quote marked, each shown under it.
+        self.comment_lines = self.place_comments(&mut out, &mut owner, &mut thinking_lines, t, k);
         // Places in the code are links, wherever they are in the chat.
         for l in &mut out {
             if l.image.is_none() {
@@ -2455,6 +2497,533 @@ impl LineSource for Lines<'_> {
     }
 }
 
+/// What was clicked in the composer's review header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReviewAct {
+    Save,
+    SendNow,
+    Cancel,
+    Kind,
+    Toggle,
+    Discard,
+    Edit(u64),
+    Delete(u64),
+}
+
+/// The text of an assistant entry (its text blocks).
+fn entry_text(e: &Entry) -> String {
+    match e {
+        Entry::Assistant { blocks, .. } => blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n\n"),
+        _ => String::new(),
+    }
+}
+
+/// Where `quote` is in entry `entry`'s lines of `out`: (line, character columns) for each line it
+/// touches. Lines are joined with newlines, as a selection across them reads.
+fn locate_quote(out: &[StyledLine], owner: &[Option<usize>], entry: usize, quote: &str) -> Option<Vec<(usize, Range<usize>)>> {
+    let quote = quote.trim();
+    if quote.is_empty() {
+        return None;
+    }
+    let idx: Vec<usize> = (0..out.len()).filter(|i| owner.get(*i).copied().flatten() == Some(entry)).collect();
+    let joined = idx.iter().map(|i| out[*i].text.as_str()).collect::<Vec<_>>().join("\n");
+    let at = joined.find(quote)?;
+    let end = at + quote.len();
+    let mut segments = Vec::new();
+    let mut pos = 0;
+    for i in idx {
+        let t = &out[i].text;
+        let (s, e) = (pos, pos + t.len());
+        let (a, b) = (at.max(s), end.min(e));
+        if a < b {
+            segments.push((i, t[..a - s].chars().count()..t[..b - s].chars().count()));
+        }
+        pos = e + 1;
+    }
+    Some(segments)
+}
+
+impl ChatBuffer {
+    fn review_machine(&self) -> Option<String> {
+        (!self.node.local()).then(|| self.node.machine.clone())
+    }
+
+    /// Read this chat's saved review, once. A comment that was being written comes back to the
+    /// composer.
+    fn ensure_review(&mut self) {
+        if self.node.chat.is_empty() || self.review_key.as_deref() == Some(self.node.chat.as_str()) {
+            return;
+        }
+        self.review_key = Some(self.node.chat.clone());
+        self.commenting = None;
+        self.review = crate::chat_review::load(self.review_machine().as_deref(), &self.node.chat);
+        let aside = self.review.aside.take();
+        if let Some(w) = self.review.writing.take() {
+            if self.commenting.is_none() {
+                let stash = aside.unwrap_or_else(|| self.prompt.text());
+                self.prompt.set_text(&w.text);
+                self.prompt.move_to_end();
+                self.writing_saved = (w.text.clone(), Some(Instant::now()));
+                self.commenting = Some((w, stash));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Keep the review (and the comment being written) on disk.
+    pub fn persist_review(&mut self, ed: &mut Editor) {
+        let Some(key) = self.review_key.clone() else { return };
+        let text = self.prompt.text();
+        let mut saved = self.review.clone();
+        saved.writing = self.commenting.as_ref().map(|(w, _)| crate::chat_review::Writing { text: text.clone(), ..w.clone() });
+        saved.aside = self.commenting.as_ref().map(|(_, aside)| aside.clone()).filter(|a| !a.is_empty());
+        if let Err(e) = crate::chat_review::save(self.review_machine().as_deref(), &key, &saved) {
+            ed.warn(format!("Couldn't save the review: {e:#}"));
+        }
+        self.writing_saved = (text, Some(Instant::now()));
+    }
+
+    /// The review as scripts see it.
+    pub fn review_json(&mut self) -> Value {
+        self.ensure_review();
+        let text = self.prompt.text();
+        serde_json::json!({
+            "comments": self.review.comments.iter().map(crate::chat_review::to_json).collect::<Vec<_>>(),
+            "drafts": self.review.drafts().len(),
+            "writing": self.commenting.as_ref().map(|(w, _)| serde_json::json!({"quote": w.quote, "label": w.label, "kind": w.ask.name(), "text": text, "id": w.id})),
+        })
+    }
+
+    /// The transcript's selection in order, else the cursor's whole line.
+    fn selected_range(&self) -> (Pos, Pos) {
+        let c = self.view.cursor;
+        match self.view.anchor.filter(|a| *a != c) {
+            Some(a) if a < c => (a, c),
+            Some(a) => (c, a),
+            None => (Pos::new(c.line, 0), Pos::new(c.line, char_len(self.lines.get(c.line).map_or("", |l| l.text.as_str())))),
+        }
+    }
+
+    /// The transcript's text from `a` to `b`, lines joined with newlines.
+    fn quote_of(&self, a: Pos, b: Pos) -> String {
+        let mut out = Vec::new();
+        for i in a.line..=b.line.min(self.lines.len().saturating_sub(1)) {
+            let t: Vec<char> = self.lines[i].text.chars().collect();
+            let s = if i == a.line { a.col.min(t.len()) } else { 0 };
+            let e = if i == b.line { b.col.min(t.len()) } else { t.len() };
+            out.push(t[s..e.max(s)].iter().collect::<String>());
+        }
+        out.join("\n").trim().to_string()
+    }
+
+    /// Where transcript line `line` of entry `entry` is, by its headings: "Changed 1" for the
+    /// first item under "Changed", "Summary" for a paragraph under it; empty outside sections.
+    fn label_at(&self, line: usize, entry: usize) -> String {
+        let text = self.entries.get(entry).map(entry_text).unwrap_or_default();
+        let titles: Vec<String> = text.lines().filter_map(|l| l.trim_start().strip_prefix('#').map(|h| h.trim_start_matches('#').trim().to_string())).filter(|t| !t.is_empty()).collect();
+        // A heading line: its title (a report's has its count after it).
+        let heading = |l: &StyledLine| -> Option<String> {
+            if l.marker.is_some() {
+                return None;
+            }
+            titles.iter().find(|t| l.text == **t || l.text.strip_prefix(t.as_str()).is_some_and(|r| !r.trim().is_empty() && r.trim().chars().all(|c| c.is_ascii_digit()))).cloned()
+        };
+        let Some(here) = self.lines.get(line) else { return String::new() };
+        let item = here.marker.is_some();
+        let mut count = 0;
+        let mut i = line;
+        loop {
+            let Some(l) = self.lines.get(i) else { return String::new() };
+            if self.line_entry.get(i).copied().flatten() != Some(entry) {
+                return String::new();
+            }
+            if let Some(title) = heading(l) {
+                return if item { format!("{title} {count}") } else { title };
+            }
+            if item && l.marker.is_some() && l.indent == here.indent {
+                count += 1;
+            }
+            if i == 0 {
+                return String::new();
+            }
+            i -= 1;
+        }
+    }
+
+    /// Start a comment on the transcript's selection (or the cursor's line): written in the
+    /// composer, what was being typed there kept aside.
+    pub fn start_comment(&mut self, ed: &mut Editor, ask: crate::chat_review::Ask) {
+        self.ensure_review();
+        if self.commenting.is_some() {
+            self.focus = Focus::Prompt;
+            return;
+        }
+        let (a, b) = self.selected_range();
+        let entry = self.line_entry.get(a.line).copied().flatten().filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. })));
+        let Some(entry) = entry else {
+            ed.message("Select part of what the agent wrote to comment on it");
+            return;
+        };
+        let quote = self.quote_of(a, b);
+        if quote.is_empty() {
+            ed.message("Select part of what the agent wrote to comment on it");
+            return;
+        }
+        let label = self.label_at(a.line, entry);
+        let opening = crate::chat_review::opening_of(&entry_text(&self.entries[entry]));
+        let stash = self.prompt.text();
+        self.prompt.set_text("");
+        self.commenting = Some((crate::chat_review::Writing { id: None, entry, quote, label, opening, ask, text: String::new() }, stash));
+        self.view.anchor = None;
+        self.focus = Focus::Prompt;
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Change a saved comment, in the composer.
+    pub fn edit_comment(&mut self, ed: &mut Editor, id: u64) {
+        self.ensure_review();
+        if self.commenting.is_some() {
+            self.save_comment(ed);
+        }
+        let Some(c) = self.review.comments.iter().find(|c| c.id == id && c.state == crate::chat_review::State::Draft).cloned() else { return };
+        let stash = self.prompt.text();
+        self.prompt.set_text(&c.text);
+        self.prompt.move_to_end();
+        self.commenting = Some((crate::chat_review::Writing { id: Some(id), entry: c.entry, quote: c.quote, label: c.label, opening: c.opening, ask: c.ask, text: String::new() }, stash));
+        self.focus = Focus::Prompt;
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Stop writing the comment: what it says, with the composer given back what it had.
+    fn end_comment(&mut self) -> Option<crate::chat_review::Writing> {
+        let (w, stash) = self.commenting.take()?;
+        let text = self.prompt.text();
+        self.prompt.set_text(&stash);
+        self.prompt.move_to_end();
+        self.dirty = true;
+        Some(crate::chat_review::Writing { text, ..w })
+    }
+
+    /// Keep the comment being written in the review (emptied, a saved one is deleted).
+    pub fn save_comment(&mut self, ed: &mut Editor) {
+        if let Some(w) = self.end_comment() {
+            self.review.keep(&w);
+        }
+        self.persist_review(ed);
+    }
+
+    pub fn cancel_comment(&mut self, ed: &mut Editor) {
+        self.end_comment();
+        self.persist_review(ed);
+    }
+
+    /// Send the comment being written now, on its own.
+    pub fn send_comment_now(&mut self, ed: &mut Editor) {
+        if self.commenting.as_ref().is_some() && self.prompt.text().trim().is_empty() {
+            ed.message("Write the comment first");
+            return;
+        }
+        let Some(w) = self.end_comment() else { return };
+        let Some(id) = self.review.keep(&w) else { return };
+        let Some(c) = self.review.comments.iter_mut().find(|c| c.id == id) else { return };
+        c.state = crate::chat_review::State::Sent;
+        let message = crate::chat_review::prompt(&[&*c], "");
+        self.persist_review(ed);
+        self.submit(ed, message, false);
+    }
+
+    /// Question or change: the other one, or `set`.
+    pub fn cycle_comment_kind(&mut self, set: Option<crate::chat_review::Ask>) {
+        use crate::chat_review::Ask;
+        if let Some((w, _)) = self.commenting.as_mut() {
+            w.ask = set.unwrap_or(if w.ask == Ask::Fix { Ask::Question } else { Ask::Fix });
+            self.dirty = true;
+        }
+    }
+
+    /// Drop the review's drafts. How many there were.
+    pub fn discard_review(&mut self, ed: &mut Editor) -> usize {
+        let n = self.review.drafts().len();
+        self.review.comments.retain(|c| c.state != crate::chat_review::State::Draft);
+        self.review_open = false;
+        self.dirty = true;
+        self.persist_review(ed);
+        n
+    }
+
+    pub fn delete_comment(&mut self, ed: &mut Editor, id: u64) {
+        self.review.comments.retain(|c| c.id != id);
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Mark what each comment quotes and show it under that (cards), and the quote of one being
+    /// written. Lines are inserted into `out` (with `owner` and the thinking lines moved along);
+    /// returns the lines that show a comment, with its id.
+    fn place_comments(&self, out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, thinking: &mut [usize], t: &crate::theme::Theme, k: f32) -> Vec<(usize, u64)> {
+        use crate::chat_review::{Ask, State};
+        let color = |ask: Ask| if ask == Ask::Question { t.accent } else { t.yellow };
+        let editing = self.commenting.as_ref().and_then(|(w, _)| w.id);
+        // (entry, quote, kind, the comment shown under it)
+        let mut places: Vec<(usize, &str, Ask, Option<&crate::chat_review::Comment>)> = self.review.comments.iter().map(|c| (c.entry, c.quote.as_str(), c.ask, Some(c))).collect();
+        if let Some((w, _)) = self.commenting.as_ref().filter(|(w, _)| w.id.is_none()) {
+            places.push((w.entry, w.quote.as_str(), w.ask, None));
+        }
+        let mut inserts: Vec<(usize, Vec<StyledLine>, u64)> = Vec::new();
+        for (entry, quote, ask, comment) in places {
+            // Where it was, else where that text is now (the transcript moved: a compaction).
+            let found = locate_quote(out, owner, entry, quote).or_else(|| {
+                let assistant: Vec<usize> = self.entries.iter().enumerate().rev().filter(|(_, e)| matches!(e, Entry::Assistant { .. })).map(|(i, _)| i).collect();
+                assistant.into_iter().find_map(|e| locate_quote(out, owner, e, quote))
+            });
+            let Some(segments) = found else { continue };
+            for (line, r) in &segments {
+                out[*line].marks.push((r.clone(), color(ask)));
+            }
+            let (Some(c), Some((last, _))) = (comment, segments.last()) else { continue };
+            let kind = if c.ask == Ask::Question { "Question" } else { "Change" };
+            let state = if editing == Some(c.id) {
+                "being changed in the composer"
+            } else if c.state == State::Sent {
+                "sent"
+            } else {
+                "draft · click to change"
+            };
+            let head = format!("{kind}  ·  {state}");
+            let mut lines = vec![StyledLine::new(head, Face::Meta).spans(vec![(0..kind.len(), if c.ask == Ask::Question { Face::Accent } else { Face::MetaWarn })])];
+            lines.extend(c.text.lines().map(|l| StyledLine::new(l, Face::UserText)));
+            let card = Block::new(t.bg_elevated).border(t.border);
+            let n = lines.len();
+            for (i, l) in lines.iter_mut().enumerate() {
+                l.block = Some(card.nth(i, n));
+                l.indent = 14.0 * k;
+                if i == 0 {
+                    l.gap_above = 6.0 * k;
+                    l.pad_top = 7.0 * k;
+                }
+                if i + 1 == n {
+                    l.pad_bottom = 8.0 * k;
+                }
+            }
+            inserts.push((*last, lines, c.id));
+        }
+        inserts.sort_by_key(|i| i.0);
+        let mut shift = 0;
+        let mut placed = Vec::new();
+        for (after, mut lines, id) in inserts {
+            let at = after + 1 + shift;
+            let o = owner.get(after + shift).copied().flatten();
+            // Inside a surface (a report's): on it too, the surface going on under the card.
+            if let Some(b) = out.get(after + shift).and_then(|l| l.backdrop) {
+                let last = lines.len().saturating_sub(1);
+                for (j, l) in lines.iter_mut().enumerate() {
+                    l.backdrop = Some(Block { top: false, bottom: b.bottom && j == last, ..b });
+                }
+                if b.bottom {
+                    if let Some(bd) = out[after + shift].backdrop.as_mut() {
+                        bd.bottom = false;
+                    }
+                }
+            }
+            let n = lines.len();
+            for (j, l) in lines.into_iter().enumerate() {
+                out.insert(at + j, l);
+                owner.insert(at + j, o);
+            }
+            for th in thinking.iter_mut().filter(|th| **th >= at) {
+                *th += n;
+            }
+            placed.extend((at..at + n).map(|i| (i, id)));
+            shift += n;
+        }
+        placed
+    }
+
+    /// The bar beside a selection in what the agent wrote: Ask, Comment. What was clicked.
+    fn draw_selection_bar(&self, ui: &mut egui::Ui, painter: &egui::Painter, area: Rect, theme: &crate::theme::Theme, k: f32, rects: &mut Vec<(&'static str, Rect)>) -> Option<crate::chat_review::Ask> {
+        use crate::chat_review::Ask;
+        if self.focus != Focus::Transcript || self.commenting.is_some() {
+            return None;
+        }
+        let anchor = self.view.anchor.filter(|a| *a != self.view.cursor)?;
+        let a = anchor.min(self.view.cursor);
+        let on_agent = self.line_entry.get(a.line).copied().flatten().is_some_and(|e| matches!(self.entries.get(e), Some(Entry::Assistant { .. })));
+        if !on_agent {
+            return None;
+        }
+        let r = self.view.screen_rect(a)?;
+        let small = egui::FontId::proportional(theme.font_size - 1.5);
+        let keyf = egui::FontId::monospace(theme.mono_size - 2.5);
+        let items = [("Ask", "a", Ask::Question), ("Comment", "c", Ask::Fix)];
+        let widths: Vec<f32> = items.iter().map(|(l, key, _)| crate::chrome::text_width(painter, l, small.clone()) + crate::chrome::text_width(painter, key, keyf.clone()) + 28.0 * k).collect();
+        let bar_w = widths.iter().sum::<f32>() + 8.0 * k;
+        // Beside the selection, in the margin prose leaves (chat-measure), so it covers no text;
+        // above the selection where there is no such room.
+        let line_left = self.view.screen_rect(Pos::new(a.line, 0)).map_or(r.left(), |s| s.left());
+        let margin_x = self.lines.get(a.line).and_then(|l| l.measure).map(|m| line_left + m + 16.0 * k);
+        // Above, it is one line tall and covers that line whole (half a line looks struck through).
+        let (x, top, bar_h) = match margin_x.filter(|x| x + bar_w <= area.right() - 8.0 * k) {
+            Some(x) => (x, (r.center().y - 16.0 * k).max(area.top() + 4.0), 32.0 * k),
+            None => {
+                let h = r.height().max(24.0 * k);
+                let above = r.top() - h;
+                let top = if above > area.top() + 4.0 { above } else { r.bottom() };
+                (r.left().clamp(area.left() + 8.0 * k, (area.right() - bar_w - 8.0 * k).max(area.left() + 8.0 * k)), top, h)
+            }
+        };
+        let bar = Rect::from_min_size(egui::pos2(x, top), egui::vec2(bar_w, bar_h));
+        // Over the transcript, whatever is drawn there after it.
+        let painter = &ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.scope_id().with("chat-selection-bar"))).with_clip_rect(area);
+        let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if theme.dark { 110 } else { 36 }) };
+        painter.add(shadow.as_shape(bar, 8));
+        painter.rect_filled(bar, 8.0 * k, theme.bg_elevated);
+        painter.rect_stroke(bar, 8.0 * k, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+        let mut bx = bar.left() + 4.0 * k;
+        let mut picked = None;
+        for (i, ((label, key, ask), w)) in items.iter().zip(&widths).enumerate() {
+            let b = Rect::from_min_size(egui::pos2(bx, bar.top() + 3.0 * k), egui::vec2(*w, bar_h - 6.0 * k));
+            let resp = ui.interact(b, ui.scope_id().with(("selection-bar", i)), egui::Sense::click());
+            rects.push((if i == 0 { "chat-selection-ask" } else { "chat-selection-comment" }, b));
+            let main = i == 0;
+            if main {
+                painter.rect_filled(b, 6.0 * k, if resp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent });
+            } else if resp.hovered() {
+                painter.rect_filled(b, 6.0 * k, crate::chrome::hover_bg(theme));
+            }
+            let fg = if main { crate::chrome::on(theme.accent, theme) } else { theme.fg };
+            let lw = crate::chrome::text(painter, egui::pos2(b.left() + 10.0 * k, b.center().y), label, small.clone(), fg, *w);
+            crate::chrome::text(painter, egui::pos2(b.left() + 16.0 * k + lw, b.center().y), key, keyf.clone(), if main { fg.gamma_multiply(0.7) } else { theme.fg_faint }, *w);
+            if resp.clicked() {
+                picked = Some(*ask);
+            }
+            bx += w;
+        }
+        picked
+    }
+
+    /// The composer's header: the comment being written (what it quotes, Save, Send now,
+    /// Cancel), or the review waiting to be sent (its count, its list, discard).
+    fn draw_review_header(&self, ui: &mut egui::Ui, painter: &egui::Painter, area: Rect, theme: &crate::theme::Theme, k: f32, rects: &mut Vec<(&'static str, Rect)>) -> Option<ReviewAct> {
+        use crate::chat_review::Ask;
+        let small = egui::FontId::proportional(theme.font_size - 2.0);
+        let mut act = None;
+        let rects = std::cell::RefCell::new(rects);
+        let button = |ui: &mut egui::Ui, right: f32, cy: f32, label: &str, main: bool, key: &'static str| -> (Rect, bool) {
+            let w = crate::chrome::text_width(painter, label, small.clone()) + 20.0 * k;
+            let r = Rect::from_min_max(egui::pos2(right - w, cy - 11.0 * k), egui::pos2(right, cy + 11.0 * k));
+            let resp = ui.interact(r, ui.scope_id().with(("review-button", key)), egui::Sense::click());
+            rects.borrow_mut().push((key, r));
+            let bg = if main { theme.accent } else if resp.hovered() { crate::chrome::hover_bg(theme) } else { theme.chip() };
+            painter.rect_filled(r, 6.0 * k, bg);
+            let fg = if main { crate::chrome::on(theme.accent, theme) } else { theme.fg };
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, label, small.clone(), fg);
+            (r, resp.clicked())
+        };
+        let kind_of = |ask: Ask| if ask == Ask::Question { ("Question", theme.accent) } else { ("Change", theme.yellow) };
+        if let Some((w, _)) = &self.commenting {
+            let cy = area.top() + 11.0 * k;
+            let (kind, kc) = kind_of(w.ask);
+            let kw = crate::chrome::text_width(painter, kind, small.clone());
+            let kr = Rect::from_min_size(egui::pos2(area.left() - 4.0 * k, cy - 11.0 * k), egui::vec2(kw + 8.0 * k, 22.0 * k));
+            let kresp = ui.interact(kr, ui.scope_id().with("review-kind"), egui::Sense::click()).on_hover_text("Question or change (M-k)");
+            if kresp.hovered() {
+                painter.rect_filled(kr, 5.0 * k, crate::chrome::hover_bg(theme));
+            }
+            crate::chrome::text(painter, egui::pos2(area.left(), cy), kind, small.clone(), kc, kw + 1.0);
+            if kresp.clicked() {
+                act = Some(ReviewAct::Kind);
+            }
+            let (r1, save) = button(ui, area.right(), cy, "Save", true, "save");
+            let (r2, now) = button(ui, r1.left() - 6.0 * k, cy, "Send now", false, "now");
+            let (r3, cancel) = button(ui, r2.left() - 6.0 * k, cy, "Cancel", false, "cancel");
+            let place = if w.label.is_empty() { "on the selection".to_string() } else { format!("on {}", w.label) };
+            crate::chrome::text(painter, egui::pos2(area.left() + kw + 8.0 * k, cy), &place, small.clone(), theme.fg_dim, (r3.left() - area.left() - kw - 16.0 * k).max(0.0));
+            // What it quotes: two lines at most, beside a bar of its kind's color.
+            let lines: Vec<&str> = w.quote.lines().collect();
+            let shown = lines.len().clamp(1, 2);
+            let top = area.top() + 26.0 * k;
+            painter.rect_filled(Rect::from_min_size(egui::pos2(area.left(), top), egui::vec2(3.0 * k, shown as f32 * 19.0 * k)), 1.5 * k, kc.gamma_multiply(0.8));
+            for (i, l) in lines.iter().take(shown).enumerate() {
+                let text = if i + 1 == shown && lines.len() > shown { format!("{l} …") } else { l.to_string() };
+                crate::chrome::text(painter, egui::pos2(area.left() + 12.0 * k, top + (i as f32 + 0.5) * 19.0 * k), &text, small.clone(), theme.fg_dim, area.width() - 12.0 * k);
+            }
+            if save {
+                act = Some(ReviewAct::Save);
+            } else if now {
+                act = Some(ReviewAct::SendNow);
+            } else if cancel {
+                act = Some(ReviewAct::Cancel);
+            }
+            return act;
+        }
+        let drafts = self.review.drafts();
+        let row = Rect::from_min_size(area.min, egui::vec2(area.width(), 30.0 * k));
+        painter.rect_filled(row, 7.0 * k, theme.bg_alt);
+        painter.rect_stroke(row, 7.0 * k, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+        let cy = row.center().y;
+        let questions = drafts.iter().filter(|c| c.ask == Ask::Question).count();
+        let changes = drafts.len() - questions;
+        let rw = crate::chrome::text(painter, egui::pos2(row.left() + 10.0 * k, cy), "Review", small.clone(), theme.accent, 80.0 * k);
+        let mut parts = Vec::new();
+        if questions > 0 {
+            parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
+        }
+        if changes > 0 {
+            parts.push(format!("{changes} change{}", if changes == 1 { "" } else { "s" }));
+        }
+        let summary = format!("{} comment{} · {} · sent with your message", drafts.len(), if drafts.len() == 1 { "" } else { "s" }, parts.join(", "));
+        let (rx, discard) = button(ui, row.right() - 4.0 * k, cy, "×", false, "discard");
+        let (rs, toggle) = button(ui, rx.left() - 4.0 * k, cy, if self.review_open { "Hide" } else { "Show" }, false, "toggle");
+        crate::chrome::text(painter, egui::pos2(row.left() + 18.0 * k + rw, cy), &summary, small.clone(), theme.fg_dim, (rs.left() - row.left() - rw - 28.0 * k).max(0.0));
+        if discard {
+            act = Some(ReviewAct::Discard);
+        } else if toggle {
+            act = Some(ReviewAct::Toggle);
+        }
+        if self.review_open {
+            for (i, c) in drafts.iter().enumerate() {
+                let r = Rect::from_min_size(egui::pos2(row.left(), row.bottom() + 4.0 * k + i as f32 * 24.0 * k), egui::vec2(row.width(), 24.0 * k));
+                let cy = r.center().y;
+                let resp = ui.interact(r, ui.scope_id().with(("review-item", c.id)), egui::Sense::click()).on_hover_text("Change it");
+                if resp.hovered() {
+                    painter.rect_filled(r, 5.0 * k, crate::chrome::hover_bg(theme));
+                }
+                let (kind, kc) = kind_of(c.ask);
+                let kw = crate::chrome::text(painter, egui::pos2(r.left() + 10.0 * k, cy), kind, small.clone(), kc, 90.0 * k);
+                let mut x = r.left() + 18.0 * k + kw;
+                if !c.label.is_empty() {
+                    x += crate::chrome::text(painter, egui::pos2(x, cy), &c.label, small.clone(), theme.fg_faint, 140.0 * k) + 10.0 * k;
+                }
+                let xr = Rect::from_center_size(egui::pos2(r.right() - 14.0 * k, cy), egui::vec2(20.0 * k, 20.0 * k));
+                let xresp = ui.interact(xr, ui.scope_id().with(("review-delete", c.id)), egui::Sense::click()).on_hover_text("Delete it");
+                painter.text(xr.center(), egui::Align2::CENTER_CENTER, "×", small.clone(), if xresp.hovered() { theme.fg } else { theme.fg_faint });
+                crate::chrome::text(painter, egui::pos2(x, cy), c.text.lines().next().unwrap_or(""), small.clone(), theme.fg, (xr.left() - x - 8.0 * k).max(0.0));
+                if xresp.clicked() {
+                    act = Some(ReviewAct::Delete(c.id));
+                } else if resp.clicked() {
+                    act = Some(ReviewAct::Edit(c.id));
+                }
+            }
+        }
+        act
+    }
+
+    /// Height of the composer's header: the comment being written, or the review's row.
+    fn review_header_h(&self, k: f32) -> f32 {
+        if let Some((w, _)) = &self.commenting {
+            let quote_lines = w.quote.lines().count().clamp(1, 2) as f32;
+            return (12.0 + 24.0 + quote_lines * 19.0 + 8.0) * k;
+        }
+        let drafts = self.review.drafts().len();
+        if drafts == 0 {
+            return 0.0;
+        }
+        (40.0 + if self.review_open { drafts as f32 * 24.0 + 6.0 } else { 0.0 }) * k
+    }
+}
+
 impl Buffer for ChatBuffer {
     fn kind(&self) -> &str {
         "chat"
@@ -2470,6 +3039,14 @@ impl Buffer for ChatBuffer {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
+        // The review: read once; a comment being written is kept as it is typed.
+        self.ensure_review();
+        if self.commenting.is_some() {
+            let text = self.prompt.text();
+            if text != self.writing_saved.0 && self.writing_saved.1.is_none_or(|t| t.elapsed() > Duration::from_millis(800)) {
+                self.persist_review(ed);
+            }
+        }
         let show = (ed.var("chat-cache-indicator").and_then(Value::as_bool).unwrap_or(true), ed.var("chat-cache-status").and_then(Value::as_bool).unwrap_or(true));
         if show != self.show_cache {
             self.show_cache = show;
@@ -2531,7 +3108,9 @@ impl Buffer for ChatBuffer {
         let thumb_h = (56.0 * k).round();
         let att_h = if self.attachments.is_empty() { 0.0 } else { thumb_h + 14.0 * k };
         let left = rect.center().x - col_w / 2.0;
-        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
+        // Above the text: the comment being written, or the review waiting to be sent.
+        let review_h = self.review_header_h(k);
+        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h - review_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
         // A tool call waiting for the person: a bar above the composer to answer it.
         let waiting = self.waiting();
         // Else stopped at a usage limit: a bar that says until when, and what happens then.
@@ -2553,7 +3132,13 @@ impl Buffer for ChatBuffer {
         if resp.clicked {
             self.focus = Focus::Transcript;
             if let Some(l) = resp.clicked_line {
-                self.toggle_fold_at(l);
+                // A comment's card: change it.
+                match self.comment_lines.iter().find(|(line, _)| *line == l).map(|(_, id)| *id) {
+                    Some(id) => self.edit_comment(ed, id),
+                    None => {
+                        self.toggle_fold_at(l);
+                    }
+                }
             }
         }
         // A code reference: that line, in the diff page of the chat's folder (or the file).
@@ -2566,6 +3151,15 @@ impl Buffer for ChatBuffer {
         }
 
         let painter = ui.painter().clone();
+        // A selection in what the agent wrote: a bar to ask about it or comment on it.
+        let mut bar_rects = Vec::new();
+        let picked = self.draw_selection_bar(ui, &painter, transcript_rect, &theme, k, &mut bar_rects);
+        for (name, r) in bar_rects {
+            ed.debug_rects.insert(name, r);
+        }
+        if let Some(ask) = picked {
+            self.start_comment(ed, ask);
+        }
         let p_focus = focused && self.focus == Focus::Prompt;
         let radius = (14.0 * k).round() as u8;
         // The transcript fades out behind the composer instead of ending at a hard edge.
@@ -2614,7 +3208,27 @@ impl Buffer for ChatBuffer {
             self.attachments.remove(i);
             self.focus = Focus::Prompt;
         }
-        let text_rect = Rect::from_min_max(egui::pos2(card.left(), card.top() + att_h), egui::pos2(card.right(), card.bottom() - toolbar_h));
+        let mut header_rects = Vec::new();
+        let review_act = if review_h > 0.0 { self.draw_review_header(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects) } else { None };
+        for (key, r) in header_rects {
+            ed.debug_rects.insert(match key { "save" => "review-save", "now" => "review-send-now", "cancel" => "review-cancel", "discard" => "review-discard", _ => "review-toggle" }, r);
+        }
+        match review_act {
+            Some(ReviewAct::Save) => self.save_comment(ed),
+            Some(ReviewAct::SendNow) => self.send_comment_now(ed),
+            Some(ReviewAct::Cancel) => self.cancel_comment(ed),
+            Some(ReviewAct::Kind) => self.cycle_comment_kind(None),
+            Some(ReviewAct::Toggle) => self.review_open = !self.review_open,
+            Some(ReviewAct::Discard) => ed.main_sender().send(|ed| ed.call("chat-review-discard")),
+            Some(ReviewAct::Edit(id)) => self.edit_comment(ed, id),
+            Some(ReviewAct::Delete(id)) => self.delete_comment(ed, id),
+            None => {}
+        }
+        if review_act.is_some() {
+            self.focus = Focus::Prompt;
+        }
+        let review_h = self.review_header_h(k).min(review_h);
+        let text_rect = Rect::from_min_max(egui::pos2(card.left(), card.top() + att_h + review_h), egui::pos2(card.right(), card.bottom() - toolbar_h));
         let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::UserText };
         let presp = self.prompt.view.show(ui, text_rect, &src, &theme, &ViewOptions {
             focused: p_focus,
@@ -2968,6 +3582,21 @@ impl Buffer for ChatBuffer {
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;
             ed.main_sender().send(move |ed| ed.call(cmd));
+        }
+        // Keys for a selection (comment on it) and for a comment being written.
+        if let Some(me) = ed.this_buffer() {
+            let selecting = self.focus == Focus::Transcript && self.commenting.is_none() && self.view.anchor.is_some_and(|a| a != self.view.cursor);
+            let commenting = self.commenting.is_some();
+            if let Some(m) = ed.meta_mut(me) {
+                for (mode, on) in [("chat-selection", selecting), ("chat-commenting", commenting)] {
+                    let has = m.minor_modes.iter().any(|x| x == mode);
+                    if on && !has {
+                        m.minor_modes.insert(0, mode.to_string());
+                    } else if !on && has {
+                        m.minor_modes.retain(|x| x != mode);
+                    }
+                }
+            }
         }
     }
 

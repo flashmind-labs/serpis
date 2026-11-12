@@ -430,6 +430,9 @@ pub struct StyledLine {
     /// Parts of the line that are links: character columns and what they point at (a code
     /// reference such as `src/main.rs:12`). Hovered, they underline; clicked, the view says so.
     pub links: Vec<(Range<usize>, String)>,
+    /// Parts of the line marked with a color behind them and a line under them (character
+    /// columns): text a review comment is about.
+    pub marks: Vec<(Range<usize>, Color32)>,
 }
 
 impl StyledLine {
@@ -504,6 +507,9 @@ impl StyledLine {
         self.backdrop.map(|b| (b.bg.to_array(), b.top, b.bottom, b.border.map(|c| c.to_array()))).hash(&mut h);
         for (r, target) in &self.links {
             (r.start, r.end, target).hash(&mut h);
+        }
+        for (r, c) in &self.marks {
+            (r.start, r.end, c.to_array()).hash(&mut h);
         }
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
@@ -1154,6 +1160,14 @@ impl DocView {
                 let first_row = g.rows.first().map(|r| r.rect().height()).unwrap_or(mg.size().y);
                 painter.galley(egui::pos2(origin.x - 8.0 - mg.size().x, origin.y + (first_row - mg.size().y) / 2.0), mg, theme.fg);
             }
+            // Marks: a tint behind, a line under.
+            for (range, color) in &line.marks {
+                for r in range_rects(&g, range.start, range.end, false) {
+                    let r = r.translate(origin.to_vec2());
+                    painter.rect_filled(r, 2.0, color.gamma_multiply(0.22));
+                    painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.5, color.gamma_multiply(0.8)));
+                }
+            }
             // Selection.
             if let Some((a, b)) = selection {
                 if i >= a.line && i <= b.line {
@@ -1282,6 +1296,9 @@ impl DocView {
         // Mouse placement and drag selection.
         if let Some(pt) = response.interact_pointer_pos() {
             if response.drag_started() || response.clicked() {
+                // A drag starts where the button went down, not where it was noticed (a few
+                // points on, or more for a quick one).
+                let pt = if response.drag_started() { ui.input(|i| i.pointer.press_origin()).unwrap_or(pt) } else { pt };
                 if let Some(p) = self.pos_at(pt) {
                     self.drag_anchor = Some(p);
                     self.cursor = p;

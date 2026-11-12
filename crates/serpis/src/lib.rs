@@ -12,6 +12,7 @@ pub mod buffer;
 pub mod buffers;
 pub use serpis_chat::cache_watch;
 pub mod chat_api;
+pub mod chat_review;
 pub mod claude_usage;
 pub mod codex_status;
 pub mod log_view;
@@ -203,6 +204,7 @@ pub fn bootstrap(ed: &mut Editor) {
     commands::install(ed);
     log_view::install(ed);
     diff::install(ed);
+    chat_review::install(ed);
     notify::install(ed);
     wm::install(ed);
     workspace::install(ed);

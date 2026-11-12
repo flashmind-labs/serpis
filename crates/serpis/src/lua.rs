@@ -1286,6 +1286,13 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.transcript_text(ed)))?
             .ok_or_else(|| mlua::Error::runtime("the chat is busy"))
     })?)?;
+    // serpis.chat.review(buf?): the chat's review of what the agent wrote: {comments = {{id,
+    // entry, quote, label, text, kind, state}}, drafts, writing = {quote, label, kind, text, id}?}.
+    chat.set("review", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let v = ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.review_json()))?.ok_or_else(|| mlua::Error::runtime("the chat is busy"))?;
+        lua_of(lua, &v)
+    })?)?;
     // serpis.chat.append(buf?, type, data): add a custom entry to the chat's session (pi's
     // `custom` entries); it is restored when the session is resumed.
     chat.set("append", lua.create_function(move |lua, (id, kind, data): (Option<u64>, String, LuaValue)| {
