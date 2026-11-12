@@ -629,6 +629,9 @@ impl ChatBuffer {
         let mut thinking_lines = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
+        // A readable line for prose: chat-measure characters of the reading font, an average
+        // character being a 26th of its lowercase alphabet (as in Bringhurst's copyfitting).
+        let measure = ed.var("chat-measure").and_then(Value::as_f64).filter(|n| *n > 0.0).map(|n| n as f32 * m.width("abcdefghijklmnopqrstuvwxyz", Face::AssistantText) / 26.0);
         let mut out: Vec<StyledLine> = Vec::new();
         let mut owner: Vec<Option<usize>> = Vec::new();
         let push = |out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, l: StyledLine, e: Option<usize>| {
@@ -728,7 +731,11 @@ impl ChatBuffer {
                                 }
                             }
                             AssistantContent::Text { text, .. } => {
-                                for l in markdown_lines(text, t, &m, self.text_w) {
+                                for mut l in markdown_lines(text, t, &m, self.text_w) {
+                                    // Prose (not code, tables or cards) wraps at chat-measure.
+                                    if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
+                                        l.measure = measure;
+                                    }
                                     push(&mut out, &mut owner, l, Some(ei));
                                 }
                             }
@@ -2170,7 +2177,8 @@ impl Buffer for ChatBuffer {
             }
         }
         let show_thinking = self.show_thinking as u64;
-        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let measure = ed.var("chat-measure").and_then(Value::as_f64).unwrap_or(0.0).to_bits();
+        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ measure.rotate_left(17);
         if style_key != self.style_key {
             self.style_key = style_key;
             self.dirty = true;

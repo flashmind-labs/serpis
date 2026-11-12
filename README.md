@@ -85,7 +85,8 @@ follows the text size (`font-optical-size`), weights come from `font-sans-weight
 `font-mono-weight`, bold and headings use `font-bold-weight`, and the font's own tracking table
 spaces UI text (`font-tracking`). Markdown tables in chats render as aligned grids. Prompts (`M-x`, pickers) open as a floating command palette;
 `minibuffer-style` = `"bottom"` puts them in the echo area, Emacs style. `chat-max-width` sets the
-width of a chat's reading column.
+width of a chat's reading column, and `chat-measure` the longest line of an agent's prose in it
+(70 characters by default; 45 to 75 read best), while code, tables and cards keep the whole column.
 
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the

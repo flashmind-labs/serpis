@@ -419,6 +419,9 @@ pub struct StyledLine {
     pub spinner: Option<Color32>,
     /// What hovering these characters of the line says.
     pub hint: Option<(Range<usize>, String)>,
+    /// The widest it wraps at, in points, however wide the column (prose kept to a readable
+    /// line length while code and cards use the whole column).
+    pub measure: Option<f32>,
 }
 
 impl StyledLine {
@@ -458,6 +461,10 @@ impl StyledLine {
         self.spans = spans;
         self
     }
+    pub fn measure(mut self, w: f32) -> Self {
+        self.measure = Some(w);
+        self
+    }
     /// A line that shows image `id` at `size` (points); its text stays for copying.
     pub fn image(mut self, id: u64, size: egui::Vec2) -> Self {
         self.image = Some((id, size));
@@ -484,6 +491,7 @@ impl StyledLine {
         self.marker.as_ref().map(|(m, f)| (m, *f as u8)).hash(&mut h);
         self.image.map(|(id, s)| (id, s.x.to_bits(), s.y.to_bits())).hash(&mut h);
         self.spinner.map(|c| c.to_array()).hash(&mut h);
+        self.measure.map(f32::to_bits).hash(&mut h);
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -860,7 +868,7 @@ fn wrap_width(wrap: bool, line: &StyledLine, col_w: f32) -> f32 {
             Some(b) => col_w * b.shrink.unwrap_or(1.0) - 2.0 * line.indent,
             None => col_w - line.indent,
         };
-        w.max(20.0)
+        w.min(line.measure.unwrap_or(f32::INFINITY)).max(20.0)
     }
 }
 
@@ -1424,6 +1432,17 @@ impl TextSurface for TextArea {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prose_wraps_at_its_measure_however_wide_the_column() {
+        let prose = StyledLine::new("text", Face::AssistantText).measure(500.0);
+        assert_eq!(wrap_width(true, &prose, 860.0), 500.0);
+        // A narrower column still wins.
+        assert_eq!(wrap_width(true, &prose, 400.0), 400.0);
+        // Code and cards (no measure) use the whole column.
+        assert_eq!(wrap_width(true, &StyledLine::new("code", Face::Code), 860.0), 860.0);
+        assert_eq!(wrap_width(false, &prose, 860.0), f32::INFINITY);
+    }
 
     #[test]
     fn doc_insert_delete_undo() {

@@ -136,6 +136,7 @@ pub fn bootstrap(ed: &mut Editor) {
         }
         None
     });
+    ed.defvar("chat-measure", json!(70), "Longest line of an agent's prose in a chat, in characters of the reading font (45 to 75 read best; 66 is the classic ideal). Code, tables and cards still use the whole column (chat-max-width). 0 or null: the whole column.");
     ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
