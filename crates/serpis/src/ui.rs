@@ -868,12 +868,17 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
                     _ => (None, c.detail.clone()),
                 };
                 let mut right = r.right() - 10.0 * k;
-                if let Some(keys) = keys {
+                if let Some(keys) = &keys {
                     let kc = chrome::keycap(&painter, right, r.center().y, &keys, t);
                     right = kc.left() - 10.0 * k;
                 }
                 let max_w = right - (r.left() + 12.0 * k + label_w) - 24.0 * k;
-                if max_w > 40.0 {
+                let n = c.label.chars().count();
+                if max_w > 40.0 && keys.is_none() && positions.iter().any(|p| *p >= n) {
+                    // Typed words found in the detail (a buffer's project) light up there.
+                    let g = painter.layout_job(detail_job(&doc, positions, n, small.clone(), t.fg_faint, t.accent, max_w));
+                    painter.galley(egui::pos2(right - g.size().x, r.center().y - g.size().y / 2.0), g, t.fg_faint);
+                } else if max_w > 40.0 {
                     let dw = chrome::text_width(&painter, &doc, small.clone()).min(max_w);
                     chrome::text(&painter, egui::pos2(right - dw, r.center().y), &doc, small.clone(), t.fg_faint, max_w);
                 }
@@ -896,6 +901,18 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
     } else if outside {
         crate::minibuffer::cancel(ed);
     }
+}
+
+/// A candidate's detail with the characters a typed word matched in accent (`positions` past
+/// `label_len` index into it), cut to `max_w` with an ellipsis.
+fn detail_job(detail: &str, positions: &[usize], label_len: usize, font: FontId, color: Color32, accent: Color32, max_w: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for (i, ch) in detail.chars().enumerate() {
+        let hit = positions.contains(&(label_len + i));
+        job.append(&ch.to_string(), 0.0, egui::TextFormat { font_id: font.clone(), color: if hit { accent } else { color }, ..Default::default() });
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
+    job
 }
 
 fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
@@ -955,7 +972,11 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
         painter.galley(egui::pos2(label_x, rrect.center().y - g.size().y / 2.0), g, theme.fg);
         if !c.detail.is_empty() {
             let max_w = rrect.width() - label_w - 40.0;
-            if max_w > 40.0 {
+            let n = c.label.chars().count();
+            if max_w > 40.0 && positions.iter().any(|p| *p >= n) {
+                let g = painter.layout_job(detail_job(&c.detail, positions, n, small.clone(), theme.fg_faint, theme.accent, max_w));
+                painter.galley(egui::pos2(rrect.right() - 10.0 - g.size().x, rrect.center().y - g.size().y / 2.0), g, theme.fg_faint);
+            } else if max_w > 40.0 {
                 let mut d = c.detail.clone();
                 let dg = painter.layout_no_wrap(d.clone(), small.clone(), theme.fg_faint);
                 if dg.size().x > max_w {

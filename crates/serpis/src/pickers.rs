@@ -57,7 +57,7 @@ impl Editor {
         let mut search = detail.iter().take(if self.local_directory(id).is_some_and(|d| self.repo_of(&d).is_some()) { 3 } else { 1 }).cloned().collect::<Vec<_>>();
         search.extend(self.buffer_machine(id));
         search.extend(self.buffer_directory(id).and_then(|d| d.file_name().map(|f| f.to_string_lossy().into_owned())));
-        let search = search.join(" ");
+        let search = search.join("\n");
         let a = self.buffer_activity(id);
         if a.state != crate::ActivityState::Idle {
             detail.push(a.state.as_str().into());

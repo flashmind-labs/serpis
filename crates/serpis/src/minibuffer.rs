@@ -16,7 +16,9 @@ pub struct Candidate {
     pub checked: Option<bool>,
     /// The heading this candidate falls under, drawn above the first of each.
     pub section: Option<String>,
-    /// More text that finds it when typed, besides its label (a buffer's project).
+    /// More fields that find it when typed, besides its label, one per line (a buffer's kind,
+    /// project, branch, folder). Each typed word must match within one field (orderless style),
+    /// and a match in a field shown in `detail` is highlighted there.
     pub search: String,
 }
 
@@ -56,6 +58,8 @@ pub struct Minibuffer {
     pub candidates: Vec<Candidate>,
     /// Recompute candidates from the input (dynamic sources such as file paths).
     pub dynamic: Option<CandidatesFn>,
+    /// Candidates that match, best first, with the characters that matched: indices into the
+    /// label, then (from the label's length on) into the detail.
     pub filtered: Vec<(usize, Vec<usize>)>,
     pub selected: usize,
     pub require_match: bool,
@@ -104,19 +108,38 @@ impl Minibuffer {
     }
 }
 
-/// Match a candidate by its label, or with its `search` text too: whichever scores higher.
-/// Positions are the label's (only those are drawn).
+/// Match a candidate by its label or, word by word, by its `search` fields: each typed word
+/// must match within the label or within one field, so a word can't be spelled from letters
+/// scattered over several (as "term" would be over "the loop · alphaproj · main"). Positions
+/// are the label's, then a field's shifted past the label onto where it shows in the detail.
 fn match_candidate(query: &str, c: &Candidate) -> Option<(i64, Vec<usize>)> {
-    let label = fuzzy(query, &c.label);
-    if c.search.is_empty() || query.is_empty() {
-        return label;
+    if c.search.is_empty() || query.trim().is_empty() {
+        return fuzzy(query, &c.label);
     }
     let n = c.label.chars().count();
-    let wider = fuzzy(query, &format!("{} {}", c.label, c.search)).map(|(s, p)| (s, p.into_iter().filter(|i| *i < n).collect()));
-    match (label, wider) {
-        (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
-        (a, b) => a.or(b),
+    let detail: Vec<char> = c.detail.to_lowercase().chars().collect();
+    let mut total = 0;
+    let mut positions = Vec::new();
+    for term in query.split_whitespace() {
+        let mut best = fuzzy(term, &c.label);
+        for field in c.search.lines().filter(|f| !f.is_empty()) {
+            let Some((s, p)) = fuzzy(term, field) else { continue };
+            if best.as_ref().is_some_and(|b| b.0 >= s) {
+                continue;
+            }
+            // Where the field shows in the detail, if it does (the last place: a folder's name
+            // ends its path).
+            let f: Vec<char> = field.to_lowercase().chars().collect();
+            let at = (0..=detail.len().saturating_sub(f.len())).rev().find(|i| detail[*i..].starts_with(&f));
+            best = Some((s, at.map(|at| p.into_iter().map(|i| n + at + i).collect()).unwrap_or_default()));
+        }
+        let (s, p) = best?;
+        total += s;
+        positions.extend(p);
     }
+    positions.sort_unstable();
+    positions.dedup();
+    Some((total, positions))
 }
 
 /// Subsequence fuzzy match; returns a score (higher is better) and matched char positions.
@@ -589,13 +612,17 @@ mod tests {
     #[test]
     fn candidates_are_found_by_their_search_text() {
         use super::{Candidate, match_candidate};
-        let c = Candidate { search: "Chat field main".into(), ..Candidate::new("Fix the loop") };
+        let c = Candidate { search: "Chat\nfield\nmain".into(), ..Candidate::new("Fix the loop").detail("Chat · field · main") };
+        let n = "Fix the loop".len();
         assert_eq!(match_candidate("loop", &c).unwrap().1, vec![8, 9, 10, 11]);
-        let (_, by_project) = match_candidate("field", &c).unwrap();
-        assert!(by_project.iter().all(|i| *i < "Fix the loop".len()));
+        // Found by its project, highlighted where the detail shows it.
+        let at = "Chat · ".chars().count();
+        assert_eq!(match_candidate("field", &c).unwrap().1, (0..5).map(|i| n + at + i).collect::<Vec<_>>());
         assert!(match_candidate("field loop", &c).is_some());
         assert!(match_candidate("nothing", &c).is_none());
         assert!(match_candidate("field", &Candidate::new("Fix the loop")).is_none());
+        // A word is never spelled from letters of several fields.
+        assert!(match_candidate("term", &c).is_none());
     }
 
     #[test]

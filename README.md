@@ -162,7 +162,9 @@ end)
 
 Buffers show the same name everywhere (sidebar, switcher, tabs, headers, the window title): a
 chat's title, else a readable name like `Chat 2` or `Terminal`. Internal names (`*chat*<2>`) stay
-as stable identifiers for scripts.
+as stable identifiers for scripts. The switcher (`s-p`) also finds a buffer by its kind, project,
+branch or folder, shown beside the name: each typed word matches within one of them, orderless
+style (`alpha term` is a terminal in `alphaproj`), and what matched lights up there.
 
 Commands that need a folder take it as a parameter when scripted (`serpis.command.run("new-chat",
 "~/src/app")`) and ask when run by hand: `project-open` (`s-O`, also the folder button in the

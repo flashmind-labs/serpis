@@ -1604,7 +1604,13 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     // The open prompt's visible candidates, best first: {label, detail}.
     debug.set("candidates", lua.create_function(|lua, ()| {
         let v = ed(|e| {
-            e.minibuffer.as_ref().map(|m| m.filtered.iter().map(|(i, _)| json!({"label": m.candidates[*i].label, "detail": m.candidates[*i].detail, "checked": m.candidates[*i].checked, "section": m.candidates[*i].section})).collect::<Vec<_>>()).unwrap_or_default()
+            e.minibuffer.as_ref().map(|m| m.filtered.iter().map(|(i, p)| {
+                let c = &m.candidates[*i];
+                // What matched, as drawn highlighted: in the label, and in the detail.
+                let n = c.label.chars().count();
+                let lit = |s: &str, off: usize| s.chars().enumerate().filter(|(j, _)| p.contains(&(j + off))).map(|(_, ch)| ch).collect::<String>();
+                json!({"label": c.label, "detail": c.detail, "checked": c.checked, "section": c.section, "matched": lit(&c.label, 0), "matched_detail": lit(&c.detail, n)})
+            }).collect::<Vec<_>>()).unwrap_or_default()
         })?;
         lua_of(lua, &v)
     })?)?;
@@ -1875,5 +1881,7 @@ fn candidate_of(t: &Table) -> mlua::Result<crate::minibuffer::Candidate> {
     let mut c = crate::minibuffer::Candidate::new(label.clone()).value(value.unwrap_or(label)).detail(detail.unwrap_or_default());
     c.checked = t.get("checked")?;
     c.section = t.get("section")?;
+    // More that finds it when typed (a project, a branch): each word matches within one field.
+    c.search = t.get::<Option<Vec<String>>>("fields")?.unwrap_or_default().join("\n");
     Ok(c)
 }
