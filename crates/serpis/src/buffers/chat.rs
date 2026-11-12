@@ -709,8 +709,25 @@ impl ChatBuffer {
                             push(&mut out, &mut owner, StyledLine::new("", Face::Meta).rule(t.border).gap(30.0 * k).pad(0.0, 14.0 * k), Some(ei));
                         }
                         let minutes = words.div_ceil(230).max(1);
-                        let label = format!("Report  ·  {}  ·  {words} words, about {minutes} min", short_model(model));
-                        let mut head = StyledLine::new(label, Face::Label).spans(vec![(0.."Report".len(), Face::Accent)]).pad(0.0, 4.0 * k);
+                        // Written to the report skill: its outcome as a pill, and what needs you.
+                        let shape = blocks.iter().find_map(|b| if let AssistantContent::Text { text, .. } = b { shaped_report(text) } else { None });
+                        let mut label = String::new();
+                        let mut spans = Vec::new();
+                        if let Some(sh) = &shape {
+                            let (word, face) = sh.outcome.badge();
+                            label.push_str(&format!(" {word} "));
+                            spans.push((0..label.len(), face));
+                            label.push_str("   ");
+                        }
+                        let at = label.len();
+                        label.push_str(&format!("Report  ·  {}  ·  {words} words, about {minutes} min", short_model(model)));
+                        spans.push((at..at + "Report".len(), Face::Accent));
+                        if let Some(n) = shape.as_ref().map(|sh| sh.needs_you()).filter(|n| *n > 0) {
+                            let at = label.len();
+                            label.push_str(&format!("  ·  {n} need{} you", if n == 1 { "s" } else { "" }));
+                            spans.push((at..label.len(), Face::MetaWarn));
+                        }
+                        let mut head = StyledLine::new(label, Face::Label).spans(spans).pad(0.0, 4.0 * k);
                         if report_bg.is_some() {
                             head = head.gap(30.0 * k);
                             head.pad_top = 16.0 * k;
@@ -764,6 +781,12 @@ impl ChatBuffer {
                             }
                             AssistantContent::Text { text, .. } => {
                                 let scale = if report.is_some() { report_scale } else { 1.0 };
+                                if let Some(sh) = report.and_then(|_| shaped_report(text)) {
+                                    for l in report_lines(&sh, t, &m, self.text_w, report_bg.unwrap_or(t.bg_alt), measure, scale) {
+                                        push(&mut out, &mut owner, l, Some(ei));
+                                    }
+                                    continue;
+                                }
                                 for mut l in markdown_lines(text, t, &m, self.text_w) {
                                     // Prose (not code, tables or cards) wraps at chat-measure.
                                     if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
@@ -1402,6 +1425,180 @@ fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap
     }
     if !running {
         finish(&mut last);
+    }
+    out
+}
+
+/// How a report written to the report skill (skills/report) turned out: its first word.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    Done,
+    Partly,
+    Blocked,
+}
+
+impl Outcome {
+    fn badge(self) -> (&'static str, Face) {
+        match self {
+            Outcome::Done => ("Done", Face::BadgeGood),
+            Outcome::Partly => ("Partly done", Face::BadgeWarn),
+            Outcome::Blocked => ("Blocked", Face::BadgeBad),
+        }
+    }
+}
+
+/// A report in the report skill's shape: the outcome, its first sentence (the headline), the
+/// rest of the opening, then its `##` sections in order (title, body).
+#[derive(Debug)]
+struct Shaped {
+    outcome: Outcome,
+    headline: String,
+    intro: String,
+    sections: Vec<(String, String)>,
+}
+
+impl Shaped {
+    /// Items under "Needs you".
+    fn needs_you(&self) -> usize {
+        self.sections.iter().filter(|(t, _)| t.eq_ignore_ascii_case("needs you")).map(|(_, b)| top_items(b)).sum()
+    }
+}
+
+/// Top-level list items in markdown.
+fn top_items(body: &str) -> usize {
+    body.lines().filter(|l| !l.starts_with(' ') && list_item(l).is_some()).count()
+}
+
+/// `text` read as a report written to the report skill: it opens with `Done`, `Partly done`
+/// or `Blocked` and a colon. None for anything else (it is shown as plain markdown).
+fn shaped_report(text: &str) -> Option<Shaped> {
+    let text = text.trim_start();
+    let (head, body) = match text.find("\n## ") {
+        Some(i) => (&text[..i], &text[i + 1..]),
+        None => (text, ""),
+    };
+    let (first, rest) = head.split_once("\n\n").unwrap_or((head, ""));
+    let first = first.trim().trim_start_matches("**");
+    let lower = first.to_lowercase();
+    let (outcome, n) = [("partly done", Outcome::Partly), ("partially done", Outcome::Partly), ("done", Outcome::Done), ("blocked", Outcome::Blocked)]
+        .into_iter()
+        .find(|(w, _)| lower.starts_with(w))
+        .map(|(w, o)| (o, w.len()))?;
+    let after = first[n..].trim_start_matches("**");
+    let after = after.strip_prefix(':').or_else(|| after.strip_prefix(" —")).or_else(|| after.strip_prefix(" -"))?.trim_start();
+    // The headline is the first sentence (a period and a space, outside inline code).
+    let mut code = false;
+    let mut cut = after.len();
+    for (i, c) in after.char_indices() {
+        if c == '`' {
+            code = !code;
+        } else if !code && c == '.' && after[i + 1..].starts_with(' ') {
+            cut = i + 1;
+            break;
+        }
+    }
+    let mut headline = after[..cut].trim().to_string();
+    if let Some(c) = headline.chars().next().filter(|c| c.is_lowercase()) {
+        headline.replace_range(..c.len_utf8(), &c.to_uppercase().to_string());
+    }
+    let intro = [after[cut..].trim(), rest.trim()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
+    let sections = if body.is_empty() {
+        Vec::new()
+    } else {
+        body.split("\n## ")
+            .map(|part| {
+                let part = part.strip_prefix("## ").unwrap_or(part);
+                let (title, rest) = part.split_once('\n').unwrap_or((part, ""));
+                (title.trim().to_string(), rest.to_string())
+            })
+            .collect()
+    };
+    Some(Shaped { outcome, headline, intro, sections })
+}
+
+/// What a check under "Checked" found, from the first word of its result ("**Tests:**
+/// passes"): ✓, ✗, or ○ for what was not checked. None when it can't tell (a plain bullet).
+fn check_mark(text: &str) -> Option<(&'static str, Face)> {
+    let lower = text.trim().to_lowercase();
+    if ["not checked", "not tested", "not run", "unchecked", "untested"].iter().any(|p| lower.starts_with(p)) {
+        return Some(("○", Face::MetaWarn));
+    }
+    let result = lower.split_once(':').map_or(lower.as_str(), |(_, r)| r).trim_start();
+    match result.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("") {
+        "pass" | "passes" | "passed" | "passing" | "ok" | "works" | "worked" | "succeeds" | "succeeded" | "green" | "clean" => Some(("✓", Face::ToolOk)),
+        "fail" | "fails" | "failed" | "failing" | "broken" | "breaks" | "errors" | "red" => Some(("✗", Face::ToolError)),
+        _ => None,
+    }
+}
+
+/// A report in the skill's shape, drawn as its parts: the headline a size up, "Needs you" as a
+/// callout card, checks marked by what they found, each section's heading with its count.
+/// Prose wraps at `measure` and is `scale` times its usual size.
+#[allow(clippy::too_many_arguments)]
+fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, surface: Color32, measure: Option<f32>, scale: f32) -> Vec<StyledLine> {
+    let k = m.scale();
+    let prose = |l: &mut StyledLine, s: f32| {
+        l.measure = measure.map(|w| w * s);
+        if s != 1.0 {
+            l.scale = Some(s);
+        }
+    };
+    let mut out = Vec::new();
+    let (text, spans) = inline_spans(&sh.headline);
+    // A size up from the text, a little under the section headings, with a heading's leading.
+    let mut headline = StyledLine::new(text, Face::Heading).spans(spans).gap(6.0 * k).pad(0.0, 6.0 * k);
+    prose(&mut headline, scale * 0.9);
+    out.push(headline);
+    for mut l in markdown_lines(&sh.intro, t, m, avail) {
+        if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
+            prose(&mut l, scale);
+        }
+        out.push(l);
+    }
+    for (title, body) in &sh.sections {
+        let kind = title.to_lowercase();
+        let needs = kind == "needs you";
+        let items = top_items(body);
+        let mut head = StyledLine::new(title.clone(), Face::Heading).gap(30.0 * k).pad(0.0, if needs { 8.0 } else { 2.0 } * k);
+        if items > 0 && ["needs you", "changed", "checked", "not done"].contains(&kind.as_str()) {
+            let at = head.text.len();
+            head.text.push_str(&format!("   {items}"));
+            head.spans.push((at..head.text.len(), if needs { Face::MetaWarn } else { Face::Meta }));
+        }
+        prose(&mut head, scale);
+        out.push(head);
+        let mut lines = markdown_lines(body, t, m, avail);
+        if needs {
+            // A card the eye finds first: raised a little from the report, with a trace of the
+            // theme's warning color and a bar of it (more of it muddies: tan, olive).
+            let raised = crate::themes::mix(surface, t.fg, if t.dark { 0.04 } else { 0.0 });
+            let card = Block::new(crate::themes::mix(raised, t.yellow, if t.dark { 0.05 } else { 0.07 })).bar(t.yellow);
+            let n = lines.len();
+            for (i, l) in lines.iter_mut().enumerate() {
+                l.block = Some(card.nth(i, n));
+                l.indent += 16.0 * k;
+                prose(l, scale);
+                if i == 0 {
+                    l.gap_above = 0.0;
+                    l.pad_top += 12.0 * k;
+                }
+                if i + 1 == n {
+                    l.pad_bottom += 12.0 * k;
+                }
+            }
+        } else {
+            for l in lines.iter_mut() {
+                if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
+                    prose(l, scale);
+                }
+                if kind == "checked" && l.marker.is_some() {
+                    if let Some((mark, face)) = check_mark(&l.text) {
+                        l.marker = Some((mark.to_string(), face));
+                    }
+                }
+            }
+        }
+        out.extend(lines);
     }
     out
 }
@@ -3057,6 +3254,28 @@ mod tests {
         // A prompt queued while it runs steers the run; it does not end it.
         let entries = vec![user("go", false), said(&long), user("also this", true), said(&long)];
         assert_eq!(report_entries(&entries, false, 80).into_keys().collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[test]
+    fn reports_in_the_skills_shape_are_read_as_parts() {
+        use super::{Outcome, check_mark, shaped_report};
+        let text = "Done: the change is sound, but `a.b` is counted twice. It moves retries.\n\n## Needs you\n\n1. **Fix it.** Now.\n2. **Check it.**\n\n## Checked\n\n- **Tests:** passes.\n- **Not checked:** load.\n";
+        let sh = shaped_report(text).unwrap();
+        assert_eq!(sh.outcome, Outcome::Done);
+        // The first sentence, even with a period inside inline code.
+        assert_eq!(sh.headline, "The change is sound, but `a.b` is counted twice.");
+        assert_eq!(sh.intro, "It moves retries.");
+        assert_eq!(sh.sections.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["Needs you", "Checked"]);
+        assert_eq!(sh.needs_you(), 2);
+        assert_eq!(shaped_report("**Partly done:** half of it.").unwrap().outcome, Outcome::Partly);
+        assert_eq!(shaped_report("Blocked — no access.").unwrap().outcome, Outcome::Blocked);
+        // Anything else stays plain markdown.
+        assert!(shaped_report("I've finished the review.").is_none());
+        assert!(shaped_report("Doneness is relative.").is_none());
+        assert_eq!(check_mark("Tests: passes.").map(|m| m.0), Some("✓"));
+        assert_eq!(check_mark("Lint: failed on 2 files").map(|m| m.0), Some("✗"));
+        assert_eq!(check_mark("Not checked: the dashboards").map(|m| m.0), Some("○"));
+        assert_eq!(check_mark("Benchmarks: 120 ms → 40 ms"), None);
     }
 
     #[test]

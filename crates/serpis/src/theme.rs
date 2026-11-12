@@ -44,6 +44,10 @@ pub enum Face {
     MetaWarn,
     /// Small medium-weight labels (who is speaking, card titles).
     Label,
+    /// A report's outcome, as a pill: done, partly done, blocked.
+    BadgeGood,
+    BadgeWarn,
+    BadgeBad,
     /// Text that is there to be copied, not read.
     Unseen,
     /// Syntax highlighting (monospace, colored from the theme's palette).
@@ -233,6 +237,7 @@ impl Theme {
         let weight = match face {
             Face::Bold | Face::BoldItalic | Face::Heading | Face::CodeBold => Some(self.bold_weight),
             Face::UserLabel | Face::ToolHeader | Face::Label => Some((self.bold_weight - 100.0).max(400.0)),
+            Face::BadgeGood | Face::BadgeWarn | Face::BadgeBad => Some(self.bold_weight),
             _ => None,
         };
         let mut coords = egui::epaint::text::VariationCoords::default();
@@ -313,6 +318,9 @@ impl Theme {
             Face::MetaGood => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.green, t),
             Face::MetaWarn => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.yellow, t),
             Face::Label => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.fg_dim, t),
+            Face::BadgeGood => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.green, self.green.gamma_multiply(if self.dark { 0.18 } else { 0.14 })),
+            Face::BadgeWarn => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.yellow, self.yellow.gamma_multiply(if self.dark { 0.18 } else { 0.16 })),
+            Face::BadgeBad => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.red, self.red.gamma_multiply(if self.dark { 0.18 } else { 0.14 })),
             Face::Unseen => (self.mono(), Color32::TRANSPARENT, t),
             Face::SynKeyword => (self.mono(), self.purple, t),
             Face::SynString => (self.mono(), self.green, t),

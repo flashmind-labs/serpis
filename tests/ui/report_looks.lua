@@ -38,7 +38,8 @@ local pages = 2
 local steps = {
   function() serpis.command.run("new-chat"); return 500 end,
   function() serpis.chat.prompt(serpis.buffer.current(), "STEPS:Run the tests|echo ok;;Check the diff|echo ok"); return 2500 end,
-  function() serpis.chat.prompt(serpis.buffer.current(), "REPORT"); return 2500 end,
+  -- SERPIS_REPORT: the prompt that brings the report (REPORT:skill for the skill's version).
+  function() serpis.chat.prompt(serpis.buffer.current(), os.getenv("SERPIS_REPORT") or "REPORT"); return 2500 end,
 }
 for _, look in ipairs(looks) do
   steps[#steps + 1] = function()
@@ -68,7 +69,7 @@ for _, look in ipairs(looks) do
   end
 end
 steps[#steps + 1] = function()
-  T.check("the report came", (serpis.chat.transcript() or ""):find("Things to consider", 1, true) ~= nil, true)
+  T.check("the report came", (serpis.chat.transcript() or ""):find("retries_respect_limit", 1, true) ~= nil, true)
   T.finish()
   return 100000
 end

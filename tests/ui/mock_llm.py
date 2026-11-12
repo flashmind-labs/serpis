@@ -8,7 +8,9 @@ models.json). What it says depends on the last user message:
   CODE ...        reply with a fenced Rust code block
   INLINE ...      reply with inline code (Run `cargo test` now.)
   LONG ...        reply with a long answer (paragraphs, lists, code, a table)
-  REPORT ...      reply with report.md (beside this file): an agent's summary of a code review
+  REPORT          reply with report.md (beside this file): an agent's summary of a code review
+  REPORT:<name>   reply with report-<name>.md: the same review written another way (skill: by
+                  skills/report/SKILL.md)
   READ:<path>     call read on that path
   SHELL:<command> call bash with that command
   DESCRIBED:<description>|<command> the same, saying what it is for
@@ -91,7 +93,9 @@ class Handler(BaseHTTPRequestHandler):
                         parts.append("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |")
                 delta["content"] = "\n\n".join(parts)
             if prompt.startswith("REPORT"):
-                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "report.md")) as f:
+                variant = prompt[len("REPORT:"):].strip() if prompt.startswith("REPORT:") else ""
+                name = f"report-{variant}.md" if variant.isidentifier() else "report.md"
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
                     delta["content"] = f.read()
             if prompt.startswith("INLINE"):
                 delta["content"] = "Run `cargo test` now."
