@@ -120,6 +120,12 @@ as a link back, and what you wrote; a diff page's review the same, with the code
 answer once it quotes them; the quote in the answer links back. All of it is read from the
 transcript, so it lasts as long as the chat.
 
+Mermaid diagrams (` ```mermaid ` blocks) in a chat are drawn as part of the page, not as a
+picture: ariel-rs lays them out, and serpis paints the boxes, lines and text in its own font and
+the theme's colors (`diagram.rs`). Flowcharts, sequence and state diagrams draw; a
+flowchart too wide for the column is drawn top to bottom; a node under the mouse is lit with its
+lines. A block that can't be drawn stays as code, saying why; `chat-diagrams` off, all of them do.
+
 In a chat, the prompt and the transcript are separate: selections, edits, `gg` and `G` act on
 the one that has focus. In vim normal state the prompt sits below the transcript: `k` on the
 prompt's first line moves up into the transcript and `j` on its last line comes back down. Clicks,

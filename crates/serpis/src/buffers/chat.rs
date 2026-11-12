@@ -677,6 +677,7 @@ impl ChatBuffer {
         let m = Measure::Fonts(&ed.ctx, t);
         // A readable line for prose: chat-measure characters of the reading font, an average
         // character being a 26th of its lowercase alphabet (as in Bringhurst's copyfitting).
+        let diagrams = ed.var_bool("chat-diagrams");
         let measure = ed.var("chat-measure").and_then(Value::as_f64).filter(|n| *n > 0.0).map(|n| n as f32 * m.width("abcdefghijklmnopqrstuvwxyz", Face::AssistantText) / 26.0);
         // The report each finished run ends with (chat-report): entry index → its words.
         let reports = if ed.var_bool("chat-report") {
@@ -831,12 +832,12 @@ impl ChatBuffer {
                             AssistantContent::Text { text, .. } => {
                                 let scale = if report.is_some() { report_scale } else { 1.0 };
                                 if let Some(sh) = report.and_then(|_| shaped_report(text)) {
-                                    for l in report_lines(&sh, t, &m, self.text_w, report_bg.unwrap_or(t.bg_alt), measure, scale) {
+                                    for l in report_lines(&sh, t, &m, self.text_w, report_bg.unwrap_or(t.bg_alt), measure, scale, diagrams) {
                                         push(&mut out, &mut owner, l, Some(ei));
                                     }
                                     continue;
                                 }
-                                for mut l in markdown_lines(text, t, &m, self.text_w) {
+                                for mut l in markdown_lines(text, t, &m, self.text_w, diagrams) {
                                     // Prose (not code, tables or cards) wraps at chat-measure.
                                     if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
                                         l.measure = measure.map(|w| w * scale);
@@ -1593,7 +1594,7 @@ fn check_mark(text: &str) -> Option<(&'static str, Face)> {
 /// callout card, checks marked by what they found, each section's heading with its count.
 /// Prose wraps at `measure` and is `scale` times its usual size.
 #[allow(clippy::too_many_arguments)]
-fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, surface: Color32, measure: Option<f32>, scale: f32) -> Vec<StyledLine> {
+fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, surface: Color32, measure: Option<f32>, scale: f32, diagrams: bool) -> Vec<StyledLine> {
     let k = m.scale();
     let prose = |l: &mut StyledLine, s: f32| {
         l.measure = measure.map(|w| w * s);
@@ -1607,7 +1608,7 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
     let mut headline = StyledLine::new(text, Face::Heading).spans(spans).gap(6.0 * k).pad(0.0, 6.0 * k);
     prose(&mut headline, scale * 0.9);
     out.push(headline);
-    for mut l in markdown_lines(&sh.intro, t, m, avail) {
+    for mut l in markdown_lines(&sh.intro, t, m, avail, diagrams) {
         if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
             prose(&mut l, scale);
         }
@@ -1625,7 +1626,7 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
         }
         prose(&mut head, scale);
         out.push(head);
-        let mut lines = markdown_lines(body, t, m, avail);
+        let mut lines = markdown_lines(body, t, m, avail, diagrams);
         if needs {
             // A card the eye finds first: raised a little from the report, with a trace of the
             // theme's warning color and a bar of it (more of it muddies: tan, olive).
@@ -1661,7 +1662,7 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
     out
 }
 
-fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) -> Vec<StyledLine> {
+fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32, diagrams: bool) -> Vec<StyledLine> {
     let k = m.scale();
     let mut out: Vec<StyledLine> = Vec::new();
     let src: Vec<&str> = text.split('\n').collect();
@@ -1689,9 +1690,25 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
                 i += 1;
             }
             i += 1;
+            // A Mermaid diagram, drawn (chat-diagrams); one that can't be is shown as code, saying so.
+            let mut caption = lang.clone();
+            if diagrams && lang.eq_ignore_ascii_case("mermaid") {
+                let src = code.join("\n");
+                let font_px = t.format(Face::AssistantText).font_id.size;
+                match crate::diagram::layout(&src, font_px, &mut |s| m.width(s, Face::AssistantText), avail) {
+                    Ok(placed) => {
+                        let first = code.iter().find(|l| !l.trim().is_empty()).map_or("", |l| l.trim());
+                        out.push(StyledLine::new(format!("[diagram: {first}]"), Face::Meta).diagram(placed).gap(gap.max(16.0 * k)).pad(4.0 * k, 4.0 * k));
+                        gap = 16.0 * k;
+                        prev_list = false;
+                        continue;
+                    }
+                    Err(e) => caption = format!("mermaid · not drawn: {e}"),
+                }
+            }
             let mut lines: Vec<StyledLine> = Vec::new();
-            if !lang.is_empty() {
-                lines.push(StyledLine::new(lang.clone(), Face::Meta).pad(8.0 * k, 0.0));
+            if !caption.is_empty() {
+                lines.push(StyledLine::new(caption, Face::Meta).pad(8.0 * k, 0.0));
             }
             let hl = crate::highlight::highlight(&lang, &code, Face::Code).unwrap_or_default();
             lines.extend(code.iter().enumerate().map(|(j, l)| StyledLine::new(*l, Face::Code).spans(hl.get(j).cloned().unwrap_or_default())));
@@ -2663,6 +2680,14 @@ impl ChatBuffer {
                         "scale": l.scale,
                         "links": l.links.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
                         "marks": l.marks.len(),
+                        "diagram": l.diagram.as_ref().map(|d| serde_json::json!({
+                            "kind": d.diagram.kind,
+                            "width": d.size().x,
+                            "height": d.size().y,
+                            "text": d.text,
+                            "nodes": d.diagram.nodes.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                        })),
+                        "column": self.text_w,
                     })
                 })
                 .collect(),
@@ -3222,7 +3247,7 @@ impl Buffer for ChatBuffer {
         let settings = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            for name in ["chat-measure", "chat-report", "chat-report-min-words", "chat-report-scale", "chat-report-background"] {
+            for name in ["chat-measure", "chat-diagrams", "chat-report", "chat-report-min-words", "chat-report-scale", "chat-report-background"] {
                 ed.var(name).map(Value::to_string).hash(&mut h);
             }
             h.finish()
@@ -4131,7 +4156,7 @@ mod tests {
         let t = crate::theme::Theme::default();
         let m = Measure::Chars(8.0);
         let md = "Results:\n\n| Run | Lead |\n|---|--:|\n| 1 connection, 60s | **91%** |\n| 3 | `x` |\n\nafter";
-        let lines = markdown_lines(md, &t, &m, 2000.0);
+        let lines = markdown_lines(md, &t, &m, 2000.0, false);
         let rows = table(&lines);
         assert_eq!(rows.len(), 3, "header and two rows, no ASCII rules");
         assert_eq!(rows[0].text, "Run Lead");
@@ -4148,7 +4173,7 @@ mod tests {
         assert!(rows[0].block.unwrap().top && rows[2].block.unwrap().bottom);
         assert!(rows.iter().all(|l| l.rule_below.is_some()));
         assert!(lines.iter().any(|l| l.text == "after"));
-        assert!(table(&markdown_lines("| not a table", &t, &m, 2000.0)).is_empty());
+        assert!(table(&markdown_lines("| not a table", &t, &m, 2000.0, false)).is_empty());
     }
 
     #[test]
@@ -4156,7 +4181,7 @@ mod tests {
         let t = crate::theme::Theme::default();
         let m = Measure::Chars(8.0);
         let md = "| Run | Result |\n|---|---|\n| 1 connection, 180s, Rust and Python together | ~1% / -90ms in both |\n| 3 | ok |";
-        let rows = markdown_lines(md, &t, &m, 300.0);
+        let rows = markdown_lines(md, &t, &m, 300.0, false);
         let rows = table(&rows);
         assert!(rows.len() > 3, "the long row wraps: {:?}", rows.iter().map(|l| &l.text).collect::<Vec<_>>());
         // Every physical line fits: its last cell ends inside the column.
@@ -4170,7 +4195,7 @@ mod tests {
     #[test]
     fn lists_hang_their_markers() {
         let t = crate::theme::Theme::default();
-        let lines = markdown_lines("- one\n- two\n  - nested\n3. three", &t, &Measure::Chars(8.0), 800.0);
+        let lines = markdown_lines("- one\n- two\n  - nested\n3. three", &t, &Measure::Chars(8.0), 800.0, false);
         let markers: Vec<&str> = lines.iter().filter_map(|l| l.marker.as_ref().map(|(m, _)| m.as_str())).collect();
         assert_eq!(markers, ["•", "•", "•", "3."]);
         assert_eq!(lines[0].text, "one");

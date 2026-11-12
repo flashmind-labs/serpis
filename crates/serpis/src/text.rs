@@ -433,6 +433,8 @@ pub struct StyledLine {
     /// Parts of the line marked with a color behind them and a line under them (character
     /// columns): text a review comment is about.
     pub marks: Vec<(Range<usize>, Color32)>,
+    /// A diagram drawn instead of text (a Mermaid block in a chat): its text stays for copying.
+    pub diagram: Option<crate::diagram::Placed>,
 }
 
 impl StyledLine {
@@ -476,6 +478,11 @@ impl StyledLine {
         self.measure = Some(w);
         self
     }
+    /// A line that shows a diagram, laid out and placed (`crate::diagram::layout`).
+    pub fn diagram(mut self, d: crate::diagram::Placed) -> Self {
+        self.diagram = Some(d);
+        self
+    }
     /// A line that shows image `id` at `size` (points); its text stays for copying.
     pub fn image(mut self, id: u64, size: egui::Vec2) -> Self {
         self.image = Some((id, size));
@@ -511,6 +518,7 @@ impl StyledLine {
         for (r, c) in &self.marks {
             (r.start, r.end, c.to_array()).hash(&mut h);
         }
+        self.diagram.as_ref().map(|d| (Arc::as_ptr(&d.diagram) as usize, d.scale.to_bits(), d.text.to_bits())).hash(&mut h);
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -908,9 +916,10 @@ impl DocView {
             let h = src.hash(i);
             if self.heights[i].0 != h {
                 let line = src.styled(i);
-                let size = match line.image {
-                    Some((_, s)) => s,
-                    None => layout_line(painter, &line, theme, self.wrap_width(&line, col_w)).size(),
+                let size = match (&line.diagram, line.image) {
+                    (Some(d), _) => d.size(),
+                    (None, Some((_, s))) => s,
+                    (None, None) => layout_line(painter, &line, theme, self.wrap_width(&line, col_w)).size(),
                 };
                 self.heights[i] = (h, size.y.max(1.0) + line.gap_above + line.pad_top + line.pad_bottom, size.x + 2.0 * line.indent, line.block);
             }
@@ -1182,6 +1191,13 @@ impl DocView {
                     paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection);
                 }
             }
+            if let Some(d) = &line.diagram {
+                // On whatever is behind it: its card, the report's surface, or the page.
+                let surface = line.block.map(|b| b.bg).filter(|c| *c != Color32::TRANSPARENT).or(line.backdrop.map(|b| b.bg)).unwrap_or(theme.bg);
+                if crate::diagram::paint(&painter, origin, d, theme, surface, response.hover_pos()).is_some() {
+                    ui.ctx().request_repaint();
+                }
+            } else {
             match line.image {
                 Some((id, size)) => {
                     let r = Rect::from_min_size(origin, size);
@@ -1191,6 +1207,7 @@ impl DocView {
                 None => {
                     painter.galley(origin, g.clone(), theme.fg);
                 }
+            }
             }
             if let (Some(color), Some(row)) = (line.spinner, g.rows.first()) {
                 let width = row.glyphs.first().map_or(row.rect().height(), |g| g.advance_width);

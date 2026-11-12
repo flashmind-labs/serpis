@@ -172,6 +172,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ariel-rs"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55fb9e1ab96ac4d8247c325cd6947ebe2d8c45b86808716c43f22e28b3e25a1e"
+dependencies = [
+ "ab_glyph",
+ "chrono",
+ "dagre-dgl-rs",
+ "indexmap",
+ "serde_json",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -993,6 +1006,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dagre-dgl-rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc16eb6d999b9fc2c3c2feebe378c7e6069d3c7fe57710289dde1be8389e994e"
+dependencies = [
+ "indexmap",
+ "petgraph 0.6.5",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1497,6 +1520,12 @@ name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+
+[[package]]
+name = "fixedbitset"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "fixedbitset"
@@ -3553,11 +3582,21 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "petgraph"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
+dependencies = [
+ "fixedbitset 0.4.2",
+ "indexmap",
+]
+
+[[package]]
+name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
 dependencies = [
- "fixedbitset",
+ "fixedbitset 0.5.7",
  "hashbrown 0.15.5",
  "indexmap",
 ]
@@ -4618,6 +4657,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "arboard",
+ "ariel-rs",
  "base64 0.22.1",
  "dirs",
  "eframe",
@@ -4636,6 +4676,7 @@ dependencies = [
  "regex",
  "reqwest",
  "ropey",
+ "roxmltree",
  "serde",
  "serde_json",
  "serpis-agent",
@@ -5589,7 +5630,7 @@ checksum = "b8765b90061cba6c22b5831f675da109ae5561588290f9fa2317adab2714d5a6"
 dependencies = [
  "memchr",
  "nom 8.0.0",
- "petgraph",
+ "petgraph 0.8.3",
 ]
 
 [[package]]

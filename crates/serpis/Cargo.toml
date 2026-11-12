@@ -28,6 +28,9 @@ similar = "2"
 uuid.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["glow", "clipboard", "links", "default_fonts", "system_fonts", "wayland", "x11"] }
 egui = "0.37"
+# Mermaid diagrams in chats (diagram.rs): ariel-rs lays them out, roxmltree reads its SVG back.
+ariel-rs = "0.4.0"
+roxmltree = "0.21"
 fontique = { version = "0.11", default-features = false, features = ["system", "fontconfig-dlopen"] }
 # LuaJIT (Lua 5.1 + extensions), like Neovim: fast, and familiar to plugin authors.
 mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
