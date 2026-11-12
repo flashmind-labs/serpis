@@ -2583,6 +2583,31 @@ impl ChatBuffer {
         self.writing_saved = (text, Some(Instant::now()));
     }
 
+    /// The transcript's lines as drawn, for tests: text, marker, whether on a surface (a
+    /// report's), in a card (and its color), scale, links and marks.
+    pub fn lines_json(&mut self, ed: &Editor) -> Value {
+        if self.dirty {
+            self.rebuild(ed);
+        }
+        Value::Array(
+            self.lines
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "text": l.text,
+                        "marker": l.marker.as_ref().map(|(m, _)| m.clone()),
+                        "surface": l.backdrop.is_some(),
+                        "card": l.block.map(|b| crate::themes::hex(b.bg)),
+                        "bar": l.block.and_then(|b| b.bar).map(crate::themes::hex),
+                        "scale": l.scale,
+                        "links": l.links.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+                        "marks": l.marks.len(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
     /// The review as scripts see it.
     pub fn review_json(&mut self) -> Value {
         self.ensure_review();

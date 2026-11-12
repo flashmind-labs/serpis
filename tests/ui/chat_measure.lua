@@ -14,6 +14,20 @@ serpis.var.set("session-directories", {})
 serpis.var.set("remote-rayfish", false)
 serpis.var.set("sidebar-visible", false)
 local shots = os.getenv("SERPIS_TEST_SHOTS")
+local rows_at_40
+-- Rows the first long paragraph takes on screen (by its first and last characters).
+function rows()
+  local n = 0
+  for line in ((serpis.chat.transcript() or "") .. "\n"):gmatch("(.-)\n") do
+    n = n + 1
+    if line:find("This paragraph is long enough", 1, true) and #line > 90 then
+      serpis.buffer.set_cursor(n, 1)
+      local a, b = d.cell_rect(n, 1), d.cell_rect(n, #line)
+      if not (a and b) then return nil end
+      return math.floor((b.y - a.y) / a.h + 0.5) + 1
+    end
+  end
+end
 local steps = {
   function() serpis.command.run("new-chat"); return 500 end,
   function() serpis.chat.prompt(serpis.buffer.current(), "LONG"); return 3000 end,
@@ -33,6 +47,16 @@ local steps = {
   function()
     if shots then d.screenshot(shots .. "/measure-off.png") end
     T.check("the reply came", (serpis.chat.transcript() or ""):find("Section 40", 1, true) ~= nil, true)
+    serpis.command.run("chat-focus-transcript")
+    serpis.var.set("chat-measure", 40)
+    return 800
+  end,
+  function() rows_at_40 = rows(); serpis.var.set("chat-measure", 0); return 800 end,
+  function()
+    -- How far down a paragraph's last character is from its first: it wraps into more rows at
+    -- a short measure than across the whole column (whatever size the window is).
+    local whole = rows()
+    T.check("prose wraps at the measure", rows_at_40 ~= nil and whole ~= nil and rows_at_40 > whole, true)
     return 800
   end,
   function() T.finish(); return 100000 end,

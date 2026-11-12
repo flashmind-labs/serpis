@@ -1656,6 +1656,15 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         lua_of(lua, &v)
     })?)?;
     // Where text position (line, col) (1-based) of the focused buffer is on screen: {x, y, w, h}.
+    // The current chat's transcript lines as drawn: {text, marker, surface, card, bar, scale,
+    // links, marks} each.
+    debug.set("chat_lines", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let id = e.current_buffer();
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.lines_json(ed))
+        })?;
+        lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
     debug.set("cell_rect", lua.create_function(|lua, (line, col): (usize, usize)| {
         let v = ed(|e| e.with_surface(|s, _| s.screen_rect(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1)))).flatten())?;
         lua_of(lua, &v.map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})).unwrap_or(Value::Null))
