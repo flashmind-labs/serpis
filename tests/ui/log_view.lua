@@ -135,8 +135,10 @@ local steps = {
     return false
   end,
   function(go)
-    -- Selecting: a drag over one record's text.
+    -- Selecting: a drag over one record's text. Only the script's records, so they are on
+    -- screen in a short pane too (it follows the newest otherwise, and they scroll away).
     serpis.command.run("log-cycle-level", "info")
+    serpis.command.run("log-search", "lua")
     when(function() return d.composer()["text:careful now"] ~= nil and d.composer()["text:hello from lua"] ~= nil end, function()
       local r = d.composer()["text:careful now"]
       local y = r.y + r.h / 2
@@ -222,6 +224,7 @@ local steps = {
   end,
   function(go)
     -- Clear empties it; new records still come.
+    serpis.command.run("log-search", "")
     click("clear")
     when(function() return not has("careful now") end, function()
       serpis.log.info("after the clear")

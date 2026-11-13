@@ -3776,17 +3776,22 @@ impl Buffer for ChatBuffer {
             }
         }
 
-        // Usage, activity and the context meter between the pills and the send button.
+        // Usage, activity and the context meter between the pills and the send button. Short of
+        // room, the meter stays (it says when the chat compacts), then the usage, then the
+        // activity: room for the meter is kept while the others are placed.
         let mut right = send.left() - 12.0 * k;
+        let (used, window) = self.context();
+        let meter_label = format!("{:.0}%", used.unwrap_or(0) as f64 / window.max(1) as f64 * 100.0);
+        let meter_w = if window > 0 { 26.0 * k + 6.0 * k + crate::chrome::text_width(&painter, &meter_label, small.clone()) + 14.0 * k } else { 0.0 };
         // Session usage, like pi's footer: first, so it shows while the agent works too. Short
-        // of room (with the activity and meter beside it), just what it cost, or its tokens in
-        // and out where nothing was charged (a subscription).
+        // of room (with the activity beside it), just what it cost, or its tokens in and out
+        // where nothing was charged (a subscription).
         if ed.var("chat-show-usage").and_then(Value::as_bool).unwrap_or(true) {
             let full = self.usage_label();
             let u = &self.node.state.usage;
             let short = if u.cost.total > 0.0 { format!("${:.3}", u.cost.total) } else { format!("↑{} ↓{}", fmt_tokens(u.input), fmt_tokens(u.output)) };
-            let others = if self.running() { 110.0 * k } else { 0.0 } + if self.context().1 > 0 { 70.0 * k } else { 0.0 };
-            let room = right - tr.right() - 8.0 * k;
+            let others = if self.running() { 110.0 * k } else { 0.0 };
+            let room = right - tr.right() - 8.0 * k - meter_w;
             let fw = crate::chrome::text_width(&painter, &full, small.clone());
             let label = if fw + others <= room { full } else { short };
             let w = crate::chrome::text_width(&painter, &label, small.clone());
@@ -3799,7 +3804,7 @@ impl Buffer for ChatBuffer {
         if self.running() {
             let label = format!("Working {}", fmt_duration(self.started.map(|s| s.elapsed()).unwrap_or_default(), false));
             let w = crate::chrome::text_width(&painter, &label, small.clone());
-            if right - w - 18.0 * k > tr.right() {
+            if right - w - 18.0 * k - meter_w > tr.right() {
                 hits.push(("activity", Rect::from_min_max(egui::pos2(right - w - 16.0 * k, cy - 8.0 * k), egui::pos2(right, cy + 8.0 * k))));
                 crate::chrome::text(&painter, egui::pos2(right - w, cy), &label, small.clone(), theme.accent, w + 1.0);
                 crate::chrome::spinner(&painter, egui::pos2(right - w - 11.0 * k, cy), 5.0 * k, ui.input(|i| i.time), theme.accent);
@@ -3808,7 +3813,6 @@ impl Buffer for ChatBuffer {
             ui.ctx().request_repaint_after(Duration::from_millis(60));
         }
         // How full the context is: a small meter, yellow as it nears where it compacts.
-        let (used, window) = self.context();
         if window > 0 {
             let used = used.unwrap_or(0);
             let s = &self.node.state;

@@ -42,14 +42,17 @@ local function after_more(go, check)
   return false
 end
 local steps = {
-  -- A chat too short to scroll has nowhere to go: a nudge up doesn't stop it following.
+  -- A chat too short to scroll has nowhere to go: a nudge up doesn't stop it following. The
+  -- prompt is short and its steps slow, so it is still too short when nudged, in a window of any
+  -- size (a long one wrapped past a short window's height already); enough of them come after to
+  -- outgrow a short window.
   function(go)
     serpis.command.run("new-chat")
     serpis.command.run("chat-focus-transcript")
     local s = {}
-    for i = 1, 30 do s[i] = "Short " .. i .. "|sleep 0.1" end
+    for i = 1, 15 do s[i] = "s" .. i .. "|sleep 0.4" end
     serpis.chat.prompt(chat(), "STEPS:" .. table.concat(s, ";;"))
-    when(function() return (serpis.chat.transcript() or ""):find("Short 1", 1, true) end, go)
+    when(function() return (serpis.chat.transcript() or ""):find("STEPS:s1", 1, true) end, go)
     return false
   end,
   function(go)
