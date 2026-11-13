@@ -512,6 +512,12 @@ struct Process {
     /// The end of what it wrote to stderr, for when it dies.
     stderr: Arc<Mutex<String>>,
     next_request: u64,
+    /// What it has cost so far, as it last said (`total_cost_usd` counts from its start): a
+    /// turn's cost is what that grew by.
+    cost_so_far: f64,
+    /// It runs on the user's subscription (`apiKeySource: "none"`), not an API key: what it
+    /// says a turn cost is what the API would have charged, not what was paid, so none is kept.
+    subscription: bool,
 }
 
 impl Process {
@@ -597,7 +603,7 @@ impl Process {
                 }
             });
         }
-        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), steers: Vec::new(), launch: l.clone(), compacting: false, watched, stderr, next_request: 0 };
+        let mut p = Process { child, out: writer, lines, pending: VecDeque::new(), tasks: HashMap::new(), finished: None, nested_calls: HashMap::new(), mode: l.permission_mode.clone(), steers: Vec::new(), launch: l.clone(), compacting: false, watched, stderr, next_request: 0, cost_so_far: 0.0, subscription: false };
         p.initialize().await?;
         Ok(p)
     }
@@ -654,6 +660,13 @@ impl Process {
             return true;
         }
         let sub = v["subtype"].as_str().unwrap_or("");
+        // How it is signed in, said as a turn starts.
+        if v["type"] == "system" && sub == "init" {
+            if let Some(source) = v["apiKeySource"].as_str() {
+                self.subscription = source == "none";
+            }
+            return true;
+        }
         if v["type"] == "system" && sub.starts_with("task_") {
             self.task(sub, v, emit);
             return true;
@@ -940,7 +953,9 @@ impl Process {
                     self.ask_context();
                     let aborted = interrupted || h.cancel.is_cancelled();
                     t.close_open(if aborted { StopReason::Aborted } else { StopReason::Error }, None);
-                    let cost = v["total_cost_usd"].as_f64().unwrap_or(0.0);
+                    let total = v["total_cost_usd"].as_f64().unwrap_or(self.cost_so_far);
+                    let cost = if self.subscription { 0.0 } else { (total - self.cost_so_far).max(0.0) };
+                    self.cost_so_far = total;
                     let failed = v["is_error"].as_bool().unwrap_or(false) && !aborted;
                     if let Some(mut m) = t.held.take() {
                         m.usage.cost.total += cost;

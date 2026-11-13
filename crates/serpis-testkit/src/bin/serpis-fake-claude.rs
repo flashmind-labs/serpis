@@ -53,8 +53,20 @@ fn text_block(index: u64, text: &str) {
     ev(json!({"type": "content_block_stop", "index": index}));
 }
 
+/// Turns ended so far: each costs $0.01, and `total_cost_usd` is the sum since it started, as
+/// the real one's is.
+static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn result(session: &str, error: Option<&str>) {
-    out(json!({"type": "result", "subtype": if error.is_some() { "error_during_execution" } else { "success" }, "is_error": error.is_some(), "result": error.unwrap_or("ok"), "session_id": session, "total_cost_usd": 0.01}));
+    let turns = TURNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    out(json!({"type": "result", "subtype": if error.is_some() { "error_during_execution" } else { "success" }, "is_error": error.is_some(), "result": error.unwrap_or("ok"), "session_id": session, "total_cost_usd": turns as f64 / 100.0}));
+}
+
+/// How it says it is signed in: on a subscription once a file named `subscription` is in
+/// FAKE_CLAUDE_DIR, else with an API key.
+fn key_source() -> &'static str {
+    let dir = PathBuf::from(std::env::var_os("FAKE_CLAUDE_DIR").unwrap_or_else(|| std::env::temp_dir().into_os_string()));
+    if dir.join("subscription").exists() { "none" } else { "ANTHROPIC_API_KEY" }
 }
 
 fn system(sub: &str, v: Value) {
@@ -173,7 +185,7 @@ fn main() {
             let name = if demo() { "Opus 5.5" } else { "Fake 5" };
             let models = [json!({"value": "default", "displayName": "Default"}), json!({"value": "fake", "displayName": name, "supportedEffortLevels": ["low", "high"], "supportsThinkingOff": true})];
             out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"models": models, "account": {"email": "test@example.com", "subscriptionType": "Claude Test"}}}}));
-            out(json!({"type": "system", "subtype": "init", "session_id": session, "permissionMode": after("--permission-mode").unwrap_or_else(|| "default".into())}));
+            out(json!({"type": "system", "subtype": "init", "session_id": session, "permissionMode": after("--permission-mode").unwrap_or_else(|| "default".into()), "apiKeySource": key_source()}));
             continue;
         }
         if msg["type"] == "control_request" && msg["request"]["subtype"] == "set_permission_mode" {

@@ -551,18 +551,10 @@ impl ChatBuffer {
     }
 
     /// `↑12k ↓3.4k R1.2M W40k $1.234 45.2%/200k`, as pi's footer: the session's input, output,
-    /// cache reads and writes, cost, then context used of the window.
+    /// cache reads and writes, cost (none when nothing was charged: a Claude Code or Codex
+    /// subscription), then context used of the window.
     pub fn usage_label(&self) -> String {
-        let u = &self.node.state.usage;
-        let mut parts = vec![format!("↑{}", fmt_tokens(u.input)), format!("↓{}", fmt_tokens(u.output))];
-        if u.cache_read > 0 {
-            parts.push(format!("R{}", fmt_tokens(u.cache_read)));
-        }
-        if u.cache_write > 0 {
-            parts.push(format!("W{}", fmt_tokens(u.cache_write)));
-        }
-        parts.push(format!("${:.3}", u.cost.total));
-        parts.join(" ")
+        usage_label(&self.node.state.usage)
     }
 
     /// The transcript as shown, brought up to date first when it changed since it was drawn (a
@@ -1041,6 +1033,21 @@ pub fn fmt_duration(d: Duration, tenths: bool) -> String {
         60..=3599 => format!("{}m {:02}s", s / 60, s % 60),
         _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
     }
+}
+
+/// The composer's usage, [`ChatBuffer::usage_label`].
+fn usage_label(u: &Usage) -> String {
+    let mut parts = vec![format!("↑{}", fmt_tokens(u.input)), format!("↓{}", fmt_tokens(u.output))];
+    if u.cache_read > 0 {
+        parts.push(format!("R{}", fmt_tokens(u.cache_read)));
+    }
+    if u.cache_write > 0 {
+        parts.push(format!("W{}", fmt_tokens(u.cache_write)));
+    }
+    if u.cost.total > 0.0 {
+        parts.push(format!("${:.3}", u.cost.total));
+    }
+    parts.join(" ")
 }
 
 fn format_usage(u: &Usage) -> String {
@@ -3772,10 +3779,12 @@ impl Buffer for ChatBuffer {
         // Usage, activity and the context meter between the pills and the send button.
         let mut right = send.left() - 12.0 * k;
         // Session usage, like pi's footer: first, so it shows while the agent works too. Short
-        // of room (with the activity and meter beside it), just what it cost.
+        // of room (with the activity and meter beside it), just what it cost, or its tokens in
+        // and out where nothing was charged (a subscription).
         if ed.var("chat-show-usage").and_then(Value::as_bool).unwrap_or(true) {
             let full = self.usage_label();
-            let short = format!("${:.3}", self.node.state.usage.cost.total);
+            let u = &self.node.state.usage;
+            let short = if u.cost.total > 0.0 { format!("${:.3}", u.cost.total) } else { format!("↑{} ↓{}", fmt_tokens(u.input), fmt_tokens(u.output)) };
             let others = if self.running() { 110.0 * k } else { 0.0 } + if self.context().1 > 0 { 70.0 * k } else { 0.0 };
             let room = right - tr.right() - 8.0 * k;
             let fw = crate::chrome::text_width(&painter, &full, small.clone());
@@ -4118,6 +4127,15 @@ pub fn cache_warning_applies(ed: &mut Editor, action: &str, cost: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_shows_a_cost_only_when_one_was_charged() {
+        let mut u = Usage { input: 12_000, output: 3_400, cache_read: 1_200_000, ..Default::default() };
+        // A Claude Code or Codex subscription: its tokens, no cost.
+        assert_eq!(usage_label(&u), "↑12.0k ↓3.4k R1.2M");
+        u.cost.total = 1.2344;
+        assert_eq!(usage_label(&u), "↑12.0k ↓3.4k R1.2M $1.234");
+    }
 
     /// Inline markdown as text and its faced parts.
     fn md(s: &str) -> (String, Vec<(String, Face)>) {

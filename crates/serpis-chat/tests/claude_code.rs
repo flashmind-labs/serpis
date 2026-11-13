@@ -231,6 +231,11 @@ fn chats_run_on_claude_code() {
     w.send(&mut chat, "again");
     assert_eq!(last_text(chat.entries()), "echo: again");
     assert_eq!(w.log().0.len(), 1, "one claude process per chat");
+    // Each turn costs what it cost, though claude says what it has cost since it started (3
+    // turns: $0.03), and the chat what they cost together.
+    let costs: Vec<f64> = chat.entries().iter().filter_map(|e| if let Entry::Assistant { usage: Some(u), .. } = e { (u.cost.total > 0.0).then_some(u.cost.total) } else { None }).collect();
+    assert!(costs.len() == 3 && costs.iter().all(|c| (c - 0.01).abs() < 1e-9), "{costs:?}");
+    assert!((chat.state().usage.cost.total - 0.03).abs() < 1e-9, "{:?}", chat.state().usage);
 
     // An edit asks the person: its card says so (not running meanwhile), and so does the
     // chat's step. Allowing it always passes Claude Code's suggestion back.
@@ -573,6 +578,15 @@ fn chats_run_on_claude_code() {
     assert!(after(starts.last().unwrap(), "--append-system-prompt").is_some_and(|t| t.contains("<name>later</name>")));
     w.host.vars.remove("claude-code-skills-restart");
     drop(sk);
+
+    // On a subscription what it says a turn cost isn't paid: none is kept, its tokens are.
+    std::fs::write(w.home.join("claude-sessions/subscription"), "").unwrap();
+    let mut sub = w.chat();
+    w.send(&mut sub, "hello");
+    let Some(Entry::Assistant { usage: Some(u), .. }) = sub.entries().iter().rev().find(|e| matches!(e, Entry::Assistant { .. })) else { panic!("{:#?}", sub.entries()) };
+    assert_eq!((u.input, u.output, u.cost.total), (10, 7, 0.0));
+    assert_eq!(sub.state().usage.cost.total, 0.0);
+    drop(sub);
 
     assert!(w.host.notices.is_empty(), "{:?}", w.host.notices);
     let _ = std::fs::remove_dir_all(&w.home);
