@@ -1,4 +1,4 @@
-Done: the cache now evicts by size, and hit rate is up on all three workloads.
+Done: `Cache::evict` now evicts by size, and hit rate is up on all three workloads.
 
 | Workload | Before | After | Change |
 |---|--:|--:|--:|
@@ -25,6 +25,7 @@ Done: the cache now evicts by size, and hit rate is up on all three workloads.
 ## Changed
 
 - **Eviction by size** in `src/cache.rs:88`, so one large tool output no longer pushes out fifty small ones.
+- **Kept `Level::ERROR`** to match the `monkey` span, so both survive any `RUST_LOG` filter. Its lines now read `cache{cap=256MB}: evicted 3` instead of bare `evicted`, in `src/cache.rs:120` and `src/cache.rs:131`.
 
 | File | Lines | Why |
 |---|--:|---|

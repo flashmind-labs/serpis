@@ -1302,6 +1302,20 @@ impl Measure<'_> {
         }
     }
 
+    /// `text` with its spans' faces (code, bold), as it is drawn.
+    fn width_styled(&self, text: &str, spans: &[(Range<usize>, Face)], face: Face) -> f32 {
+        match self {
+            _ if text.is_empty() => 0.0,
+            Measure::Fonts(ctx, theme) => {
+                let job = crate::text::layout_job(&StyledLine::new(text, face).spans(spans.to_vec()), theme, f32::INFINITY);
+                // Code at the end leaves its chip's room after it, taken by what follows.
+                let room = if spans.iter().any(|(r, f)| *f == Face::InlineCode && r.end >= text.len()) { crate::text::CHIP_PAD } else { 0.0 };
+                ctx.fonts_mut(|f| f.layout_job(job)).size().x + room
+            }
+            _ => self.width(text, face),
+        }
+    }
+
     fn scale(&self) -> f32 {
         match self {
             Measure::Fonts(_, t) => t.ui_scale(),
@@ -1392,7 +1406,19 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
         }
         (extra, pads)
     };
-    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| m.width(cell(r, c), face_of(r)) + figures(r, c, 0..cell(r, c).len()).0).fold(0.0, f32::max)).collect();
+    // A cell's text in `range` as it is drawn: its code and bold in their own fonts.
+    let drawn = |r: usize, c: usize, range: Range<usize>| -> f32 {
+        let Some((src, spans)) = all[r].get(c) else { return 0.0 };
+        let spans: Vec<(Range<usize>, Face)> = spans
+            .iter()
+            .filter_map(|(sr, f)| {
+                let (a, b) = (sr.start.max(range.start), sr.end.min(range.end));
+                (a < b).then(|| (a - range.start..b - range.start, *f))
+            })
+            .collect();
+        m.width_styled(&src[range], &spans, face_of(r))
+    };
+    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| drawn(r, c, 0..cell(r, c).len()) + figures(r, c, 0..cell(r, c).len()).0).fold(0.0, f32::max)).collect();
     let minimum: Vec<f32> = (0..cols)
         .map(|c| {
             let word = (0..all.len()).flat_map(|r| cell(r, c).split(' ').map(move |w| (r, w))).map(|(r, w)| m.width(w, face_of(r))).fold(0.0, f32::max);
@@ -1432,7 +1458,7 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
                 let range = wrapped[c].get(li).cloned().unwrap_or(0..0);
                 let seg = &src[range.clone()];
                 let (extra, digits) = figures(r, c, range.clone());
-                let w = m.width(seg, face) + extra;
+                let w = drawn(r, c, range.clone()) + extra;
                 let slack = (widths[c] - w).max(0.0);
                 let align = match aligns.get(c).copied().unwrap_or(egui::Align::Min) {
                     egui::Align::Max => slack,
@@ -3724,7 +3750,8 @@ impl Buffer for ChatBuffer {
         // Send (or stop) on the right.
         let d = 28.0 * k;
         let send = Rect::from_center_size(egui::pos2(bar.right() - d / 2.0, cy), Vec2::splat(d));
-        let has_text = !self.prompt.doc.is_empty();
+        // Something to send: text, images, or a review waiting (as `send` has it).
+        let has_text = !self.prompt.doc.is_empty() || !self.attachments.is_empty() || !self.review.drafts().is_empty();
         let sresp = ui.interact(send, id.with("send"), egui::Sense::click()).on_hover_text(if self.running() { "Stop (C-c C-c)" } else { "Send (RET)" });
         if self.running() {
             painter.circle_filled(send.center(), d / 2.0, if sresp.hovered() { theme.fg } else { theme.fg_dim });

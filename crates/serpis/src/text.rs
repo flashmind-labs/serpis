@@ -550,10 +550,20 @@ pub fn layout_job_scaled(line: &StyledLine, theme: &Theme, wrap_width: f32, scal
     job.halign = egui::Align::LEFT;
     // Spans share the line's line height, so bold and inline code sit on its baseline.
     let base_height = theme.format(line.face).line_height;
+    // In a line set larger than the reading text (a heading), its code, bold and links grow
+    // with it.
+    let grow = (theme.format(line.face).font_id.size / theme.format(Face::AssistantText).font_id.size).max(1.0);
     let fmt = |face: Face| {
         let mut f = theme.format(face);
         if base_height.is_some() {
             f.line_height = base_height;
+        }
+        if face == Face::InlineCode {
+            // Its chip is painted by the view (code_chips), centered on the code.
+            f.background = Color32::TRANSPARENT;
+        }
+        if matches!(face, Face::InlineCode | Face::Bold | Face::Italic | Face::BoldItalic | Face::Strike | Face::Link) && face != line.face {
+            f.font_id.size *= grow;
         }
         f.font_id.size *= scale;
         f.extra_letter_spacing *= scale;
@@ -584,17 +594,72 @@ pub fn layout_job_scaled(line: &StyledLine, theme: &Theme, wrap_width: f32, scal
         runs.push((at..line.text.len(), line.face));
     }
     let pad_at = |o: usize| line.pads.iter().filter(|(p, _)| *p == o).map(|(_, w)| *w).sum::<f32>() * scale;
+    // Room on either side of inline code for its chip.
+    let mut room = 0.0;
     for (r, face) in runs {
+        let code = face == Face::InlineCode;
+        let lead = std::mem::replace(&mut room, if code { CHIP_PAD * scale } else { 0.0 }) + if code { CHIP_PAD * scale } else { 0.0 };
         let mut cuts: Vec<usize> = line.pads.iter().map(|(o, _)| *o).filter(|o| *o > r.start && *o < r.end && line.text.is_char_boundary(*o)).collect();
         cuts.sort_unstable();
         cuts.dedup();
         let mut from = r.start;
         for c in cuts.into_iter().chain(std::iter::once(r.end)) {
-            job.append(&line.text[from..c], pad_at(from), fmt(face));
+            job.append(&line.text[from..c], pad_at(from) + if from == r.start { lead } else { 0.0 }, fmt(face));
             from = c;
         }
     }
     job
+}
+
+/// How far an inline code chip reaches past its code on either side.
+pub const CHIP_PAD: f32 = 3.0;
+
+/// Inline code's chips, in galley coordinates: a box a little wider than the code and as tall
+/// as its font, on its letters. (egui's own section background fills the line's whole height,
+/// half again the font's, so the code sat at the top of a tall box.)
+fn code_chips(g: &Galley, line: &StyledLine) -> Vec<Rect> {
+    let ranges: Vec<Range<usize>> = line
+        .spans
+        .iter()
+        .filter(|(_, f)| *f == Face::InlineCode)
+        .map(|(r, _)| {
+            let s = line.text.get(..r.start).map_or(0, |t| t.chars().count());
+            s..s + line.text.get(r.clone()).map_or(0, |t| t.chars().count())
+        })
+        .collect();
+    let mut out = Vec::new();
+    if ranges.is_empty() {
+        return out;
+    }
+    let mut idx = 0;
+    for row in &g.rows {
+        // The range being covered on this row, and its box so far.
+        let mut cur: Option<(usize, Rect)> = None;
+        for gl in &row.row.glyphs {
+            match ranges.iter().position(|r| r.contains(&idx)) {
+                Some(k) => {
+                    let (x, base) = (row.pos.x + gl.pos.x, row.pos.y + gl.pos.y);
+                    let r = Rect::from_min_max(egui::pos2(x, base - gl.font_ascent), egui::pos2(x + gl.advance_width, base - gl.font_ascent + gl.font_height));
+                    cur = match cur {
+                        Some((j, a)) if j == k => Some((j, a.union(r))),
+                        prev => {
+                            out.extend(prev.map(|(_, a)| a));
+                            Some((k, r))
+                        }
+                    };
+                }
+                None => out.extend(cur.take().map(|(_, a)| a)),
+            }
+            idx += 1;
+        }
+        out.extend(cur.take().map(|(_, a)| a));
+        if row.ends_with_newline {
+            idx += 1;
+        }
+    }
+    // As much as the room left for it beside the code (layout_job_scaled).
+    let pad = CHIP_PAD * line.scale.unwrap_or(1.0);
+    out.into_iter().map(|r| r.expand2(egui::vec2(pad, 0.0))).collect()
 }
 
 /// Source of styled lines for a [`DocView`].
@@ -1176,6 +1241,10 @@ impl DocView {
                     painter.rect_filled(r, 2.0, color.gamma_multiply(0.22));
                     painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.5, color.gamma_multiply(0.8)));
                 }
+            }
+            // Inline code's chips, under any selection.
+            for r in code_chips(&g, &line) {
+                painter.rect_filled(r.translate(origin.to_vec2()), (r.height() * 0.2).min(4.0), theme.chip());
             }
             // Selection.
             if let Some((a, b)) = selection {
