@@ -1,72 +1,78 @@
 ---
 name: report
-description: How to write the message that ends a task, the report a person reads to review your work and decide what happens next. Outcome first, then what needs them, what changed, how it was checked and what is left. Use whenever you finish or stop a task in which you changed code, ran commands or investigated something.
+description: How to write the message that ends a task, the report a person reads to review your work and decide what happens next. Short and plain, outcome first, then what needs them, what changed, how it was checked and what is left. Use whenever you finish or stop a task in which you changed code, ran commands or investigated something.
 ---
 
 # The report
 
-The last message of a task is a report. The person reading it will review your work and decide
-what happens next. They may come back to it after hours away, among other agents' reports. Write
-so that they can act on the first two lines, and find any detail in under a minute.
+The last message of a task is a report. The reader is busy. They may come back to it after
+hours away, among other agents' reports. Tell them what they need to act, then stop.
 
 ## Shape
 
-**First line: the outcome.** Start with `Done`, `Partly done` or `Blocked`, then the result in
-one sentence. If something must happen before this can ship, say so here too.
+**First line: the outcome.** `Done`, `Partly done` or `Blocked`, then the result in one
+sentence. If something must happen before this ships, say it here.
 
-> Done: the retry change is sound, but `retry_total` is now counted twice and needs a fix
-> before merging.
+> Done: retries work, but `retry_total` is now counted twice. Fix that before merging.
 
-A second sentence may give the context a reader needs to follow the rest. No preamble ("I've
-finished…", "Here's a summary…"), and no restatement of what was asked.
+**Then these `##` sections, in this order.** Leave out a section with nothing in it.
 
-**Then these sections, in this order, as `##` headings.** Leave out a section that has nothing
-in it. Don't write "None".
-
-1. `## Needs you`: what the reader must decide, approve or know before acting on your work.
-   Number the items. Each one says what you recommend. Anything that would make a careful
-   reviewer stop goes here, never further down. A warning at the bottom of a report is a
-   warning nobody reads.
-2. `## Changed`: one bullet per change: what, where (`path:line`) and why. Group the bullets
-   by purpose, not by file.
-3. `## Checked`: how you know it works. One bullet per check: what you ran, in bold, then
-   what it showed, starting with `passes` or `fails`: "- **`cargo test`:** passes (214
-   tests)." End with a bullet that starts `**Not checked:**` and says what you couldn't
-   verify. Serpis marks each check ✓, ✗ or ○ by these words.
+1. `## Needs you`: what the reader must decide, approve or know. Number the items, each with
+   what you recommend. Anything that would stop a careful reviewer goes here, never lower down.
+2. `## Changed`: one bullet per change: what, where (`path:line`), why. Group by purpose, not
+   by file.
+3. `## Checked`: one bullet per check: the command in bold, then `passes` or `fails` and what
+   it showed: "- **`cargo test`:** passes (214 tests)." Last, a bullet starting
+   `**Not checked:**` with what you couldn't verify. Serpis marks each check ✓, ✗ or ○ by
+   these words.
 4. `## Not done`: what you left out, or found and didn't fix, and why.
 
-For a task with no code changes (an investigation, a question), keep the first line and use
-the sections that fit: what you found, how sure you are, what you'd do next.
+No code changed (an investigation, a question)? Keep the first line, then what you found, how
+sure you are and what you'd do next.
+
+## Short
+
+- **A one-line fix gets a one-line report.** Most reports fit on one screen.
+- **Short, crisp paragraphs:** three sentences at most. Bullets of one line, two at most.
+  Sentences under 25 words.
+- **Lead with the point.** The first words of a bullet say what it is about:
+  "**Fixed a race in `RequestQueue::retry`:** …".
+- **Cut what doesn't change what the reader knows or does:** files you read, steps you took,
+  things that went as expected, the same point said twice.
+
+## Plain
+
+Write it the way you'd tell a colleague at their desk. A short phrase beats a formal one, even
+if it's conversational.
+
+> Not: "I've implemented a robust retry mechanism, ensuring requests are reliably re-sent."
+> But: "Failed requests now retry 3 times, 1 s apart (`queue.rs:88`)."
+
+Cut:
+
+- **Openers and closers:** "I've finished…", "Here's a summary…", "Let me know if…", a last
+  line that sums up what you just said, a restatement of the task.
+- **Padding:** "it's worth noting that", "it's important to", "in order to" (to), "due to the
+  fact that" (because), "at this point" (now), "a number of" (the number).
+- **Inflated words:** robust, seamless, comprehensive, crucial, key, significant, leverage,
+  utilize, ensure, enhance, streamline, delve. Say what it does.
+- **Tacked-on clauses:** "…, ensuring that X", "…, making it easier to Y". If it matters, give
+  it its own sentence.
+- **Set phrases:** "not just X but Y", lists of three for rhythm, "serves as" (is).
+- **Stacked hedges:** "could potentially". Hedge once, and only when you're unsure.
+
+Plain verbs ("start", not "spin up"), active voice that names who acts ("I moved the
+increment"), no semicolons.
 
 ## Claims
 
-- **Say how you know.** A thing you ran or read is stated plainly, with its evidence:
-  "`cargo test`: 214 passed". A thing you infer says so: "probably", "I expect", "not checked".
-- **Keep confidence exact.** Never turn "may have failed" into "failed", or a result you saw
-  into "should work".
-- **Numbers, not adjectives.** "120 ms → 40 ms", not "significantly faster". No "robust",
-  "seamless", "clean", "comprehensive".
+- **Say how you know.** What you ran or read, state with its evidence: "`cargo test`: 214
+  passed". What you infer, mark: "probably", "not checked".
+- **Keep confidence exact.** "May have failed" never becomes "failed". A result you saw never
+  becomes "should work".
+- **Numbers, not adjectives:** "120 ms → 40 ms", not "much faster".
 - **One name for one thing.** If you call it `RequestQueue`, don't also call it "the queue
   manager".
-- **Cite code** as `path:line`.
 
-## Sentences
-
-These come from ASD-STE100 (Simplified Technical English), the standard aerospace manuals are
-written in so they can't be misread.
-
-- At most 25 words a sentence, one idea each.
-- Active voice that names who acts: "I moved the increment", "the client still counts it".
-- Paragraphs of three sentences or fewer.
-- The first words of a bullet carry its point. Start it with the thing, in bold if the list is
-  long: "**Fixed a race in `RequestQueue::retry`**…".
-- No semicolons. Split the sentence.
-- Plain verbs: "start", not "spin up"; "use", not "leverage"; "check", not "perform a check".
-- Keep the present perfect when it says something is true now: "the job has finished".
-- Define a term the reader may not know, once, the first time you use it.
-
-## Length
-
-As long as the work needs, and no longer. A one-line fix gets a one-line report. Use prose for
-reasoning (why this approach over that one) and bullets for lists of things. No closing offer
-("Let me know if…"): the reader knows they can ask.
+Before you send it, reread it once. Cut every sentence the reader wouldn't miss. Turn every
+phrase that could be one word into that word.
