@@ -217,6 +217,9 @@ impl Process {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        for k in crate::agent::HIDDEN_ENV {
+            command.env_remove(k);
+        }
         for (name, value) in &launch.env {
             command.env(name, value);
         }

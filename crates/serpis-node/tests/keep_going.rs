@@ -1,7 +1,8 @@
 //! A node killed mid-turn (as a crash or a reboot does it): its chat continues when it starts
 //! again, without running the cut-off tool twice; a turn cut off too many times in a row is
-//! parked; a chat that doesn't keep going waits. Each time the chat says what happened. The node
-//! runs as its own process here (started by `serpis-node agent`), so it can be killed for real.
+//! parked; a chat that doesn't keep going waits; one stopped on purpose isn't continued. Each
+//! time the chat says what happened. The node runs as its own process here (started by
+//! `serpis-node agent`), so it can be killed for real.
 
 use std::path::Path;
 use std::time::Duration;
@@ -58,6 +59,11 @@ async fn crash(node: &Path) {
     let pid = std::fs::read_to_string(node.join("node.pid")).unwrap();
     let status = std::process::Command::new("kill").args(["-9", pid.trim()]).status().unwrap();
     assert!(status.success());
+    gone(node).await;
+}
+
+/// Wait for the node to have stopped.
+async fn gone(node: &Path) {
     for _ in 0..100 {
         if std::os::unix::net::UnixStream::connect(node.join("node.sock")).is_err() {
             return;
@@ -136,6 +142,26 @@ fn a_cut_off_turn_keeps_going() {
         let mut v = View::default();
         v.until(&mut events, |v| v.says("doesn't keep going")).await;
         assert!(!v.running);
+
+        // Its commands aren't told where the node is: a serpis one starts (a UI test) finds its
+        // own by HOME, and can't reach this node, or stop it.
+        c.call(prompt(r#"CALL bash {"command": "echo \"node=<$SERPIS_NODE_SOCKET$SERPIS_NODE_DIR$SERPIS_TERMINAL_SOCKET$SERPIS_AGENT_DIR$SERPIS_CONFIG_DIR>\""}"#)).await.unwrap();
+        v.until(&mut events, |v| v.says("node=<") && !v.running).await;
+        assert!(v.says("node=<>"), "{:#?}", v.entries);
+
+        // A stop asked for cuts nothing off: the turn isn't continued (though it keeps going),
+        // but the chat says it was stopped, or it would look finished.
+        c.call(Request::Append { chat: chat.clone(), kind: "keep-going".into(), data: json!({"on": true}) }).await.unwrap();
+        c.call(prompt(r#"CALL bash {"command": "sleep 30"}"#)).await.unwrap();
+        v.until(&mut events, |v| v.tool_running()).await;
+        c.call(Request::Stop).await.unwrap();
+        drop((c, events));
+        gone(&node).await;
+        let (c, mut events) = Client::connect(&target, "test").await.unwrap();
+        c.call(Request::Attach { chat: chat.clone() }).await.unwrap();
+        let mut v = View::default();
+        v.until(&mut events, |v| v.says("was stopped mid-turn")).await;
+        assert!(!v.running && !v.says("Continued"), "{:#?}", v.entries);
         c.call(Request::Stop).await.unwrap();
     });
     let _ = std::fs::remove_dir_all(&root);

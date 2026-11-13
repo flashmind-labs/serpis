@@ -68,6 +68,11 @@ pub type EmitFn = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 /// so a shell config can treat them unlike a person's terminal: `SERPIS_AGENT=1`.
 pub const AGENT_ENV: (&str, &str) = ("SERPIS_AGENT", "1");
 
+/// What the processes an agent starts don't inherit from the node they run in: where this
+/// machine's serpis keeps its node, terminals and settings. A serpis they start (a UI test) then
+/// finds its own by `HOME`, and can't reach, or stop, the node running the agent.
+pub const HIDDEN_ENV: [&str; 5] = ["SERPIS_NODE_SOCKET", "SERPIS_NODE_DIR", "SERPIS_TERMINAL_SOCKET", "SERPIS_AGENT_DIR", "SERPIS_CONFIG_DIR"];
+
 /// The person's answer to a [`AgentEvent::ToolAsk`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Answer {
