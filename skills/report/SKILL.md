@@ -30,6 +30,16 @@ sentence. If something must happen before this ships, say it here.
 No code changed (an investigation, a question)? Keep the first line, then what you found, how
 sure you are and what you'd do next.
 
+## With other skills
+
+Another skill may say what to report, such as a code review's findings. That skill decides
+what goes in. This one decides the shape. For a review:
+
+- **First line:** the verdict and the count: "Done: 2 must-fix, 3 to consider."
+- **`## Needs you`:** one numbered item per finding, must-fix first. The tag, `path:line`, the
+  issue and your suggestion, in two lines at most.
+- **`## Checked`:** the commands and probes you ran, one line each.
+
 ## Short
 
 - **A one-line fix gets a one-line report.** Most reports fit on one screen.

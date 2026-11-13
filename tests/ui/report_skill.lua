@@ -31,6 +31,7 @@ local steps = {
     T.check("the model was asked", req ~= "", true)
     T.check("it is offered the report skill", has(req, "report_skill"), true)
     T.check("and told to end each task with a report", has(req, "report_rule"), true)
+    T.check("with the skill's text, to have from the start", has(req, "report_text"), true)
     local fh = io.open(agent_dir .. "/builtin-skills/report/SKILL.md")
     local text = fh and fh:read("*a") or ""
     if fh then fh:close() end
@@ -46,6 +47,7 @@ local steps = {
     T.check("asked again", req ~= "", true)
     T.check("off: no report skill", has(req, "report_skill"), false)
     T.check("and no such rule", has(req, "report_rule"), false)
+    T.check("nor its text", has(req, "report_text"), false)
     T.finish()
     return 100000
   end,

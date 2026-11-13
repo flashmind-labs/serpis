@@ -72,12 +72,23 @@ fn builtin_skills(agent_dir: &Path, wanted: &[String]) -> Vec<Skill> {
         .collect()
 }
 
-/// The line that has a model end each task with a report written as the `report` skill says,
-/// when it has that skill (`skills`, or `also` by name: one it has itself).
+/// What has a model end each task with a report written as the `report` skill says, when it
+/// has that skill (`skills`, or `also` by name: one it has itself). The skill's text comes
+/// with it, so the model has it while it works, not only once it is done and has drafted the
+/// report in another shape (one only it can read, it is told to load when it starts).
 pub fn report_rule(skills: &[Skill], also: &HashSet<String>) -> Option<String> {
-    (skills.iter().any(|s| s.name == "report" && !s.explicit_only) || also.contains("report")).then(|| {
-        "When you finish a task, or stop before it is done, your last message is a report: load the `report` skill and write it exactly as it says, every time.".to_string()
-    })
+    let lead = "When you finish a task, or stop before it is done, your last message is a report";
+    let skill = skills.iter().find(|s| s.name == "report" && !s.explicit_only);
+    let text = skill.and_then(|s| std::fs::read_to_string(&s.file).ok());
+    let body = text.as_deref().map(|t| frontmatter(t).map_or(t, |(_, b)| b).trim()).filter(|b| !b.is_empty());
+    match body {
+        Some(body) => Some(format!(
+            "{lead}, written exactly as the `report` skill below says, every time. Keep it in mind from the start. Another skill may say what to report (a review's findings): it decides what goes in, this decides the shape.\n\n<skill name=\"report\">\n{body}\n</skill>"
+        )),
+        None => (skill.is_some() || also.contains("report")).then(|| {
+            format!("{lead}: load the `report` skill when you start a task, not when you finish it, and write the report exactly as it says, every time.")
+        }),
+    }
 }
 
 /// Every skill the places hold, the first of each name kept.
@@ -317,7 +328,9 @@ mod tests {
         assert_eq!(report.source, "serpis");
         // A file the model can read, as serpis has it.
         assert_eq!(std::fs::read_to_string(&report.file).unwrap(), BUILTIN[0].1);
-        assert!(report_rule(&skills, &HashSet::new()).is_some_and(|r| r.contains("`report` skill")));
+        // Its text comes with the rule, without the frontmatter.
+        let rule = report_rule(&skills, &HashSet::new()).unwrap();
+        assert!(rule.contains("`## Needs you`") && !rule.contains("description:"), "{rule}");
         // An old copy is brought up to date.
         std::fs::write(&report.file, "---\ndescription: old\n---\n").unwrap();
         assert_eq!(std::fs::read_to_string(&discover(&places).into_iter().find(|s| s.name == "report").unwrap().file).unwrap(), BUILTIN[0].1);
@@ -325,6 +338,8 @@ mod tests {
         write(&agent.join("skills/report/SKILL.md"), "---\nname: report\ndescription: Mine.\n---\n");
         let mine = discover(&places).into_iter().find(|s| s.name == "report").unwrap();
         assert_eq!((mine.source.as_str(), mine.description.as_str()), ("user", "Mine."));
+        // With nothing to bring, it is to be loaded.
+        assert!(report_rule(&[mine], &HashSet::new()).is_some_and(|r| r.contains("load the `report` skill when you start")));
         // Off: neither it nor the rule.
         std::fs::remove_dir_all(agent.join("skills")).unwrap();
         let diagrams = skills.iter().find(|s| s.name == "diagrams").expect("the diagrams skill");

@@ -89,8 +89,8 @@ width of a chat's reading column, and `chat-measure` the longest line of an agen
 (70 characters by default; 45 to 75 read best), while code, tables and cards keep the whole column.
 
 Chats' agents (serpis's own, Claude Code, Codex) come with a report skill (`skills/report`, kept
-in the agent directory's `builtin-skills`) and are told to end every task with a report written as
-it says: `Done`, `Partly done` or `Blocked` and the result first, then what needs you (each with a
+in the agent directory's `builtin-skills`, its text in their system prompt so they have it from
+the start) and are told to end every task with a report written as it says: `Done`, `Partly done` or `Blocked` and the result first, then what needs you (each with a
 recommendation), what changed, how it was checked and what wasn't, what's left; each claim saying
 how it is known, short and plain, with no padding. A skill of yours named `report` is
 used instead; `chat-report-skill` off, neither.
