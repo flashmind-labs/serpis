@@ -21,7 +21,9 @@ node_src="${SERPIS_NODE_BINARY:-$("$root/scripts/build-node.sh")}"
 RUSTFLAGS="" CARGO_TARGET_DIR="$root/target/node" cargo build --release -q --manifest-path "$root/Cargo.toml" -p serpis-status
 status_src="$root/target/node/release/serpis-status"
 exe_src="$root/target/release/serpis"
-core_src="$root/target/release/deps/libserpis.dylib"
+# The core where the binary links it from: cargo puts it in target/release/deps, or since 1.100
+# in target/release/build/serpis/<hash>/out.
+core_src="$(otool -L "$exe_src" | awk '/\/libserpis\.dylib / {print $1; exit}')"
 core_id="$(otool -D "$core_src" | tail -1)"
 std_name="$(otool -L "$exe_src" | awk '/@rpath\/libstd-/ {sub("@rpath/", "", $1); print $1}')"
 std_src="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/lib/$std_name"
