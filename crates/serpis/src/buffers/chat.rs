@@ -839,7 +839,7 @@ impl ChatBuffer {
                                 }
                                 for mut l in markdown_lines(text, t, &m, self.text_w, diagrams) {
                                     // Prose (not code, tables or cards) wraps at chat-measure.
-                                    if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
+                                    if is_prose(&l) {
                                         l.measure = measure.map(|w| w * scale);
                                         if scale != 1.0 {
                                             l.scale = Some(scale);
@@ -1283,6 +1283,9 @@ fn table_alignments(line: &str) -> Option<Vec<egui::Align>> {
 pub enum Measure<'a> {
     Fonts(&'a egui::Context, &'a crate::theme::Theme),
     Chars(f32),
+    /// Tests: as `Chars`, but a `1` half as wide (a proportional font's digits).
+    #[cfg(test)]
+    NarrowOne(f32),
 }
 
 impl Measure<'_> {
@@ -1290,6 +1293,8 @@ impl Measure<'_> {
         match self {
             _ if text.is_empty() => 0.0,
             Measure::Chars(w) => text.chars().count() as f32 * w,
+            #[cfg(test)]
+            Measure::NarrowOne(w) => text.chars().map(|c| if c == '1' { w / 2.0 } else { *w }).sum(),
             Measure::Fonts(ctx, theme) => {
                 let job = crate::text::layout_job(&StyledLine::new(text, face), theme, f32::INFINITY);
                 ctx.fonts_mut(|f| f.layout_job(job)).size().x
@@ -1300,7 +1305,7 @@ impl Measure<'_> {
     fn scale(&self) -> f32 {
         match self {
             Measure::Fonts(_, t) => t.ui_scale(),
-            Measure::Chars(_) => 1.0,
+            _ => 1.0,
         }
     }
 }
@@ -1356,7 +1361,38 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
     let face_of = |row: usize| if row == 0 { Face::Bold } else { Face::AssistantText };
     let all: Vec<&Vec<(String, Vec<(Range<usize>, Face)>)>> = std::iter::once(&head).chain(&body).collect();
     let cell = |r: usize, c: usize| all[r].get(c).map(|(s, _)| s.as_str()).unwrap_or("");
-    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| m.width(cell(r, c), face_of(r))).fold(0.0, f32::max)).collect();
+    // Digits as wide as the font's widest (tabular figures), so numbers in a column line up:
+    // "71%" over "78%". Each is centered in that width by space around it (not in code, whose
+    // digits are already). The room it adds, and where it goes in `range` of a cell.
+    let slots = std::cell::RefCell::new(Vec::<(Face, f32)>::new());
+    let slot = |face: Face| -> f32 {
+        if let Some((_, w)) = slots.borrow().iter().find(|(f, _)| *f == face) {
+            return *w;
+        }
+        let w = ('0'..='9').map(|d| m.width(d.encode_utf8(&mut [0; 4]), face)).fold(0.0, f32::max);
+        slots.borrow_mut().push((face, w));
+        w
+    };
+    let figures = |r: usize, c: usize, range: Range<usize>| -> (f32, Vec<(usize, f32)>) {
+        let (src, spans) = all[r].get(c).map(|(s, sp)| (s.as_str(), sp.as_slice())).unwrap_or(("", &[]));
+        let (mut extra, mut pads, mut carry) = (0.0, Vec::new(), 0.0);
+        for (i, ch) in src[range.clone()].char_indices() {
+            let face = spans.iter().find(|(sr, _)| sr.contains(&(range.start + i))).map_or(face_of(r), |(_, f)| *f);
+            if !ch.is_ascii_digit() || face == Face::InlineCode {
+                if carry > 0.0 {
+                    pads.push((i, carry));
+                    carry = 0.0;
+                }
+                continue;
+            }
+            let room = (slot(face) - m.width(&src[range.start + i..range.start + i + 1], face)).max(0.0);
+            pads.push((i, carry + room / 2.0));
+            carry = room / 2.0;
+            extra += room;
+        }
+        (extra, pads)
+    };
+    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| m.width(cell(r, c), face_of(r)) + figures(r, c, 0..cell(r, c).len()).0).fold(0.0, f32::max)).collect();
     let minimum: Vec<f32> = (0..cols)
         .map(|c| {
             let word = (0..all.len()).flat_map(|r| cell(r, c).split(' ').map(move |w| (r, w))).map(|(r, w)| m.width(w, face_of(r))).fold(0.0, f32::max);
@@ -1395,7 +1431,8 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
                 let (src, src_spans) = row.get(c).cloned().unwrap_or_default();
                 let range = wrapped[c].get(li).cloned().unwrap_or(0..0);
                 let seg = &src[range.clone()];
-                let w = m.width(seg, face);
+                let (extra, digits) = figures(r, c, range.clone());
+                let w = m.width(seg, face) + extra;
                 let slack = (widths[c] - w).max(0.0);
                 let align = match aligns.get(c).copied().unwrap_or(egui::Align::Min) {
                     egui::Align::Max => slack,
@@ -1404,6 +1441,7 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
                 };
                 let at = text.len();
                 pads.push((at, (col_x[c] + align - x).max(0.0)));
+                pads.extend(digits.into_iter().map(|(o, p)| (at + o, p)));
                 text.push_str(seg);
                 for (sr, f) in src_spans {
                     let (s0, s1) = (sr.start.max(range.start), sr.end.min(range.end));
@@ -1597,6 +1635,9 @@ fn check_mark(text: &str) -> Option<(&'static str, Face)> {
 fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, surface: Color32, measure: Option<f32>, scale: f32, diagrams: bool) -> Vec<StyledLine> {
     let k = m.scale();
     let prose = |l: &mut StyledLine, s: f32| {
+        if !is_prose(l) {
+            return;
+        }
         l.measure = measure.map(|w| w * s);
         if s != 1.0 {
             l.scale = Some(s);
@@ -1609,9 +1650,7 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
     prose(&mut headline, scale * 0.9);
     out.push(headline);
     for mut l in markdown_lines(&sh.intro, t, m, avail, diagrams) {
-        if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
-            prose(&mut l, scale);
-        }
+        prose(&mut l, scale);
         out.push(l);
     }
     for (title, body) in &sh.sections {
@@ -1626,7 +1665,9 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
         }
         prose(&mut head, scale);
         out.push(head);
-        let mut lines = markdown_lines(body, t, m, avail, diagrams);
+        // Needs you's card takes its indent from the column.
+        let inset = if needs { 16.0 * k } else { 0.0 };
+        let mut lines = markdown_lines(body, t, m, avail - inset, diagrams);
         if needs {
             // A card the eye finds first: raised a little from the report, with a trace of the
             // theme's warning color and a bar of it (more of it muddies: tan, olive).
@@ -1634,9 +1675,9 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
             let card = Block::new(crate::themes::mix(raised, t.yellow, if t.dark { 0.05 } else { 0.07 })).bar(t.yellow);
             let n = lines.len();
             for (i, l) in lines.iter_mut().enumerate() {
-                l.block = Some(card.nth(i, n));
-                l.indent += 16.0 * k;
                 prose(l, scale);
+                l.block = Some(card.nth(i, n));
+                l.indent += inset;
                 if i == 0 {
                     l.gap_above = 0.0;
                     l.pad_top += 12.0 * k;
@@ -1647,9 +1688,7 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
             }
         } else {
             for l in lines.iter_mut() {
-                if l.block.as_ref().is_none_or(|b| b.bg == Color32::TRANSPARENT) {
-                    prose(l, scale);
-                }
+                prose(l, scale);
                 if kind == "checked" && l.marker.is_some() {
                     if let Some((mark, face)) = check_mark(&l.text) {
                         l.marker = Some((mark.to_string(), face));
@@ -1659,7 +1698,25 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
         }
         out.extend(lines);
     }
+    // The theme's border is drawn against its background: on the report's surface, the same
+    // step from it, so tables' and code's edges show.
+    let edge = crate::themes::mix(surface, t.fg, 0.18);
+    for l in out.iter_mut() {
+        if let Some(b) = l.block.as_mut().filter(|b| b.border == Some(t.border)) {
+            b.border = Some(edge);
+        }
+        if l.rule_below == Some(t.border) {
+            l.rule_below = Some(edge);
+        }
+    }
     out
+}
+
+/// Whether a line is prose, to take a report's size and wrap at chat-measure. Tables, code and
+/// diagrams keep their size and the width they were laid out for (a table's rows are bordered
+/// cards with no fill; a quote's lines have a bar and no border, and are prose).
+fn is_prose(l: &StyledLine) -> bool {
+    l.diagram.is_none() && l.block.is_none_or(|b| b.bg == Color32::TRANSPARENT && b.border.is_none())
 }
 
 fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32, diagrams: bool) -> Vec<StyledLine> {
@@ -2677,6 +2734,8 @@ impl ChatBuffer {
                         "marker": l.marker.as_ref().map(|(m, _)| m.clone()),
                         "surface": l.backdrop.is_some(),
                         "card": l.block.map(|b| crate::themes::hex(b.bg)),
+                        "border": l.block.and_then(|b| b.border).map(crate::themes::hex),
+                        "measure": l.measure,
                         "bar": l.block.and_then(|b| b.bar).map(crate::themes::hex),
                         "scale": l.scale,
                         "links": l.links.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
@@ -4176,6 +4235,21 @@ mod tests {
         assert!(rows.iter().all(|l| l.rule_below.is_some()));
         assert!(lines.iter().any(|l| l.text == "after"));
         assert!(table(&markdown_lines("| not a table", &t, &m, 2000.0, false)).is_empty());
+    }
+
+    #[test]
+    fn table_digits_line_up() {
+        // A 1 half as wide as other digits: right-aligned, 71% starts where 78% does, the 1
+        // centered in a digit's width; and a 1 in code is left as it is.
+        let t = crate::theme::Theme::default();
+        let m = Measure::NarrowOne(8.0);
+        let rows = markdown_lines("| Hit rate |\n|--:|\n| 71% |\n| 78% |\n| `1` |", &t, &m, 2000.0, false);
+        let rows = table(&rows);
+        let x = |l: &StyledLine, at: usize| -> f32 { l.pads.iter().filter(|(o, _)| *o <= at).map(|(_, w)| *w).sum::<f32>() + m.width(&l.text[..at], l.face) };
+        assert_eq!(x(rows[1], 0), x(rows[2], 0), "71% starts where 78% does");
+        assert_eq!(x(rows[1], 1), x(rows[2], 1) + 2.0, "its 1 centered in a digit's width");
+        assert_eq!(x(rows[1], 2), x(rows[2], 2), "and the % under the %");
+        assert!(rows[3].pads.iter().all(|(o, _)| *o == 0), "code's digits as they are");
     }
 
     #[test]
