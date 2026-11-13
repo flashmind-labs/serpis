@@ -8,6 +8,11 @@ models.json). What it says depends on the last user message:
   CODE ...        reply with a fenced Rust code block
   INLINE ...      reply with inline code (Run `cargo test` now.)
   LONG ...        reply with a long answer (paragraphs, lists, code, a table)
+  REPORT          reply with report.md (beside this file): an agent's summary of a code review
+  REPORT:<name>   reply with report-<name>.md: the same review written another way (skill: by
+                  skills/report/SKILL.md)
+  Review comments on what you wrote. ...   (a review serpis sent) answer each comment,
+                  quoting it as asked: "> quote" then "Answer N."
   READ:<path>     call read on that path
   SHELL:<command> call bash with that command
   DESCRIBED:<description>|<command> the same, saying what it is for
@@ -19,14 +24,16 @@ models.json). What it says depends on the last user message:
 
 After a tool result it replies "done". Each request is logged as one JSON line to the file
 given as the second argument: {"n", "last_role", "tool_content", "tools", "images", "text",
-"skills", "serpis_docs"} (images: how many the last message carries; text: its text; skills:
+"skills", "serpis_docs", "report_skill", "report_rule", "report_text", "diagrams_skill"} (images: how many the last message carries; text: its text; skills:
 whether the system prompt lists skills; serpis_docs: whether it points requests about serpis at
-serpis_api).
+serpis_api; diagrams_skill: whether it offers the diagrams skill; report_skill, report_rule: whether it offers the report skill and says to end
+each task with a report; report_text: whether the skill's own text comes with it).
 
   python3 mock_llm.py <port-file> <log-file>    (listens on a free port, written to port-file)
 """
 
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -60,6 +67,10 @@ class Handler(BaseHTTPRequestHandler):
                 "text": text_of(last.get("content"))[:4000],
                 "skills": "<available_skills>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
                 "serpis_docs": "Call serpis_api first" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
+                "report_skill": "<name>report</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
+                "report_rule": "your last message is a report" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
+                "report_text": '<skill name="report">' in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
+                "diagrams_skill": "<name>diagrams</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
             }) + "\n")
 
         delta, finish = {"role": "assistant", "content": "ok"}, "stop"
@@ -88,6 +99,20 @@ class Handler(BaseHTTPRequestHandler):
                     if i % 5 == 0:
                         parts.append("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |")
                 delta["content"] = "\n\n".join(parts)
+            if prompt.startswith("Review comments on what you wrote."):
+                answers, group = [], []
+                for line in prompt.split("\n") + [""]:
+                    if line.startswith("> "):
+                        group.append(line)
+                    elif group:
+                        answers.append("\n".join(group) + f"\n\nAnswer {len(answers) + 1}.")
+                        group = []
+                delta["content"] = "\n\n".join(answers) or "ok"
+            if prompt.startswith("REPORT"):
+                variant = prompt[len("REPORT:"):].strip() if prompt.startswith("REPORT:") else ""
+                name = f"report-{variant}.md" if variant.isidentifier() else "report.md"
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
+                    delta["content"] = f.read()
             if prompt.startswith("INLINE"):
                 delta["content"] = "Run `cargo test` now."
             if prompt.startswith("CODE"):

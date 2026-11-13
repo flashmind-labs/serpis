@@ -44,6 +44,10 @@ pub enum Face {
     MetaWarn,
     /// Small medium-weight labels (who is speaking, card titles).
     Label,
+    /// A report's outcome, as a pill: done, partly done, blocked.
+    BadgeGood,
+    BadgeWarn,
+    BadgeBad,
     /// Text that is there to be copied, not read.
     Unseen,
     /// Syntax highlighting (monospace, colored from the theme's palette).
@@ -86,6 +90,11 @@ pub struct Theme {
     pub ansi: [Color32; 16],
     pub user_bg: Color32,
     pub tool_bg: Color32,
+    /// The surface an agent's report sits on (chat-report): derived from the body, text and
+    /// accent colors unless a palette sets `bg_report` (`crate::themes::report_surface`).
+    pub report_bg: Color32,
+    /// Its outline, in light themes (paper on the desk: near-white surfaces need an edge).
+    pub report_border: Option<Color32>,
     pub font_size: f32,
     pub mono_size: f32,
     pub radius: u8,
@@ -105,7 +114,7 @@ impl Default for Theme {
 
 impl Theme {
     pub fn dark() -> Self {
-        Theme {
+        let mut t = Theme {
             name: "serpis-dark".into(),
             dark: true,
             bg: Color32::from_rgb(0x16, 0x17, 0x1d),
@@ -133,17 +142,22 @@ impl Theme {
             ansi: [Color32::from_rgb(0x15, 0x16, 0x1e), Color32::from_rgb(0xf7, 0x76, 0x8e), Color32::from_rgb(0x9e, 0xce, 0x6a), Color32::from_rgb(0xe0, 0xaf, 0x68), Color32::from_rgb(0x7a, 0xa2, 0xf7), Color32::from_rgb(0xbb, 0x9a, 0xf7), Color32::from_rgb(0x7d, 0xcf, 0xff), Color32::from_rgb(0xa9, 0xb1, 0xd6), Color32::from_rgb(0x41, 0x48, 0x68), Color32::from_rgb(0xff, 0x89, 0x9d), Color32::from_rgb(0x9f, 0xe0, 0x44), Color32::from_rgb(0xfa, 0xba, 0x4a), Color32::from_rgb(0x8d, 0xb0, 0xff), Color32::from_rgb(0xc7, 0xa9, 0xff), Color32::from_rgb(0xa4, 0xda, 0xff), Color32::from_rgb(0xc0, 0xca, 0xf5)],
             user_bg: Color32::from_rgb(0x22, 0x24, 0x33),
             tool_bg: Color32::from_rgb(0x1b, 0x1c, 0x24),
+            report_bg: Color32::TRANSPARENT,
+            report_border: None,
             font_size: 14.5,
             mono_size: 13.5,
             radius: 6,
             tracking: Vec::new(),
             bold_weight: 600.0,
             font_epoch: 0,
-        }
+        };
+        t.report_bg = crate::themes::report_surface(t.bg_alt, t.fg, t.accent, t.dark);
+        t.report_border = (!t.dark).then_some(t.border);
+        t
     }
 
     pub fn light() -> Self {
-        Theme {
+        let mut t = Theme {
             name: "serpis-light".into(),
             dark: false,
             bg: Color32::from_rgb(0xfa, 0xfa, 0xfb),
@@ -171,13 +185,18 @@ impl Theme {
             ansi: [Color32::from_rgb(0xe9, 0xe9, 0xed), Color32::from_rgb(0xc4, 0x32, 0x4e), Color32::from_rgb(0x38, 0x7a, 0x26), Color32::from_rgb(0x9a, 0x6a, 0x00), Color32::from_rgb(0x2f, 0x5f, 0xc4), Color32::from_rgb(0x7a, 0x4c, 0xc4), Color32::from_rgb(0x0b, 0x7a, 0x9a), Color32::from_rgb(0x5c, 0x61, 0x73), Color32::from_rgb(0xa0, 0xa4, 0xb2), Color32::from_rgb(0xd6, 0x45, 0x5f), Color32::from_rgb(0x4a, 0x8f, 0x36), Color32::from_rgb(0xb0, 0x7d, 0x0a), Color32::from_rgb(0x41, 0x70, 0xd6), Color32::from_rgb(0x8c, 0x5e, 0xd6), Color32::from_rgb(0x1a, 0x8c, 0xad), Color32::from_rgb(0x24, 0x27, 0x33)],
             user_bg: Color32::from_rgb(0xec, 0xee, 0xf8),
             tool_bg: Color32::from_rgb(0xf4, 0xf5, 0xf8),
+            report_bg: Color32::TRANSPARENT,
+            report_border: None,
             font_size: 14.5,
             mono_size: 13.5,
             radius: 6,
             tracking: Vec::new(),
             bold_weight: 600.0,
             font_epoch: 0,
-        }
+        };
+        t.report_bg = crate::themes::report_surface(t.bg_alt, t.fg, t.accent, t.dark);
+        t.report_border = (!t.dark).then_some(t.border);
+        t
     }
 
     /// How much bigger than the default size the UI text is; fixed chrome (headers, rows,
@@ -218,6 +237,7 @@ impl Theme {
         let weight = match face {
             Face::Bold | Face::BoldItalic | Face::Heading | Face::CodeBold => Some(self.bold_weight),
             Face::UserLabel | Face::ToolHeader | Face::Label => Some((self.bold_weight - 100.0).max(400.0)),
+            Face::BadgeGood | Face::BadgeWarn | Face::BadgeBad => Some(self.bold_weight),
             _ => None,
         };
         let mut coords = egui::epaint::text::VariationCoords::default();
@@ -289,7 +309,8 @@ impl Theme {
             Face::DiffHunk => (self.mono(), self.purple, t),
             Face::Error => (self.prop(), self.red, t),
             Face::Warning => (self.prop(), self.yellow, t),
-            Face::Heading => (FontId::new(self.font_size + 2.0, FontFamily::Proportional), self.fg, t),
+            // A size up a reader notices when skimming (about 19pt on a 14.5pt body).
+            Face::Heading => (FontId::new((self.font_size * 1.3).round(), FontFamily::Proportional), self.fg, t),
             Face::InlineCode => (FontId::new(self.mono_size - 1.0, FontFamily::Monospace), self.cyan, self.chip()),
             Face::Link => (self.prop(), self.blue, t),
             Face::PromptMarker => (self.mono(), self.accent, t),
@@ -297,6 +318,9 @@ impl Theme {
             Face::MetaGood => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.green, t),
             Face::MetaWarn => (FontId::new(self.font_size - 2.5, FontFamily::Proportional), self.yellow, t),
             Face::Label => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.fg_dim, t),
+            Face::BadgeGood => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.green, self.green.gamma_multiply(if self.dark { 0.18 } else { 0.14 })),
+            Face::BadgeWarn => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.yellow, self.yellow.gamma_multiply(if self.dark { 0.18 } else { 0.16 })),
+            Face::BadgeBad => (FontId::new(self.font_size - 1.5, FontFamily::Proportional), self.red, self.red.gamma_multiply(if self.dark { 0.18 } else { 0.14 })),
             Face::Unseen => (self.mono(), Color32::TRANSPARENT, t),
             Face::SynKeyword => (self.mono(), self.purple, t),
             Face::SynString => (self.mono(), self.green, t),

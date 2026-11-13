@@ -1286,6 +1286,13 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.transcript_text(ed)))?
             .ok_or_else(|| mlua::Error::runtime("the chat is busy"))
     })?)?;
+    // serpis.chat.review(buf?): the chat's review of what the agent wrote: {comments = {{id,
+    // entry, quote, label, text, kind, state}}, drafts, writing = {quote, label, kind, text, id}?}.
+    chat.set("review", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let v = ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.review_json()))?.ok_or_else(|| mlua::Error::runtime("the chat is busy"))?;
+        lua_of(lua, &v)
+    })?)?;
     // serpis.chat.append(buf?, type, data): add a custom entry to the chat's session (pi's
     // `custom` entries); it is restored when the session is resumed.
     chat.set("append", lua.create_function(move |lua, (id, kind, data): (Option<u64>, String, LuaValue)| {
@@ -1649,6 +1656,15 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         lua_of(lua, &v)
     })?)?;
     // Where text position (line, col) (1-based) of the focused buffer is on screen: {x, y, w, h}.
+    // The current chat's transcript lines as drawn: {text, marker, surface, card, bar, scale,
+    // links, marks} each.
+    debug.set("chat_lines", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let id = e.current_buffer();
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.lines_json(ed))
+        })?;
+        lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
     debug.set("cell_rect", lua.create_function(|lua, (line, col): (usize, usize)| {
         let v = ed(|e| e.with_surface(|s, _| s.screen_rect(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1)))).flatten())?;
         lua_of(lua, &v.map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})).unwrap_or(Value::Null))

@@ -656,7 +656,13 @@ impl Chat {
             let theirs = serpis_agent::skills::claude_names(&places.home, &self.cwd);
             let ours: Vec<_> = if host.var_bool("agent-skills", true) { serpis_agent::skills::discover(&places) } else { Vec::new() };
             let ours: Vec<_> = ours.into_iter().filter(|s| !theirs.contains(&s.name)).collect();
-            serpis_agent::skills::for_prompt(&ours, "Read")
+            let list = serpis_agent::skills::for_prompt(&ours, "Read");
+            // Each task ends with a report in the skill's shape (chat-report-skill).
+            let theirs = if host.var_bool("chat-report-skill", true) { theirs } else { Default::default() };
+            match serpis_agent::skills::report_rule(&ours, &theirs) {
+                Some(rule) => [list, rule].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n"),
+                None => list,
+            }
         });
         let launch = serpis_agent::claude_code::Launch {
             binary,
@@ -722,7 +728,12 @@ impl Chat {
         };
         let instructions = host.var_bool("codex-skills", true).then(|| {
             let skills = if host.var_bool("agent-skills", true) { serpis_agent::skills::discover(&self.skill_places(host)) } else { Vec::new() };
-            serpis_agent::skills::for_prompt(&skills, "shell")
+            let list = serpis_agent::skills::for_prompt(&skills, "shell");
+            // Each task ends with a report in the skill's shape (chat-report-skill).
+            match serpis_agent::skills::report_rule(&skills, &Default::default()) {
+                Some(rule) => [list, rule].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n"),
+                None => list,
+            }
         });
         let launch = serpis_agent::codex::Launch {
             binary,
@@ -954,7 +965,7 @@ impl Chat {
                 }));
             }
         }
-        serpis_agent::skills::Places { agent_dir, pi_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default() }
+        serpis_agent::skills::Places { agent_dir, pi_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default(), builtin: [("report", "chat-report-skill"), ("diagrams", "chat-diagrams")].into_iter().filter(|(_, var)| host.var_bool(var, true)).map(|(name, _)| name.to_string()).collect() }
     }
 
     /// The skills this chat has (none with `agent-skills` off).
@@ -985,9 +996,14 @@ impl Chat {
         // The skills it may load: named and described, read when a task matches (as pi does).
         let reader = ["read", "bash"].into_iter().find(|r| tools.iter().any(|t| t.name() == *r));
         if let Some(reader) = reader {
-            let s = serpis_agent::skills::for_prompt(&self.skills(host), reader);
+            let skills = self.skills(host);
+            let s = serpis_agent::skills::for_prompt(&skills, reader);
             if !s.is_empty() {
                 opts.sections.insert("skills".into(), s);
+            }
+            // Each task ends with a report in the skill's shape (chat-report-skill).
+            if let Some(rule) = serpis_agent::skills::report_rule(&skills, &Default::default()) {
+                opts.guidelines.push(rule);
             }
         }
         serpis_agent::system_prompt::build_system_prompt(tools, &self.cwd, &opts)

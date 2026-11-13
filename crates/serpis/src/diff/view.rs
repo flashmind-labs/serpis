@@ -175,6 +175,8 @@ pub struct CommentEditor {
 enum Land {
     FirstChange,
     LastChange,
+    /// A line of the new side, 1-based (a code reference clicked in a chat).
+    Line(u32),
 }
 
 pub struct DiffBuffer {
@@ -247,6 +249,8 @@ pub struct DiffBuffer {
     review_loaded: bool,
     /// Where the saved review left off, until the list of files is in.
     resume_file: Option<String>,
+    /// A line to show once the list of files is in (path, 1-based line): asked for before it was.
+    goto: Option<(String, u32)>,
     resume_writing: Option<review::Writing>,
     pub editor: Option<CommentEditor>,
     /// The chat or terminal a review goes to.
@@ -313,6 +317,7 @@ impl DiffBuffer {
             review: Saved::default(),
             review_loaded: false,
             resume_file: None,
+            goto: None,
             resume_writing: None,
             editor: None,
             target,
@@ -506,7 +511,86 @@ impl DiffBuffer {
         if let Some(w) = self.resume_writing.take() {
             self.resume_comment(ed, w);
         }
+        // A line asked for before the list was in: there now, or the file itself if it has no
+        // changes here.
+        if let Some((path, line)) = self.goto.take() {
+            match self.listed_as(&path) {
+                Some(p) => {
+                    self.commit_comment(ed);
+                    if self.current.as_deref() != Some(p.as_str()) {
+                        self.clear_file();
+                        self.current = Some(p);
+                    }
+                    self.land = Some(Land::Line(line));
+                }
+                None => self.visit_unchanged(ed, &path, line),
+            }
+        }
         self.load(ed);
+    }
+
+    /// `path` as the list of files names it: as given, relative to the folder the page was
+    /// opened for, or absolute inside the worktree.
+    fn listed_as(&self, path: &str) -> Option<String> {
+        let root = self.root.trim_end_matches('/');
+        let dir = self.dir.trim_end_matches('/');
+        let sub = dir.strip_prefix(root).map(|s| s.trim_start_matches('/')).filter(|s| !s.is_empty());
+        let mut tries = vec![path.to_string()];
+        if let Some(sub) = sub {
+            tries.push(format!("{sub}/{path}"));
+        }
+        if let Some(rel) = path.strip_prefix(root) {
+            tries.push(rel.trim_start_matches('/').to_string());
+        }
+        tries.into_iter().find(|p| self.files.iter().any(|f| f.path == *p))
+    }
+
+    /// Show line `line` of `path` (1-based, new side): in this page when the file is among its
+    /// changes; else the file itself, with a word that it has no changes here. Asked before the
+    /// list of files is in, it happens when it is.
+    pub fn show_line(&mut self, ed: &mut Editor, path: &str, line: u32) {
+        if !self.loaded {
+            self.goto = Some((path.to_string(), line));
+            return;
+        }
+        match self.listed_as(path) {
+            // The file shown already: only the cursor moves.
+            Some(p) if self.current.as_deref() == Some(p.as_str()) && self.diff.is_some() => self.land_on(Land::Line(line)),
+            Some(p) => {
+                if self.current.as_deref() != Some(p.as_str()) {
+                    self.commit_comment(ed);
+                    self.clear_file();
+                    self.current = Some(p);
+                }
+                self.land = Some(Land::Line(line));
+                self.load(ed);
+            }
+            None => self.visit_unchanged(ed, path, line),
+        }
+    }
+
+    /// Open a file that has no changes in this page at `line`, from the main loop (this page is
+    /// out of its slot while it runs).
+    fn visit_unchanged(&self, ed: &mut Editor, path: &str, line: u32) {
+        if self.machine.is_some() {
+            ed.message(format!("{path} has no changes here, and is on another machine"));
+            return;
+        }
+        let under = |base: &str| std::path::Path::new(base).join(path);
+        let file = [under(&self.dir), under(&self.root)].into_iter().find(|p| p.is_file());
+        let Some(file) = file else {
+            ed.message(format!("{path} isn't in {}", self.root));
+            return;
+        };
+        let shown = path.to_string();
+        ed.main_sender().send(move |ed| {
+            if let Err(e) = crate::commands::open_file(ed, file) {
+                ed.error(format!("{e}"));
+                return;
+            }
+            ed.with_surface(|s, _| s.set_cursor(crate::text::Pos::new(line as usize - 1, 0)));
+            ed.message(format!("{shown} has no changes here: the file itself"));
+        });
     }
 
     /// Pick up a comment that was being written when serpis quit. Its file may no longer differ:
@@ -635,10 +719,24 @@ impl DiffBuffer {
             self.persist(ed);
         }
         self.items_dirty = true;
-        match self.land.take() {
-            Some(Land::FirstChange) => self.go_to_change(0),
-            Some(Land::LastChange) => self.go_to_change(usize::MAX),
-            None => {}
+        if let Some(land) = self.land.take() {
+            self.land_on(land);
+        }
+    }
+
+    /// Put the cursor where `land` says, in the file shown.
+    fn land_on(&mut self, land: Land) {
+        match land {
+            Land::FirstChange => self.go_to_change(0),
+            Land::LastChange => self.go_to_change(usize::MAX),
+            Land::Line(n) => {
+                self.cursor = self.find_row(None, Some(n.saturating_sub(1)));
+                self.anchor = None;
+                self.side = Which::New;
+                self.ensure_items();
+                self.expand_fold_containing(self.cursor);
+                self.reveal = true;
+            }
         }
     }
 

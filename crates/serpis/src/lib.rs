@@ -12,6 +12,7 @@ pub mod buffer;
 pub mod buffers;
 pub use serpis_chat::cache_watch;
 pub mod chat_api;
+pub mod chat_review;
 pub mod claude_usage;
 pub mod codex_status;
 pub mod log_view;
@@ -24,6 +25,7 @@ pub mod launch;
 pub mod chrome;
 pub mod clipboard;
 pub mod commands;
+pub mod diagram;
 pub mod diff;
 pub mod editor;
 pub mod fonts;
@@ -136,6 +138,13 @@ pub fn bootstrap(ed: &mut Editor) {
         }
         None
     });
+    ed.defvar("chat-report-skill", json!(true), "Chats' agents (serpis's, Claude Code, Codex) have the report skill serpis comes with (unless you have one named report), and are told to end every task with a report written as it says: the outcome first, then what needs you, what changed, how it was checked, what's left. serpis draws such a report as its parts (chat-report). Off: neither.");
+    ed.defvar("chat-report", json!(true), "Set an agent's report apart: the last message of a finished run, when it has chat-report-min-words or more, gets a rule above it and a header saying it is the report, with its length and reading time.");
+    ed.defvar("chat-report-min-words", json!(80), "Words a run's last message needs to count as a report (chat-report); shorter endings such as \"done\" stay as they are.");
+    ed.defvar("chat-report-background", Value::Null, "The surface a report sits on (chat-report): a color (\"#22242e\"), or \"none\" for a rule above it instead. Unset: the theme's own (its palette's bg_report, else a faint accent tint of its background).");
+    ed.defvar("chat-diagrams", json!(true), "Draw Mermaid diagrams (```mermaid blocks) in chats as part of the page: in serpis's font and the theme's colors, a node and its lines lit under the mouse. A flowchart too wide for the column is drawn top to bottom. Off, or one that can't be drawn: its source, as code.");
+    ed.defvar("chat-report-scale", json!(1.1), "Size of a report's prose relative to the rest of the chat (1.1, the default: a tenth larger; 1: the same). Code and tables in it keep their size.");
+    ed.defvar("chat-measure", json!(70), "Longest line of an agent's prose in a chat, in characters of the reading font (45 to 75 read best; 66 is the classic ideal). Code, tables and cards still use the whole column (chat-max-width). 0 or null: the whole column.");
     ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
@@ -198,6 +207,7 @@ pub fn bootstrap(ed: &mut Editor) {
     commands::install(ed);
     log_view::install(ed);
     diff::install(ed);
+    chat_review::install(ed);
     notify::install(ed);
     wm::install(ed);
     workspace::install(ed);

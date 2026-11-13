@@ -331,8 +331,16 @@ local steps = {
     local tr = serpis.chat.transcript(chat)
     T.check("the agent gets the comment", tr:find("use a better name", 1, true) ~= nil, true)
     T.check("and where it is", tr:find("src/a.rs:3", 1, true) ~= nil, true)
-    T.check("and what to do", tr:find("Make these changes", 1, true) ~= nil, true)
-    T.check("questions apart", tr:find("Answer these", 1, true) ~= nil, true)
+    -- What the agent gets in full (the chat draws it as a review, without the instructions).
+    local sent = ""
+    local fh = io.open(os.getenv("SERPIS_TEST_MOCK_LOG"))
+    if fh then
+      for l in fh:lines() do if l:find("use a better name", 1, true) then sent = l end end
+      fh:close()
+    end
+    T.check("and what to do", sent:find("Make these changes", 1, true) ~= nil, true)
+    T.check("questions apart", sent:find("Answer these", 1, true) ~= nil, true)
+    T.check("the chat shows it as a review", tr:find("Review of ", 1, true) ~= nil, true)
     T.check("quoted code", tr:find("let amount = price", 1, true) ~= nil, true)
     return shot("diff-sent", go)
   end,

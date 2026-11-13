@@ -10,6 +10,7 @@
 //! Both form one composite [`TextSurface`] (transcript lines first, then prompt lines), so
 //! motions, vim, search and yank move seamlessly between them.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -117,6 +118,21 @@ pub struct ChatBuffer {
     pub prompt: TextArea,
     lines: Vec<StyledLine>,
     line_entry: Vec<Option<usize>>,
+    /// The review of what the agent wrote ([`crate::chat_review`]), read once for this chat.
+    review: crate::chat_review::Saved,
+    /// The chat id the review was read for (a restored chat may start under another).
+    review_key: Option<String>,
+    /// A comment being written in the composer (the prompt holds its text), and what was being
+    /// typed before it, put back after.
+    commenting: Option<(crate::chat_review::Writing, String)>,
+    /// The review's comments listed in the composer.
+    review_open: bool,
+    /// Transcript lines that show a comment: (line, its id), to change it on a click.
+    comment_lines: Vec<(usize, u64)>,
+    /// Where `find:<i>` links go: (text to find, entry, after it rather than before it).
+    find_targets: Vec<(String, usize, bool)>,
+    /// The comment text last saved while writing, and when.
+    writing_saved: (String, Option<Instant>),
     /// Transcript lines that belong to thinking blocks (click or TAB folds them).
     thinking_lines: Vec<usize>,
     /// chat-show-thinking as last drawn; changing it unfolds what was folded by hand.
@@ -187,6 +203,13 @@ impl ChatBuffer {
             prompt_history: Vec::new(),
             history_index: None,
             text_w: 0.0,
+            review: Default::default(),
+            review_key: None,
+            commenting: None,
+            review_open: false,
+            comment_lines: Vec::new(),
+            find_targets: Vec::new(),
+            writing_saved: (String::new(), None),
             style_key: 0,
             composer_hits: Vec::new(),
             attachments: Vec::new(),
@@ -456,13 +479,34 @@ impl ChatBuffer {
 
     /// Send the prompt: start a run, or steer the running one.
     pub fn send(&mut self, ed: &mut Editor, follow_up: bool) {
+        // Writing a comment: sending saves it to the review.
+        if self.commenting.is_some() {
+            self.save_comment(ed);
+            return;
+        }
         let text = self.prompt.text().trim().to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        let review = !self.review.drafts().is_empty();
+        if text.is_empty() && self.attachments.is_empty() && !review {
             return;
         }
         self.prompt.clear();
-        self.prompt_history.push(text.clone());
+        if !text.is_empty() {
+            self.prompt_history.push(text.clone());
+        }
         self.history_index = None;
+        // A review waiting: it goes with what was typed, as one message.
+        let text = if review {
+            let message = crate::chat_review::prompt(&self.review.drafts(), &text);
+            for c in self.review.comments.iter_mut().filter(|c| c.state == crate::chat_review::State::Draft) {
+                c.state = crate::chat_review::State::Sent;
+            }
+            self.review_open = false;
+            self.dirty = true;
+            self.persist_review(ed);
+            message
+        } else {
+            text
+        };
         self.submit(ed, text, follow_up);
     }
 
@@ -627,8 +671,29 @@ impl ChatBuffer {
         let tool_compact = ed.var("chat-tool-compact").and_then(Value::as_bool).unwrap_or(true);
         let tool_spinner = ed.var("chat-tool-spinner").and_then(Value::as_bool).unwrap_or(true);
         let mut thinking_lines = Vec::new();
+        // Where in-chat links go (a review's places, a reply): see `find_targets`.
+        let mut find_targets: Vec<(String, usize, bool)> = Vec::new();
         let k = t.ui_scale();
         let m = Measure::Fonts(&ed.ctx, t);
+        // A readable line for prose: chat-measure characters of the reading font, an average
+        // character being a 26th of its lowercase alphabet (as in Bringhurst's copyfitting).
+        let diagrams = ed.var_bool("chat-diagrams");
+        let measure = ed.var("chat-measure").and_then(Value::as_f64).filter(|n| *n > 0.0).map(|n| n as f32 * m.width("abcdefghijklmnopqrstuvwxyz", Face::AssistantText) / 26.0);
+        // The report each finished run ends with (chat-report): entry index → its words.
+        let reports = if ed.var_bool("chat-report") {
+            let min_words = ed.var("chat-report-min-words").and_then(Value::as_u64).unwrap_or(80) as usize;
+            report_entries(&self.entries, self.running(), min_words)
+        } else {
+            HashMap::new()
+        };
+        // The report's surface: chat-report-background, a color or "none" (a rule above it
+        // instead); unset, the theme's own (report_bg).
+        let report_bg = match ed.var("chat-report-background") {
+            Some(Value::String(s)) if s == "none" => None,
+            Some(Value::String(s)) => crate::themes::parse_hex(s).or(Some(t.report_bg)),
+            _ => Some(t.report_bg),
+        };
+        let report_scale = ed.var("chat-report-scale").and_then(Value::as_f64).filter(|s| *s > 0.0).unwrap_or(1.0) as f32;
         let mut out: Vec<StyledLine> = Vec::new();
         let mut owner: Vec<Option<usize>> = Vec::new();
         let push = |out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, l: StyledLine, e: Option<usize>| {
@@ -660,7 +725,11 @@ impl ChatBuffer {
                     {
                         l.pad_bottom = 8.0 * k;
                     }
-                    lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText)));
+                    // A review serpis sent (of the agent's text, or a diff page's): drawn as one.
+                    match crate::chat_review::parse_sent(text) {
+                        Some(sent) => lines.extend(review_bubble_lines(&sent, ei, &mut find_targets, k)),
+                        None => lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText))),
+                    }
                     if lines.is_empty() {
                         lines.push(StyledLine::new("", Face::UserText));
                     }
@@ -681,7 +750,40 @@ impl ChatBuffer {
                     let fold = &v.thinking;
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
-                    if !continuation && (has_content || *streaming || error.is_some()) {
+                    let report = reports.get(&ei).copied();
+                    let report_start = out.len();
+                    if let Some(words) = report {
+                        // Set apart from the steps before it, on its own surface (or after a rule),
+                        // headed by what it is and how long it takes to read (230 words a minute).
+                        if report_bg.is_none() {
+                            push(&mut out, &mut owner, StyledLine::new("", Face::Meta).rule(t.border).gap(30.0 * k).pad(0.0, 14.0 * k), Some(ei));
+                        }
+                        let minutes = words.div_ceil(230).max(1);
+                        // Written to the report skill: its outcome as a pill, and what needs you.
+                        let shape = blocks.iter().find_map(|b| if let AssistantContent::Text { text, .. } = b { shaped_report(text) } else { None });
+                        let mut label = String::new();
+                        let mut spans = Vec::new();
+                        if let Some(sh) = &shape {
+                            let (word, face) = sh.outcome.badge();
+                            label.push_str(&format!(" {word} "));
+                            spans.push((0..label.len(), face));
+                            label.push_str("   ");
+                        }
+                        let at = label.len();
+                        label.push_str(&format!("Report  ·  {}  ·  {words} words, about {minutes} min", short_model(model)));
+                        spans.push((at..at + "Report".len(), Face::Accent));
+                        if let Some(n) = shape.as_ref().map(|sh| sh.needs_you()).filter(|n| *n > 0) {
+                            let at = label.len();
+                            label.push_str(&format!("  ·  {n} need{} you", if n == 1 { "s" } else { "" }));
+                            spans.push((at..label.len(), Face::MetaWarn));
+                        }
+                        let mut head = StyledLine::new(label, Face::Label).spans(spans).pad(0.0, 4.0 * k);
+                        if report_bg.is_some() {
+                            head = head.gap(30.0 * k);
+                            head.pad_top = 16.0 * k;
+                        }
+                        push(&mut out, &mut owner, head, Some(ei));
+                    } else if !continuation && (has_content || *streaming || error.is_some()) {
                         let label = format!("◆  {}", short_model(model));
                         let diamond = "◆".len();
                         push(&mut out, &mut owner, StyledLine::new(label, Face::Label).spans(vec![(0..diamond, Face::Accent)]).gap(26.0 * k).pad(0.0, 4.0 * k), Some(ei));
@@ -728,7 +830,21 @@ impl ChatBuffer {
                                 }
                             }
                             AssistantContent::Text { text, .. } => {
-                                for l in markdown_lines(text, t, &m, self.text_w) {
+                                let scale = if report.is_some() { report_scale } else { 1.0 };
+                                if let Some(sh) = report.and_then(|_| shaped_report(text)) {
+                                    for l in report_lines(&sh, t, &m, self.text_w, report_bg.unwrap_or(t.bg_alt), measure, scale, diagrams) {
+                                        push(&mut out, &mut owner, l, Some(ei));
+                                    }
+                                    continue;
+                                }
+                                for mut l in markdown_lines(text, t, &m, self.text_w, diagrams) {
+                                    // Prose (not code, tables or cards) wraps at chat-measure.
+                                    if is_prose(&l) {
+                                        l.measure = measure.map(|w| w * scale);
+                                        if scale != 1.0 {
+                                            l.scale = Some(scale);
+                                        }
+                                    }
                                     push(&mut out, &mut owner, l, Some(ei));
                                 }
                             }
@@ -773,6 +889,20 @@ impl ChatBuffer {
                             push(&mut out, &mut owner, line, Some(ei));
                         }
                     }
+                    // A report's lines, its usage included, make one panel.
+                    if let (Some(_), Some(bg)) = (report, report_bg) {
+                        let n = out.len() - report_start;
+                        let panel = match t.report_border {
+                            Some(c) => Block::new(bg).border(c),
+                            None => Block::new(bg),
+                        };
+                        for (i, l) in out[report_start..].iter_mut().enumerate() {
+                            l.backdrop = Some(panel.nth(i, n));
+                        }
+                        if let Some(l) = out.last_mut() {
+                            l.pad_bottom += 16.0 * k;
+                        }
+                    }
                 }
                 Entry::Tool { name, args, partial, result, elapsed_ms, ask, task, steps, .. } => {
                     let gap = if prev_tool { 6.0 } else { 14.0 } * k;
@@ -804,6 +934,15 @@ impl ChatBuffer {
         }
         if out.is_empty() {
             push(&mut out, &mut owner, StyledLine::new("", Face::Default), None);
+        }
+        // Review comments: what they quote marked, each shown under it.
+        self.comment_lines = self.place_comments(&mut out, &mut owner, &mut thinking_lines, &mut find_targets, t, k);
+        self.find_targets = find_targets;
+        // Places in the code are links, wherever they are in the chat.
+        for l in &mut out {
+            if l.image.is_none() {
+                l.links.extend(code_links(&l.text));
+            }
         }
         self.lines = out;
         self.line_entry = owner;
@@ -1144,6 +1283,9 @@ fn table_alignments(line: &str) -> Option<Vec<egui::Align>> {
 pub enum Measure<'a> {
     Fonts(&'a egui::Context, &'a crate::theme::Theme),
     Chars(f32),
+    /// Tests: as `Chars`, but a `1` half as wide (a proportional font's digits).
+    #[cfg(test)]
+    NarrowOne(f32),
 }
 
 impl Measure<'_> {
@@ -1151,6 +1293,8 @@ impl Measure<'_> {
         match self {
             _ if text.is_empty() => 0.0,
             Measure::Chars(w) => text.chars().count() as f32 * w,
+            #[cfg(test)]
+            Measure::NarrowOne(w) => text.chars().map(|c| if c == '1' { w / 2.0 } else { *w }).sum(),
             Measure::Fonts(ctx, theme) => {
                 let job = crate::text::layout_job(&StyledLine::new(text, face), theme, f32::INFINITY);
                 ctx.fonts_mut(|f| f.layout_job(job)).size().x
@@ -1158,10 +1302,24 @@ impl Measure<'_> {
         }
     }
 
+    /// `text` with its spans' faces (code, bold), as it is drawn.
+    fn width_styled(&self, text: &str, spans: &[(Range<usize>, Face)], face: Face) -> f32 {
+        match self {
+            _ if text.is_empty() => 0.0,
+            Measure::Fonts(ctx, theme) => {
+                let job = crate::text::layout_job(&StyledLine::new(text, face).spans(spans.to_vec()), theme, f32::INFINITY);
+                // Code at the end leaves its chip's room after it, taken by what follows.
+                let room = if spans.iter().any(|(r, f)| *f == Face::InlineCode && r.end >= text.len()) { crate::text::CHIP_PAD } else { 0.0 };
+                ctx.fonts_mut(|f| f.layout_job(job)).size().x + room
+            }
+            _ => self.width(text, face),
+        }
+    }
+
     fn scale(&self) -> f32 {
         match self {
             Measure::Fonts(_, t) => t.ui_scale(),
-            Measure::Chars(_) => 1.0,
+            _ => 1.0,
         }
     }
 }
@@ -1217,7 +1375,50 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
     let face_of = |row: usize| if row == 0 { Face::Bold } else { Face::AssistantText };
     let all: Vec<&Vec<(String, Vec<(Range<usize>, Face)>)>> = std::iter::once(&head).chain(&body).collect();
     let cell = |r: usize, c: usize| all[r].get(c).map(|(s, _)| s.as_str()).unwrap_or("");
-    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| m.width(cell(r, c), face_of(r))).fold(0.0, f32::max)).collect();
+    // Digits as wide as the font's widest (tabular figures), so numbers in a column line up:
+    // "71%" over "78%". Each is centered in that width by space around it (not in code, whose
+    // digits are already). The room it adds, and where it goes in `range` of a cell.
+    let slots = std::cell::RefCell::new(Vec::<(Face, f32)>::new());
+    let slot = |face: Face| -> f32 {
+        if let Some((_, w)) = slots.borrow().iter().find(|(f, _)| *f == face) {
+            return *w;
+        }
+        let w = ('0'..='9').map(|d| m.width(d.encode_utf8(&mut [0; 4]), face)).fold(0.0, f32::max);
+        slots.borrow_mut().push((face, w));
+        w
+    };
+    let figures = |r: usize, c: usize, range: Range<usize>| -> (f32, Vec<(usize, f32)>) {
+        let (src, spans) = all[r].get(c).map(|(s, sp)| (s.as_str(), sp.as_slice())).unwrap_or(("", &[]));
+        let (mut extra, mut pads, mut carry) = (0.0, Vec::new(), 0.0);
+        for (i, ch) in src[range.clone()].char_indices() {
+            let face = spans.iter().find(|(sr, _)| sr.contains(&(range.start + i))).map_or(face_of(r), |(_, f)| *f);
+            if !ch.is_ascii_digit() || face == Face::InlineCode {
+                if carry > 0.0 {
+                    pads.push((i, carry));
+                    carry = 0.0;
+                }
+                continue;
+            }
+            let room = (slot(face) - m.width(&src[range.start + i..range.start + i + 1], face)).max(0.0);
+            pads.push((i, carry + room / 2.0));
+            carry = room / 2.0;
+            extra += room;
+        }
+        (extra, pads)
+    };
+    // A cell's text in `range` as it is drawn: its code and bold in their own fonts.
+    let drawn = |r: usize, c: usize, range: Range<usize>| -> f32 {
+        let Some((src, spans)) = all[r].get(c) else { return 0.0 };
+        let spans: Vec<(Range<usize>, Face)> = spans
+            .iter()
+            .filter_map(|(sr, f)| {
+                let (a, b) = (sr.start.max(range.start), sr.end.min(range.end));
+                (a < b).then(|| (a - range.start..b - range.start, *f))
+            })
+            .collect();
+        m.width_styled(&src[range], &spans, face_of(r))
+    };
+    let natural: Vec<f32> = (0..cols).map(|c| (0..all.len()).map(|r| drawn(r, c, 0..cell(r, c).len()) + figures(r, c, 0..cell(r, c).len()).0).fold(0.0, f32::max)).collect();
     let minimum: Vec<f32> = (0..cols)
         .map(|c| {
             let word = (0..all.len()).flat_map(|r| cell(r, c).split(' ').map(move |w| (r, w))).map(|(r, w)| m.width(w, face_of(r))).fold(0.0, f32::max);
@@ -1256,7 +1457,8 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
                 let (src, src_spans) = row.get(c).cloned().unwrap_or_default();
                 let range = wrapped[c].get(li).cloned().unwrap_or(0..0);
                 let seg = &src[range.clone()];
-                let w = m.width(seg, face);
+                let (extra, digits) = figures(r, c, range.clone());
+                let w = drawn(r, c, range.clone()) + extra;
                 let slack = (widths[c] - w).max(0.0);
                 let align = match aligns.get(c).copied().unwrap_or(egui::Align::Min) {
                     egui::Align::Max => slack,
@@ -1265,6 +1467,7 @@ fn table_lines(header: &str, aligns: &[egui::Align], rows: &[&str], t: &crate::t
                 };
                 let at = text.len();
                 pads.push((at, (col_x[c] + align - x).max(0.0)));
+                pads.extend(digits.into_iter().map(|(o, p)| (at + o, p)));
                 text.push_str(seg);
                 for (sr, f) in src_spans {
                     let (s0, s1) = (sr.start.max(range.start), sr.end.min(range.end));
@@ -1318,7 +1521,231 @@ fn list_item(raw: &str) -> Option<(usize, String, &str)> {
 }
 
 /// Markdown to styled lines for a column `avail` points wide.
-fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) -> Vec<StyledLine> {
+/// The reports in a transcript: in each run (from a prompt to the next), the last assistant
+/// message with text, once the run is over and if it has at least `min_words`. Entry index →
+/// its words. Prompts sent while a run goes on (queued) steer it rather than end it.
+fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap<usize, usize> {
+    let words = |e: &Entry| match e {
+        Entry::Assistant { blocks, .. } => blocks.iter().map(|b| if let AssistantContent::Text { text, .. } = b { text.split_whitespace().count() } else { 0 }).sum(),
+        _ => 0,
+    };
+    let mut out = HashMap::new();
+    let mut last: Option<usize> = None;
+    let mut finish = |last: &mut Option<usize>| {
+        if let Some(i) = last.take() {
+            let n = words(&entries[i]);
+            if n >= min_words {
+                out.insert(i, n);
+            }
+        }
+    };
+    for (i, e) in entries.iter().enumerate() {
+        match e {
+            Entry::User { queued: false, .. } => finish(&mut last),
+            Entry::Assistant { .. } if words(e) > 0 => last = Some(i),
+            _ => {}
+        }
+    }
+    if !running {
+        finish(&mut last);
+    }
+    out
+}
+
+/// How a report written to the report skill (skills/report) turned out: its first word.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    Done,
+    Partly,
+    Blocked,
+}
+
+impl Outcome {
+    fn badge(self) -> (&'static str, Face) {
+        match self {
+            Outcome::Done => ("Done", Face::BadgeGood),
+            Outcome::Partly => ("Partly done", Face::BadgeWarn),
+            Outcome::Blocked => ("Blocked", Face::BadgeBad),
+        }
+    }
+}
+
+/// A report in the report skill's shape: the outcome, its first sentence (the headline), the
+/// rest of the opening, then its `##` sections in order (title, body).
+#[derive(Debug)]
+struct Shaped {
+    outcome: Outcome,
+    headline: String,
+    intro: String,
+    sections: Vec<(String, String)>,
+}
+
+impl Shaped {
+    /// Items under "Needs you".
+    fn needs_you(&self) -> usize {
+        self.sections.iter().filter(|(t, _)| t.eq_ignore_ascii_case("needs you")).map(|(_, b)| top_items(b)).sum()
+    }
+}
+
+/// Top-level list items in markdown.
+fn top_items(body: &str) -> usize {
+    body.lines().filter(|l| !l.starts_with(' ') && list_item(l).is_some()).count()
+}
+
+/// `text` read as a report written to the report skill: it opens with `Done`, `Partly done`
+/// or `Blocked` and a colon. None for anything else (it is shown as plain markdown).
+fn shaped_report(text: &str) -> Option<Shaped> {
+    let text = text.trim_start();
+    let (head, body) = match text.find("\n## ") {
+        Some(i) => (&text[..i], &text[i + 1..]),
+        None => (text, ""),
+    };
+    let (first, rest) = head.split_once("\n\n").unwrap_or((head, ""));
+    let first = first.trim().trim_start_matches("**");
+    let lower = first.to_lowercase();
+    let (outcome, n) = [("partly done", Outcome::Partly), ("partially done", Outcome::Partly), ("done", Outcome::Done), ("blocked", Outcome::Blocked)]
+        .into_iter()
+        .find(|(w, _)| lower.starts_with(w))
+        .map(|(w, o)| (o, w.len()))?;
+    let after = first[n..].trim_start_matches("**");
+    let after = after.strip_prefix(':').or_else(|| after.strip_prefix(" —")).or_else(|| after.strip_prefix(" -"))?.trim_start();
+    // The headline is the first sentence (a period and a space, outside inline code).
+    let mut code = false;
+    let mut cut = after.len();
+    for (i, c) in after.char_indices() {
+        if c == '`' {
+            code = !code;
+        } else if !code && c == '.' && after[i + 1..].starts_with(' ') {
+            cut = i + 1;
+            break;
+        }
+    }
+    let mut headline = after[..cut].trim().to_string();
+    if let Some(c) = headline.chars().next().filter(|c| c.is_lowercase()) {
+        headline.replace_range(..c.len_utf8(), &c.to_uppercase().to_string());
+    }
+    let intro = [after[cut..].trim(), rest.trim()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
+    let sections = if body.is_empty() {
+        Vec::new()
+    } else {
+        body.split("\n## ")
+            .map(|part| {
+                let part = part.strip_prefix("## ").unwrap_or(part);
+                let (title, rest) = part.split_once('\n').unwrap_or((part, ""));
+                (title.trim().to_string(), rest.to_string())
+            })
+            .collect()
+    };
+    Some(Shaped { outcome, headline, intro, sections })
+}
+
+/// What a check under "Checked" found, from the first word of its result ("**Tests:**
+/// passes"): ✓, ✗, or ○ for what was not checked. None when it can't tell (a plain bullet).
+fn check_mark(text: &str) -> Option<(&'static str, Face)> {
+    let lower = text.trim().to_lowercase();
+    if ["not checked", "not tested", "not run", "unchecked", "untested"].iter().any(|p| lower.starts_with(p)) {
+        return Some(("○", Face::MetaWarn));
+    }
+    let result = lower.split_once(':').map_or(lower.as_str(), |(_, r)| r).trim_start();
+    match result.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("") {
+        "pass" | "passes" | "passed" | "passing" | "ok" | "works" | "worked" | "succeeds" | "succeeded" | "green" | "clean" => Some(("✓", Face::ToolOk)),
+        "fail" | "fails" | "failed" | "failing" | "broken" | "breaks" | "errors" | "red" => Some(("✗", Face::ToolError)),
+        _ => None,
+    }
+}
+
+/// A report in the skill's shape, drawn as its parts: the headline a size up, "Needs you" as a
+/// callout card, checks marked by what they found, each section's heading with its count.
+/// Prose wraps at `measure` and is `scale` times its usual size.
+#[allow(clippy::too_many_arguments)]
+fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, surface: Color32, measure: Option<f32>, scale: f32, diagrams: bool) -> Vec<StyledLine> {
+    let k = m.scale();
+    let prose = |l: &mut StyledLine, s: f32| {
+        if !is_prose(l) {
+            return;
+        }
+        l.measure = measure.map(|w| w * s);
+        if s != 1.0 {
+            l.scale = Some(s);
+        }
+    };
+    let mut out = Vec::new();
+    let (text, spans) = inline_spans(&sh.headline);
+    // A size up from the text, a little under the section headings, with a heading's leading.
+    let mut headline = StyledLine::new(text, Face::Heading).spans(spans).gap(6.0 * k).pad(0.0, 6.0 * k);
+    prose(&mut headline, scale * 0.9);
+    out.push(headline);
+    for mut l in markdown_lines(&sh.intro, t, m, avail, diagrams) {
+        prose(&mut l, scale);
+        out.push(l);
+    }
+    for (title, body) in &sh.sections {
+        let kind = title.to_lowercase();
+        let needs = kind == "needs you";
+        let items = top_items(body);
+        let mut head = StyledLine::new(title.clone(), Face::Heading).gap(30.0 * k).pad(0.0, if needs { 8.0 } else { 2.0 } * k);
+        if items > 0 && ["needs you", "changed", "checked", "not done"].contains(&kind.as_str()) {
+            let at = head.text.len();
+            head.text.push_str(&format!("   {items}"));
+            head.spans.push((at..head.text.len(), if needs { Face::MetaWarn } else { Face::Meta }));
+        }
+        prose(&mut head, scale);
+        out.push(head);
+        // Needs you's card takes its indent from the column.
+        let inset = if needs { 16.0 * k } else { 0.0 };
+        let mut lines = markdown_lines(body, t, m, avail - inset, diagrams);
+        if needs {
+            // A card the eye finds first: raised a little from the report, with a trace of the
+            // theme's warning color and a bar of it (more of it muddies: tan, olive).
+            let raised = crate::themes::mix(surface, t.fg, if t.dark { 0.04 } else { 0.0 });
+            let card = Block::new(crate::themes::mix(raised, t.yellow, if t.dark { 0.05 } else { 0.07 })).bar(t.yellow);
+            let n = lines.len();
+            for (i, l) in lines.iter_mut().enumerate() {
+                prose(l, scale);
+                l.block = Some(card.nth(i, n));
+                l.indent += inset;
+                if i == 0 {
+                    l.gap_above = 0.0;
+                    l.pad_top += 12.0 * k;
+                }
+                if i + 1 == n {
+                    l.pad_bottom += 12.0 * k;
+                }
+            }
+        } else {
+            for l in lines.iter_mut() {
+                prose(l, scale);
+                if kind == "checked" && l.marker.is_some() {
+                    if let Some((mark, face)) = check_mark(&l.text) {
+                        l.marker = Some((mark.to_string(), face));
+                    }
+                }
+            }
+        }
+        out.extend(lines);
+    }
+    // The theme's border is drawn against its background: on the report's surface, the same
+    // step from it, so tables' and code's edges show.
+    let edge = crate::themes::mix(surface, t.fg, 0.18);
+    for l in out.iter_mut() {
+        if let Some(b) = l.block.as_mut().filter(|b| b.border == Some(t.border)) {
+            b.border = Some(edge);
+        }
+        if l.rule_below == Some(t.border) {
+            l.rule_below = Some(edge);
+        }
+    }
+    out
+}
+
+/// Whether a line is prose, to take a report's size and wrap at chat-measure. Tables, code and
+/// diagrams keep their size and the width they were laid out for (a table's rows are bordered
+/// cards with no fill; a quote's lines have a bar and no border, and are prose).
+fn is_prose(l: &StyledLine) -> bool {
+    l.diagram.is_none() && l.block.is_none_or(|b| b.bg == Color32::TRANSPARENT && b.border.is_none())
+}
+
+fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32, diagrams: bool) -> Vec<StyledLine> {
     let k = m.scale();
     let mut out: Vec<StyledLine> = Vec::new();
     let src: Vec<&str> = text.split('\n').collect();
@@ -1346,9 +1773,26 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
                 i += 1;
             }
             i += 1;
+            // A Mermaid diagram, drawn (chat-diagrams); one that can't be is shown as code, saying so.
+            let mut caption = lang.clone();
+            if diagrams && lang.eq_ignore_ascii_case("mermaid") {
+                let src = code.join("\n");
+                let font_px = t.format(Face::AssistantText).font_id.size;
+                match crate::diagram::layout(&src, font_px, &mut |s| m.width(s, Face::AssistantText), avail) {
+                    Ok(placed) => {
+                        // Centered in the column, like a figure; copied, it is its source again.
+                        let side = ((avail - placed.size().x) / 2.0).max(0.0);
+                        out.push(StyledLine::new(format!("```mermaid\n{src}\n```"), Face::Meta).diagram(placed).indent(side).gap(gap.max(16.0 * k)).pad(4.0 * k, 4.0 * k));
+                        gap = 16.0 * k;
+                        prev_list = false;
+                        continue;
+                    }
+                    Err(e) => caption = format!("mermaid · not drawn: {e}"),
+                }
+            }
             let mut lines: Vec<StyledLine> = Vec::new();
-            if !lang.is_empty() {
-                lines.push(StyledLine::new(lang.clone(), Face::Meta).pad(8.0 * k, 0.0));
+            if !caption.is_empty() {
+                lines.push(StyledLine::new(caption, Face::Meta).pad(8.0 * k, 0.0));
             }
             let hl = crate::highlight::highlight(&lang, &code, Face::Code).unwrap_or_default();
             lines.extend(code.iter().enumerate().map(|(j, l)| StyledLine::new(*l, Face::Code).spans(hl.get(j).cloned().unwrap_or_default())));
@@ -1397,7 +1841,8 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
             let level = 1 + h.chars().take_while(|c| *c == '#').count();
             let (s, spans) = inline_spans(h.trim_start_matches('#').trim());
             let face = if level <= 2 { Face::Heading } else { Face::Bold };
-            out.push(StyledLine::new(s, face).spans(spans).gap(gap.max(if level <= 2 { 18.0 } else { 14.0 } * k)).pad(0.0, 4.0 * k));
+            // More room above than below, so a heading reads as the start of its section.
+            out.push(StyledLine::new(s, face).spans(spans).gap(gap.max(if level <= 2 { 30.0 } else { 22.0 } * k)).pad(0.0, 2.0 * k));
             gap = 0.0;
             prev_list = false;
             continue;
@@ -1424,6 +1869,39 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) 
         prev_list = false;
     }
     out
+}
+
+/// The places in the code a line of a chat names (`src/main.rs:12`, in prose or inline code,
+/// your messages, thinking, or what a tool printed: grep's `src/a.rs:12:`, a compiler's
+/// `--> src/main.rs:12:5`), as links: character columns and the reference.
+fn code_links(text: &str) -> Vec<(Range<usize>, String)> {
+    let mut out = Vec::new();
+    let mut col = 0;
+    for word in text.split_inclusive(char::is_whitespace) {
+        let n = word.chars().count();
+        // Brackets, quotes and punctuation around it aren't part of it.
+        let core = word.trim_end().trim_start_matches(['(', '[', '{', '<', '"', '\'', '`']).trim_end_matches([')', ']', '}', '>', '"', '\'', '`', ',', ';', '.', ':']);
+        if let Some(at) = word.find(core).filter(|_| code_ref(core).is_some()) {
+            let start = col + word[..at].chars().count();
+            out.push((start..start + core.chars().count(), core.to_string()));
+        }
+        col += n;
+    }
+    out
+}
+
+/// A place in the code, as agents cite it: `path:line`, also `path:line-line` and
+/// `path:line:column`. The path has a `/` or a `.` and no spaces. (path, line).
+fn code_ref(s: &str) -> Option<(String, u32)> {
+    let (path, rest) = s.trim().split_once(':')?;
+    if path.is_empty() || path.contains(char::is_whitespace) || !(path.contains('/') || path.contains('.')) {
+        return None;
+    }
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let line: u32 = rest[..digits].parse().ok().filter(|n| *n > 0)?;
+    let tail = &rest[digits..];
+    let ok = tail.is_empty() || ((tail.starts_with('-') || tail.starts_with(':')) && tail.len() > 1 && tail[1..].chars().all(|c| c.is_ascii_digit()));
+    ok.then(|| (path.trim_start_matches("./").to_string(), line))
 }
 
 /// Highlight spans moved right by `by` bytes (past a prefix the code didn't have).
@@ -2130,6 +2608,680 @@ impl LineSource for Lines<'_> {
     }
 }
 
+/// What was clicked in the composer's review header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReviewAct {
+    Save,
+    SendNow,
+    Cancel,
+    Kind,
+    Toggle,
+    Discard,
+    Edit(u64),
+    Delete(u64),
+}
+
+/// A review serpis sent, drawn in your bubble: what it is, then each comment (its kind, where it
+/// is as a link back to it, what it quotes, what you wrote), then what was typed with it.
+fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut Vec<(String, usize, bool)>, k: f32) -> Vec<StyledLine> {
+    use crate::chat_review::Ask;
+    let mut out = Vec::new();
+    let questions = sent.items.iter().filter(|i| i.ask == Ask::Question).count();
+    let changes = sent.items.len() - questions;
+    let mut parts = Vec::new();
+    if questions > 0 {
+        parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
+    }
+    if changes > 0 {
+        parts.push(format!("{changes} {}", if sent.compared.is_some() { if changes == 1 { "fix" } else { "fixes" } } else if changes == 1 { "change" } else { "changes" }));
+    }
+    let head = match &sent.compared {
+        Some(c) => format!("Review of {c}"),
+        None => "Review".to_string(),
+    };
+    let text = if parts.is_empty() { head.clone() } else { format!("{head}  ·  {}", parts.join(", ")) };
+    out.push(StyledLine::new(text, Face::Label).spans(vec![(0..head.len(), Face::Accent)]));
+    for it in &sent.items {
+        let (kind, face) = match (it.ask, sent.compared.is_some()) {
+            (Ask::Question, _) => ("Question", Face::Accent),
+            (Ask::Fix, true) => ("Fix", Face::MetaWarn),
+            (Ask::Fix, false) => ("Change", Face::MetaWarn),
+        };
+        let place = if sent.compared.is_some() { it.place.clone() } else if it.place.is_empty() { "↑ in the report".to_string() } else { format!("↑ {}", it.place) };
+        let mut l = StyledLine::new(format!("{kind}   {place}"), Face::Meta).spans(vec![(0..kind.len(), face)]);
+        l.pad_top = 10.0 * k;
+        if sent.compared.is_none() && !it.quote.is_empty() {
+            targets.push((it.quote.join("\n"), ei, false));
+            let at = kind.chars().count() + 3;
+            l.links.push((at..at + place.chars().count(), format!("find:{}", targets.len() - 1)));
+        }
+        out.push(l);
+        let shown = it.quote.len().min(3);
+        for (j, q) in it.quote.iter().take(shown).enumerate() {
+            let more = if j + 1 == shown && it.quote.len() > shown { " …" } else { "" };
+            out.push(StyledLine::new(format!("│ {q}{more}"), if it.code { Face::CodeDim } else { Face::Dim }));
+        }
+        out.extend(it.text.lines().map(|t| StyledLine::new(t, Face::UserText)));
+    }
+    if !sent.also.is_empty() {
+        let mut l = StyledLine::new("Also", Face::Label);
+        l.pad_top = 10.0 * k;
+        out.push(l);
+        out.extend(sent.also.lines().map(|t| StyledLine::new(t, Face::UserText)));
+    }
+    out
+}
+
+/// The text of an assistant entry (its text blocks).
+fn entry_text(e: &Entry) -> String {
+    match e {
+        Entry::Assistant { blocks, .. } => blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n\n"),
+        _ => String::new(),
+    }
+}
+
+/// Where `quote` is in entry `entry`'s lines of `out`: (line, character columns) for each line it
+/// touches. Lines are joined with newlines, as a selection across them reads.
+fn locate_quote(out: &[StyledLine], owner: &[Option<usize>], entry: usize, quote: &str) -> Option<Vec<(usize, Range<usize>)>> {
+    let quote = quote.trim();
+    if quote.is_empty() {
+        return None;
+    }
+    let idx: Vec<usize> = (0..out.len()).filter(|i| owner.get(*i).copied().flatten() == Some(entry)).collect();
+    let joined = idx.iter().map(|i| out[*i].text.as_str()).collect::<Vec<_>>().join("\n");
+    let at = joined.find(quote)?;
+    let end = at + quote.len();
+    let mut segments = Vec::new();
+    let mut pos = 0;
+    for i in idx {
+        let t = &out[i].text;
+        let (s, e) = (pos, pos + t.len());
+        let (a, b) = (at.max(s), end.min(e));
+        if a < b {
+            segments.push((i, t[..a - s].chars().count()..t[..b - s].chars().count()));
+        }
+        pos = e + 1;
+    }
+    Some(segments)
+}
+
+impl ChatBuffer {
+    fn review_machine(&self) -> Option<String> {
+        (!self.node.local()).then(|| self.node.machine.clone())
+    }
+
+    /// Read this chat's saved review, once. A comment that was being written comes back to the
+    /// composer.
+    fn ensure_review(&mut self) {
+        if self.node.chat.is_empty() || self.review_key.as_deref() == Some(self.node.chat.as_str()) {
+            return;
+        }
+        self.review_key = Some(self.node.chat.clone());
+        self.commenting = None;
+        self.review = crate::chat_review::load(self.review_machine().as_deref(), &self.node.chat);
+        let aside = self.review.aside.take();
+        if let Some(w) = self.review.writing.take() {
+            if self.commenting.is_none() {
+                let stash = aside.unwrap_or_else(|| self.prompt.text());
+                self.prompt.set_text(&w.text);
+                self.prompt.move_to_end();
+                self.writing_saved = (w.text.clone(), Some(Instant::now()));
+                self.commenting = Some((w, stash));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Keep the review (and the comment being written) on disk.
+    pub fn persist_review(&mut self, ed: &mut Editor) {
+        let Some(key) = self.review_key.clone() else { return };
+        let text = self.prompt.text();
+        let mut saved = self.review.clone();
+        saved.writing = self.commenting.as_ref().map(|(w, _)| crate::chat_review::Writing { text: text.clone(), ..w.clone() });
+        saved.aside = self.commenting.as_ref().map(|(_, aside)| aside.clone()).filter(|a| !a.is_empty());
+        if let Err(e) = crate::chat_review::save(self.review_machine().as_deref(), &key, &saved) {
+            ed.warn(format!("Couldn't save the review: {e:#}"));
+        }
+        self.writing_saved = (text, Some(Instant::now()));
+    }
+
+    /// The transcript's lines as drawn, for tests: text, marker, whether on a surface (a
+    /// report's), in a card (and its color), scale, links and marks.
+    pub fn lines_json(&mut self, ed: &Editor) -> Value {
+        if self.dirty {
+            self.rebuild(ed);
+        }
+        Value::Array(
+            self.lines
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "text": l.text,
+                        "marker": l.marker.as_ref().map(|(m, _)| m.clone()),
+                        "surface": l.backdrop.is_some(),
+                        "card": l.block.map(|b| crate::themes::hex(b.bg)),
+                        "border": l.block.and_then(|b| b.border).map(crate::themes::hex),
+                        "measure": l.measure,
+                        "bar": l.block.and_then(|b| b.bar).map(crate::themes::hex),
+                        "scale": l.scale,
+                        "links": l.links.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+                        "marks": l.marks.len(),
+                        "diagram": l.diagram.as_ref().map(|d| serde_json::json!({
+                            "kind": d.diagram.kind,
+                            "width": d.size().x,
+                            "height": d.size().y,
+                            "text": d.text,
+                            "nodes": d.diagram.nodes.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                        })),
+                        "column": self.text_w,
+                        "indent": l.indent,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// The review as scripts see it.
+    pub fn review_json(&mut self) -> Value {
+        self.ensure_review();
+        let text = self.prompt.text();
+        serde_json::json!({
+            "comments": self.review.comments.iter().map(crate::chat_review::to_json).collect::<Vec<_>>(),
+            "drafts": self.review.drafts().len(),
+            "writing": self.commenting.as_ref().map(|(w, _)| serde_json::json!({"quote": w.quote, "label": w.label, "kind": w.ask.name(), "text": text, "id": w.id})),
+        })
+    }
+
+    /// The transcript's selection in order, else the cursor's whole line.
+    fn selected_range(&self) -> (Pos, Pos) {
+        let c = self.view.cursor;
+        match self.view.anchor.filter(|a| *a != c) {
+            Some(a) if a < c => (a, c),
+            Some(a) => (c, a),
+            None => (Pos::new(c.line, 0), Pos::new(c.line, char_len(self.lines.get(c.line).map_or("", |l| l.text.as_str())))),
+        }
+    }
+
+    /// The transcript's text from `a` to `b`, lines joined with newlines.
+    fn quote_of(&self, a: Pos, b: Pos) -> String {
+        let mut out = Vec::new();
+        for i in a.line..=b.line.min(self.lines.len().saturating_sub(1)) {
+            let t: Vec<char> = self.lines[i].text.chars().collect();
+            let s = if i == a.line { a.col.min(t.len()) } else { 0 };
+            let e = if i == b.line { b.col.min(t.len()) } else { t.len() };
+            out.push(t[s..e.max(s)].iter().collect::<String>());
+        }
+        out.join("\n").trim().to_string()
+    }
+
+    /// Where transcript line `line` of entry `entry` is, by its headings: "Changed 1" for the
+    /// first item under "Changed", "Summary" for a paragraph under it; empty outside sections.
+    fn label_at(&self, line: usize, entry: usize) -> String {
+        let text = self.entries.get(entry).map(entry_text).unwrap_or_default();
+        let titles: Vec<String> = text.lines().filter_map(|l| l.trim_start().strip_prefix('#').map(|h| h.trim_start_matches('#').trim().to_string())).filter(|t| !t.is_empty()).collect();
+        // A heading line: its title (a report's has its count after it).
+        let heading = |l: &StyledLine| -> Option<String> {
+            if l.marker.is_some() {
+                return None;
+            }
+            titles.iter().find(|t| l.text == **t || l.text.strip_prefix(t.as_str()).is_some_and(|r| !r.trim().is_empty() && r.trim().chars().all(|c| c.is_ascii_digit()))).cloned()
+        };
+        let Some(here) = self.lines.get(line) else { return String::new() };
+        let item = here.marker.is_some();
+        let mut count = 0;
+        let mut i = line;
+        loop {
+            let Some(l) = self.lines.get(i) else { return String::new() };
+            if self.line_entry.get(i).copied().flatten() != Some(entry) {
+                return String::new();
+            }
+            if let Some(title) = heading(l) {
+                return if item { format!("{title} {count}") } else { title };
+            }
+            if item && l.marker.is_some() && l.indent == here.indent {
+                count += 1;
+            }
+            if i == 0 {
+                return String::new();
+            }
+            i -= 1;
+        }
+    }
+
+    /// Start a comment on the transcript's selection (or the cursor's line): written in the
+    /// composer, what was being typed there kept aside.
+    pub fn start_comment(&mut self, ed: &mut Editor, ask: crate::chat_review::Ask) {
+        self.ensure_review();
+        if self.commenting.is_some() {
+            self.focus = Focus::Prompt;
+            return;
+        }
+        let (a, b) = self.selected_range();
+        let entry = self.line_entry.get(a.line).copied().flatten().filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. })));
+        let Some(entry) = entry else {
+            ed.message("Select part of what the agent wrote to comment on it");
+            return;
+        };
+        let quote = self.quote_of(a, b);
+        if quote.is_empty() {
+            ed.message("Select part of what the agent wrote to comment on it");
+            return;
+        }
+        let label = self.label_at(a.line, entry);
+        let opening = crate::chat_review::opening_of(&entry_text(&self.entries[entry]));
+        let stash = self.prompt.text();
+        self.prompt.set_text("");
+        self.commenting = Some((crate::chat_review::Writing { id: None, entry, quote, label, opening, ask, text: String::new() }, stash));
+        self.view.anchor = None;
+        self.focus = Focus::Prompt;
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Change a saved comment, in the composer.
+    pub fn edit_comment(&mut self, ed: &mut Editor, id: u64) {
+        self.ensure_review();
+        if self.commenting.is_some() {
+            self.save_comment(ed);
+        }
+        let Some(c) = self.review.comments.iter().find(|c| c.id == id && c.state == crate::chat_review::State::Draft).cloned() else { return };
+        let stash = self.prompt.text();
+        self.prompt.set_text(&c.text);
+        self.prompt.move_to_end();
+        self.commenting = Some((crate::chat_review::Writing { id: Some(id), entry: c.entry, quote: c.quote, label: c.label, opening: c.opening, ask: c.ask, text: String::new() }, stash));
+        self.focus = Focus::Prompt;
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Stop writing the comment: what it says, with the composer given back what it had.
+    fn end_comment(&mut self) -> Option<crate::chat_review::Writing> {
+        let (w, stash) = self.commenting.take()?;
+        let text = self.prompt.text();
+        self.prompt.set_text(&stash);
+        self.prompt.move_to_end();
+        self.dirty = true;
+        Some(crate::chat_review::Writing { text, ..w })
+    }
+
+    /// Keep the comment being written in the review (emptied, a saved one is deleted).
+    pub fn save_comment(&mut self, ed: &mut Editor) {
+        if let Some(w) = self.end_comment() {
+            self.review.keep(&w);
+        }
+        self.persist_review(ed);
+    }
+
+    pub fn cancel_comment(&mut self, ed: &mut Editor) {
+        self.end_comment();
+        self.persist_review(ed);
+    }
+
+    /// Send the comment being written now, on its own.
+    pub fn send_comment_now(&mut self, ed: &mut Editor) {
+        if self.commenting.as_ref().is_some() && self.prompt.text().trim().is_empty() {
+            ed.message("Write the comment first");
+            return;
+        }
+        let Some(w) = self.end_comment() else { return };
+        let Some(id) = self.review.keep(&w) else { return };
+        let Some(c) = self.review.comments.iter_mut().find(|c| c.id == id) else { return };
+        c.state = crate::chat_review::State::Sent;
+        let message = crate::chat_review::prompt(&[&*c], "");
+        self.persist_review(ed);
+        self.submit(ed, message, false);
+    }
+
+    /// Question or change: the other one, or `set`.
+    pub fn cycle_comment_kind(&mut self, set: Option<crate::chat_review::Ask>) {
+        use crate::chat_review::Ask;
+        if let Some((w, _)) = self.commenting.as_mut() {
+            w.ask = set.unwrap_or(if w.ask == Ask::Fix { Ask::Question } else { Ask::Fix });
+            self.dirty = true;
+        }
+    }
+
+    /// Drop the review's drafts. How many there were.
+    pub fn discard_review(&mut self, ed: &mut Editor) -> usize {
+        let n = self.review.drafts().len();
+        self.review.comments.retain(|c| c.state != crate::chat_review::State::Draft);
+        self.review_open = false;
+        self.dirty = true;
+        self.persist_review(ed);
+        n
+    }
+
+    pub fn delete_comment(&mut self, ed: &mut Editor, id: u64) {
+        self.review.comments.retain(|c| c.id != id);
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Mark what each comment quotes and show it under that (cards): the review's drafts, the
+    /// quote of one being written, and comments already sent (read from the review messages in
+    /// the transcript, so they last), each of those with a link to the agent's answer once it
+    /// quotes it, and that quote in the answer marked with a link back. Lines are inserted into
+    /// `out` (with `owner` and the thinking lines moved along); returns the lines that show a
+    /// draft, with its id (a click changes it).
+    #[allow(clippy::too_many_arguments)]
+    fn place_comments(&self, out: &mut Vec<StyledLine>, owner: &mut Vec<Option<usize>>, thinking: &mut [usize], targets: &mut Vec<(String, usize, bool)>, t: &crate::theme::Theme, k: f32) -> Vec<(usize, u64)> {
+        use crate::chat_review::{Ask, State};
+        let color = |ask: Ask| if ask == Ask::Question { t.accent } else { t.yellow };
+        let editing = self.commenting.as_ref().and_then(|(w, _)| w.id);
+        struct Card {
+            id: Option<u64>,
+            state: String,
+            text: String,
+            /// The answer: a `find:` target.
+            reply: Option<usize>,
+        }
+        // (entry it was on, the quote, kind, its card)
+        let mut places: Vec<(usize, String, Ask, Option<Card>)> = Vec::new();
+        for c in self.review.comments.iter().filter(|c| c.state == State::Draft) {
+            let state = if editing == Some(c.id) { "being changed in the composer" } else { "draft · click to change" };
+            places.push((c.entry, c.quote.clone(), c.ask, Some(Card { id: Some(c.id), state: state.into(), text: c.text.clone(), reply: None })));
+        }
+        if let Some((w, _)) = self.commenting.as_ref().filter(|(w, _)| w.id.is_none()) {
+            places.push((w.entry, w.quote.clone(), w.ask, None));
+        }
+        let assistant = |range: &mut dyn Iterator<Item = usize>| -> Vec<usize> { range.filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. }))).collect() };
+        for (ei, e) in self.entries.iter().enumerate() {
+            let Entry::User { text, .. } = e else { continue };
+            let Some(sent) = crate::chat_review::parse_sent(text).filter(|s| s.compared.is_none()) else { continue };
+            for it in sent.items.iter().filter(|it| !it.quote.is_empty()) {
+                let quote = it.quote.join("\n");
+                // What it was about: the agent's message before the review that has it.
+                let Some(on) = assistant(&mut (0..ei).rev()).into_iter().find(|a| locate_quote(out, owner, *a, &quote).is_some()) else { continue };
+                // The answer: a message after it that quotes it (its first line, at least).
+                let first = it.quote[0].trim();
+                let answer = assistant(&mut (ei + 1..self.entries.len())).into_iter().find_map(|a| locate_quote(out, owner, a, first));
+                let reply = answer.as_ref().map(|segments| {
+                    targets.push((first.to_string(), ei, true));
+                    let to = targets.len() - 1;
+                    // The quote in the answer: marked, a link back to what it is about.
+                    targets.push((quote.clone(), ei, false));
+                    let back = format!("find:{}", targets.len() - 1);
+                    for (line, _) in segments {
+                        let l = &mut out[*line];
+                        l.marker = Some(("↑".into(), Face::Accent));
+                        let n = l.text.chars().count();
+                        l.links.push((0..n, back.clone()));
+                    }
+                    to
+                });
+                let state = if reply.is_some() { "sent  ·  answered ↓" } else { "sent" };
+                places.push((on, quote, it.ask, Some(Card { id: None, state: state.into(), text: it.text.clone(), reply })));
+            }
+        }
+        let mut inserts: Vec<(usize, Vec<StyledLine>, Option<u64>)> = Vec::new();
+        for (entry, quote, ask, card) in places {
+            // Where it was, else where that text is now (the transcript moved: a compaction).
+            let found = locate_quote(out, owner, entry, &quote).or_else(|| assistant(&mut (0..self.entries.len()).rev()).into_iter().find_map(|e| locate_quote(out, owner, e, &quote)));
+            let Some(segments) = found else { continue };
+            for (line, r) in &segments {
+                out[*line].marks.push((r.clone(), color(ask)));
+            }
+            let (Some(c), Some((last, _))) = (card, segments.last()) else { continue };
+            let kind = if ask == Ask::Question { "Question" } else { "Change" };
+            let head = format!("{kind}  ·  {}", c.state);
+            let mut first = StyledLine::new(head.clone(), Face::Meta).spans(vec![(0..kind.len(), if ask == Ask::Question { Face::Accent } else { Face::MetaWarn })]);
+            if let Some(to) = c.reply {
+                let label = "answered ↓";
+                if let Some(at) = head.find(label) {
+                    let (s, e) = (head[..at].chars().count(), head[..at].chars().count() + label.chars().count());
+                    first.links.push((s..e, format!("find:{to}")));
+                    first.spans.push((at..at + label.len(), Face::Accent));
+                }
+            }
+            let mut lines = vec![first];
+            lines.extend(c.text.lines().map(|l| StyledLine::new(l, Face::UserText)));
+            let card = Block::new(t.bg_elevated).border(t.border);
+            let n = lines.len();
+            for (i, l) in lines.iter_mut().enumerate() {
+                l.block = Some(card.nth(i, n));
+                l.indent = 14.0 * k;
+                if i == 0 {
+                    l.gap_above = 6.0 * k;
+                    l.pad_top = 7.0 * k;
+                }
+                if i + 1 == n {
+                    l.pad_bottom = 8.0 * k;
+                }
+            }
+            inserts.push((*last, lines, c.id));
+        }
+        inserts.sort_by_key(|i| i.0);
+        let mut shift = 0;
+        let mut placed = Vec::new();
+        for (after, mut lines, id) in inserts {
+            let at = after + 1 + shift;
+            let o = owner.get(after + shift).copied().flatten();
+            // Inside a surface (a report's): on it too, the surface going on under the card.
+            if let Some(b) = out.get(after + shift).and_then(|l| l.backdrop) {
+                let last = lines.len().saturating_sub(1);
+                for (j, l) in lines.iter_mut().enumerate() {
+                    l.backdrop = Some(Block { top: false, bottom: b.bottom && j == last, ..b });
+                }
+                if b.bottom {
+                    if let Some(bd) = out[after + shift].backdrop.as_mut() {
+                        bd.bottom = false;
+                    }
+                }
+            }
+            let n = lines.len();
+            for (j, l) in lines.into_iter().enumerate() {
+                out.insert(at + j, l);
+                owner.insert(at + j, o);
+            }
+            for th in thinking.iter_mut().filter(|th| **th >= at) {
+                *th += n;
+            }
+            if let Some(id) = id {
+                placed.extend((at..at + n).map(|i| (i, id)));
+            }
+            shift += n;
+        }
+        placed
+    }
+
+    /// The bar beside a selection in what the agent wrote: Ask, Comment. What was clicked.
+    fn draw_selection_bar(&self, ui: &mut egui::Ui, painter: &egui::Painter, area: Rect, theme: &crate::theme::Theme, k: f32, rects: &mut Vec<(&'static str, Rect)>) -> Option<crate::chat_review::Ask> {
+        use crate::chat_review::Ask;
+        if self.focus != Focus::Transcript || self.commenting.is_some() {
+            return None;
+        }
+        let anchor = self.view.anchor.filter(|a| *a != self.view.cursor)?;
+        let a = anchor.min(self.view.cursor);
+        let on_agent = self.line_entry.get(a.line).copied().flatten().is_some_and(|e| matches!(self.entries.get(e), Some(Entry::Assistant { .. })));
+        if !on_agent {
+            return None;
+        }
+        let r = self.view.screen_rect(a)?;
+        let small = egui::FontId::proportional(theme.font_size - 1.5);
+        let keyf = egui::FontId::monospace(theme.mono_size - 2.5);
+        let items = [("Ask", "a", Ask::Question), ("Comment", "c", Ask::Fix)];
+        let widths: Vec<f32> = items.iter().map(|(l, key, _)| crate::chrome::text_width(painter, l, small.clone()) + crate::chrome::text_width(painter, key, keyf.clone()) + 28.0 * k).collect();
+        let bar_w = widths.iter().sum::<f32>() + 8.0 * k;
+        // Beside the selection, in the margin prose leaves (chat-measure), so it covers no text;
+        // above the selection where there is no such room.
+        let line_left = self.view.screen_rect(Pos::new(a.line, 0)).map_or(r.left(), |s| s.left());
+        let margin_x = self.lines.get(a.line).and_then(|l| l.measure).map(|m| line_left + m + 16.0 * k);
+        // Above, it is one line tall and covers that line whole (half a line looks struck through).
+        let (x, top, bar_h) = match margin_x.filter(|x| x + bar_w <= area.right() - 8.0 * k) {
+            Some(x) => (x, (r.center().y - 16.0 * k).max(area.top() + 4.0), 32.0 * k),
+            None => {
+                let h = r.height().max(24.0 * k);
+                let above = r.top() - h;
+                let top = if above > area.top() + 4.0 { above } else { r.bottom() };
+                (r.left().clamp(area.left() + 8.0 * k, (area.right() - bar_w - 8.0 * k).max(area.left() + 8.0 * k)), top, h)
+            }
+        };
+        let bar = Rect::from_min_size(egui::pos2(x, top), egui::vec2(bar_w, bar_h));
+        // Over the transcript, whatever is drawn there after it.
+        let painter = &ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.scope_id().with("chat-selection-bar"))).with_clip_rect(area);
+        let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(if theme.dark { 110 } else { 36 }) };
+        painter.add(shadow.as_shape(bar, 8));
+        painter.rect_filled(bar, 8.0 * k, theme.bg_elevated);
+        painter.rect_stroke(bar, 8.0 * k, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+        let mut bx = bar.left() + 4.0 * k;
+        let mut picked = None;
+        for (i, ((label, key, ask), w)) in items.iter().zip(&widths).enumerate() {
+            let b = Rect::from_min_size(egui::pos2(bx, bar.top() + 3.0 * k), egui::vec2(*w, bar_h - 6.0 * k));
+            let resp = ui.interact(b, ui.scope_id().with(("selection-bar", i)), egui::Sense::click());
+            rects.push((if i == 0 { "chat-selection-ask" } else { "chat-selection-comment" }, b));
+            let main = i == 0;
+            if main {
+                painter.rect_filled(b, 6.0 * k, if resp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent });
+            } else if resp.hovered() {
+                painter.rect_filled(b, 6.0 * k, crate::chrome::hover_bg(theme));
+            }
+            let fg = if main { crate::chrome::on(theme.accent, theme) } else { theme.fg };
+            let lw = crate::chrome::text(painter, egui::pos2(b.left() + 10.0 * k, b.center().y), label, small.clone(), fg, *w);
+            crate::chrome::text(painter, egui::pos2(b.left() + 16.0 * k + lw, b.center().y), key, keyf.clone(), if main { fg.gamma_multiply(0.7) } else { theme.fg_faint }, *w);
+            if resp.clicked() {
+                picked = Some(*ask);
+            }
+            bx += w;
+        }
+        picked
+    }
+
+    /// The composer's header: the comment being written (what it quotes, Save, Send now,
+    /// Cancel), or the review waiting to be sent (its count, its list, discard).
+    fn draw_review_header(&self, ui: &mut egui::Ui, painter: &egui::Painter, area: Rect, theme: &crate::theme::Theme, k: f32, rects: &mut Vec<(&'static str, Rect)>) -> Option<ReviewAct> {
+        use crate::chat_review::Ask;
+        let small = egui::FontId::proportional(theme.font_size - 2.0);
+        let mut act = None;
+        let rects = std::cell::RefCell::new(rects);
+        let button = |ui: &mut egui::Ui, right: f32, cy: f32, label: &str, main: bool, key: &'static str| -> (Rect, bool) {
+            let w = crate::chrome::text_width(painter, label, small.clone()) + 20.0 * k;
+            let r = Rect::from_min_max(egui::pos2(right - w, cy - 11.0 * k), egui::pos2(right, cy + 11.0 * k));
+            let resp = ui.interact(r, ui.scope_id().with(("review-button", key)), egui::Sense::click());
+            rects.borrow_mut().push((key, r));
+            let bg = if main { theme.accent } else if resp.hovered() { crate::chrome::hover_bg(theme) } else { theme.chip() };
+            painter.rect_filled(r, 6.0 * k, bg);
+            let fg = if main { crate::chrome::on(theme.accent, theme) } else { theme.fg };
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, label, small.clone(), fg);
+            (r, resp.clicked())
+        };
+        let kind_of = |ask: Ask| if ask == Ask::Question { ("Question", theme.accent) } else { ("Change", theme.yellow) };
+        if let Some((w, _)) = &self.commenting {
+            let cy = area.top() + 11.0 * k;
+            let (kind, kc) = kind_of(w.ask);
+            let kw = crate::chrome::text_width(painter, kind, small.clone());
+            let kr = Rect::from_min_size(egui::pos2(area.left() - 4.0 * k, cy - 11.0 * k), egui::vec2(kw + 8.0 * k, 22.0 * k));
+            let kresp = ui.interact(kr, ui.scope_id().with("review-kind"), egui::Sense::click()).on_hover_text("Question or change (M-k)");
+            if kresp.hovered() {
+                painter.rect_filled(kr, 5.0 * k, crate::chrome::hover_bg(theme));
+            }
+            crate::chrome::text(painter, egui::pos2(area.left(), cy), kind, small.clone(), kc, kw + 1.0);
+            if kresp.clicked() {
+                act = Some(ReviewAct::Kind);
+            }
+            let (r1, save) = button(ui, area.right(), cy, "Save", true, "save");
+            let (r2, now) = button(ui, r1.left() - 6.0 * k, cy, "Send now", false, "now");
+            let (r3, cancel) = button(ui, r2.left() - 6.0 * k, cy, "Cancel", false, "cancel");
+            let place = if w.label.is_empty() { "on the selection".to_string() } else { format!("on {}", w.label) };
+            crate::chrome::text(painter, egui::pos2(area.left() + kw + 8.0 * k, cy), &place, small.clone(), theme.fg_dim, (r3.left() - area.left() - kw - 16.0 * k).max(0.0));
+            // What it quotes: two lines at most, beside a bar of its kind's color.
+            let lines: Vec<&str> = w.quote.lines().collect();
+            let shown = lines.len().clamp(1, 2);
+            let top = area.top() + 26.0 * k;
+            painter.rect_filled(Rect::from_min_size(egui::pos2(area.left(), top), egui::vec2(3.0 * k, shown as f32 * 19.0 * k)), 1.5 * k, kc.gamma_multiply(0.8));
+            for (i, l) in lines.iter().take(shown).enumerate() {
+                let text = if i + 1 == shown && lines.len() > shown { format!("{l} …") } else { l.to_string() };
+                crate::chrome::text(painter, egui::pos2(area.left() + 12.0 * k, top + (i as f32 + 0.5) * 19.0 * k), &text, small.clone(), theme.fg_dim, area.width() - 12.0 * k);
+            }
+            if save {
+                act = Some(ReviewAct::Save);
+            } else if now {
+                act = Some(ReviewAct::SendNow);
+            } else if cancel {
+                act = Some(ReviewAct::Cancel);
+            }
+            return act;
+        }
+        let drafts = self.review.drafts();
+        let row = Rect::from_min_size(area.min, egui::vec2(area.width(), 30.0 * k));
+        painter.rect_filled(row, 7.0 * k, theme.bg_alt);
+        painter.rect_stroke(row, 7.0 * k, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+        let cy = row.center().y;
+        let questions = drafts.iter().filter(|c| c.ask == Ask::Question).count();
+        let changes = drafts.len() - questions;
+        let rw = crate::chrome::text(painter, egui::pos2(row.left() + 10.0 * k, cy), "Review", small.clone(), theme.accent, 80.0 * k);
+        let mut parts = Vec::new();
+        if questions > 0 {
+            parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
+        }
+        if changes > 0 {
+            parts.push(format!("{changes} change{}", if changes == 1 { "" } else { "s" }));
+        }
+        let summary = format!("{} comment{} · {} · sent with your message", drafts.len(), if drafts.len() == 1 { "" } else { "s" }, parts.join(", "));
+        let (rx, discard) = button(ui, row.right() - 4.0 * k, cy, "×", false, "discard");
+        let (rs, toggle) = button(ui, rx.left() - 4.0 * k, cy, if self.review_open { "Hide" } else { "Show" }, false, "toggle");
+        crate::chrome::text(painter, egui::pos2(row.left() + 18.0 * k + rw, cy), &summary, small.clone(), theme.fg_dim, (rs.left() - row.left() - rw - 28.0 * k).max(0.0));
+        if discard {
+            act = Some(ReviewAct::Discard);
+        } else if toggle {
+            act = Some(ReviewAct::Toggle);
+        }
+        if self.review_open {
+            for (i, c) in drafts.iter().enumerate() {
+                let r = Rect::from_min_size(egui::pos2(row.left(), row.bottom() + 4.0 * k + i as f32 * 24.0 * k), egui::vec2(row.width(), 24.0 * k));
+                let cy = r.center().y;
+                let resp = ui.interact(r, ui.scope_id().with(("review-item", c.id)), egui::Sense::click()).on_hover_text("Change it");
+                if resp.hovered() {
+                    painter.rect_filled(r, 5.0 * k, crate::chrome::hover_bg(theme));
+                }
+                let (kind, kc) = kind_of(c.ask);
+                let kw = crate::chrome::text(painter, egui::pos2(r.left() + 10.0 * k, cy), kind, small.clone(), kc, 90.0 * k);
+                let mut x = r.left() + 18.0 * k + kw;
+                if !c.label.is_empty() {
+                    x += crate::chrome::text(painter, egui::pos2(x, cy), &c.label, small.clone(), theme.fg_faint, 140.0 * k) + 10.0 * k;
+                }
+                let xr = Rect::from_center_size(egui::pos2(r.right() - 14.0 * k, cy), egui::vec2(20.0 * k, 20.0 * k));
+                let xresp = ui.interact(xr, ui.scope_id().with(("review-delete", c.id)), egui::Sense::click()).on_hover_text("Delete it");
+                painter.text(xr.center(), egui::Align2::CENTER_CENTER, "×", small.clone(), if xresp.hovered() { theme.fg } else { theme.fg_faint });
+                crate::chrome::text(painter, egui::pos2(x, cy), c.text.lines().next().unwrap_or(""), small.clone(), theme.fg, (xr.left() - x - 8.0 * k).max(0.0));
+                if xresp.clicked() {
+                    act = Some(ReviewAct::Delete(c.id));
+                } else if resp.clicked() {
+                    act = Some(ReviewAct::Edit(c.id));
+                }
+            }
+        }
+        act
+    }
+
+    /// Follow a `find:` link: to the text it names, in the agent's messages before the review
+    /// that has it (or after it, for an answer).
+    fn jump_to_find(&mut self, i: usize) {
+        let Some((text, ei, after)) = self.find_targets.get(i).cloned() else { return };
+        let order: Vec<usize> = if after { (ei + 1..self.entries.len()).collect() } else { (0..ei).rev().collect() };
+        let found = order.into_iter().filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. }))).find_map(|e| locate_quote(&self.lines, &self.line_entry, e, &text));
+        if let Some((line, r)) = found.and_then(|s| s.into_iter().next()) {
+            self.view.anchor = None;
+            self.view.cursor = Pos::new(line, r.start);
+            self.view.follow_tail = false;
+            self.view.reveal_cursor();
+            self.focus = Focus::Transcript;
+        }
+    }
+
+    /// Height of the composer's header: the comment being written, or the review's row.
+    fn review_header_h(&self, k: f32) -> f32 {
+        if let Some((w, _)) = &self.commenting {
+            let quote_lines = w.quote.lines().count().clamp(1, 2) as f32;
+            return (12.0 + 24.0 + quote_lines * 19.0 + 8.0) * k;
+        }
+        let drafts = self.review.drafts().len();
+        if drafts == 0 {
+            return 0.0;
+        }
+        (40.0 + if self.review_open { drafts as f32 * 24.0 + 6.0 } else { 0.0 }) * k
+    }
+}
+
 impl Buffer for ChatBuffer {
     fn kind(&self) -> &str {
         "chat"
@@ -2145,6 +3297,14 @@ impl Buffer for ChatBuffer {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
+        // The review: read once; a comment being written is kept as it is typed.
+        self.ensure_review();
+        if self.commenting.is_some() {
+            let text = self.prompt.text();
+            if text != self.writing_saved.0 && self.writing_saved.1.is_none_or(|t| t.elapsed() > Duration::from_millis(800)) {
+                self.persist_review(ed);
+            }
+        }
         let show = (ed.var("chat-cache-indicator").and_then(Value::as_bool).unwrap_or(true), ed.var("chat-cache-status").and_then(Value::as_bool).unwrap_or(true));
         if show != self.show_cache {
             self.show_cache = show;
@@ -2170,7 +3330,16 @@ impl Buffer for ChatBuffer {
             }
         }
         let show_thinking = self.show_thinking as u64;
-        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        // Settings that change how the transcript is laid out.
+        let settings = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for name in ["chat-measure", "chat-diagrams", "chat-report", "chat-report-min-words", "chat-report-scale", "chat-report-background"] {
+                ed.var(name).map(Value::to_string).hash(&mut h);
+            }
+            h.finish()
+        };
+        let style_key = ed.theme.layout_key() ^ ed.theme_generation.rotate_left(32) ^ show_thinking.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ settings.rotate_left(17);
         if style_key != self.style_key {
             self.style_key = style_key;
             self.dirty = true;
@@ -2197,7 +3366,9 @@ impl Buffer for ChatBuffer {
         let thumb_h = (56.0 * k).round();
         let att_h = if self.attachments.is_empty() { 0.0 } else { thumb_h + 14.0 * k };
         let left = rect.center().x - col_w / 2.0;
-        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
+        // Above the text: the comment being written, or the review waiting to be sent.
+        let review_h = self.review_header_h(k);
+        let card = Rect::from_min_max(egui::pos2(left, rect.bottom() - 14.0 * k - text_h - toolbar_h - att_h - review_h), egui::pos2(left + col_w, rect.bottom() - 14.0 * k));
         // A tool call waiting for the person: a bar above the composer to answer it.
         let waiting = self.waiting();
         // Else stopped at a usage limit: a bar that says until when, and what happens then.
@@ -2219,11 +3390,38 @@ impl Buffer for ChatBuffer {
         if resp.clicked {
             self.focus = Focus::Transcript;
             if let Some(l) = resp.clicked_line {
-                self.toggle_fold_at(l);
+                // A comment's card: change it.
+                match self.comment_lines.iter().find(|(line, _)| *line == l).map(|(_, id)| *id) {
+                    Some(id) => self.edit_comment(ed, id),
+                    None => {
+                        self.toggle_fold_at(l);
+                    }
+                }
             }
+        }
+        // A link within the chat: what a review's comment is about, or the answer to it.
+        if let Some(i) = resp.link.as_deref().and_then(|l| l.strip_prefix("find:")).and_then(|i| i.parse::<usize>().ok()) {
+            self.jump_to_find(i);
+        }
+        // A code reference: that line, in the diff page of the chat's folder (or the file).
+        // (Its folder is asked for from the main loop: while drawn, the chat is out of its slot.)
+        if let Some((path, line)) = resp.link.as_deref().filter(|l| !l.starts_with("find:")).and_then(code_ref) {
+            ed.main_sender().send(move |ed| match ed.buffer_directory(id) {
+                Some(dir) => crate::diff::show_line(ed, ed.buffer_machine(id), dir.to_string_lossy().into_owned(), &path, line),
+                None => ed.message("This chat has no folder to look in"),
+            });
         }
 
         let painter = ui.painter().clone();
+        // A selection in what the agent wrote: a bar to ask about it or comment on it.
+        let mut bar_rects = Vec::new();
+        let picked = self.draw_selection_bar(ui, &painter, transcript_rect, &theme, k, &mut bar_rects);
+        for (name, r) in bar_rects {
+            ed.debug_rects.insert(name, r);
+        }
+        if let Some(ask) = picked {
+            self.start_comment(ed, ask);
+        }
         let p_focus = focused && self.focus == Focus::Prompt;
         let radius = (14.0 * k).round() as u8;
         // The transcript fades out behind the composer instead of ending at a hard edge.
@@ -2272,7 +3470,27 @@ impl Buffer for ChatBuffer {
             self.attachments.remove(i);
             self.focus = Focus::Prompt;
         }
-        let text_rect = Rect::from_min_max(egui::pos2(card.left(), card.top() + att_h), egui::pos2(card.right(), card.bottom() - toolbar_h));
+        let mut header_rects = Vec::new();
+        let review_act = if review_h > 0.0 { self.draw_review_header(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects) } else { None };
+        for (key, r) in header_rects {
+            ed.debug_rects.insert(match key { "save" => "review-save", "now" => "review-send-now", "cancel" => "review-cancel", "discard" => "review-discard", _ => "review-toggle" }, r);
+        }
+        match review_act {
+            Some(ReviewAct::Save) => self.save_comment(ed),
+            Some(ReviewAct::SendNow) => self.send_comment_now(ed),
+            Some(ReviewAct::Cancel) => self.cancel_comment(ed),
+            Some(ReviewAct::Kind) => self.cycle_comment_kind(None),
+            Some(ReviewAct::Toggle) => self.review_open = !self.review_open,
+            Some(ReviewAct::Discard) => ed.main_sender().send(|ed| ed.call("chat-review-discard")),
+            Some(ReviewAct::Edit(id)) => self.edit_comment(ed, id),
+            Some(ReviewAct::Delete(id)) => self.delete_comment(ed, id),
+            None => {}
+        }
+        if review_act.is_some() {
+            self.focus = Focus::Prompt;
+        }
+        let review_h = self.review_header_h(k).min(review_h);
+        let text_rect = Rect::from_min_max(egui::pos2(card.left(), card.top() + att_h + review_h), egui::pos2(card.right(), card.bottom() - toolbar_h));
         let src = crate::text::PlainLines { lines: &self.prompt.doc.lines, face: Face::UserText };
         let presp = self.prompt.view.show(ui, text_rect, &src, &theme, &ViewOptions {
             focused: p_focus,
@@ -2532,7 +3750,8 @@ impl Buffer for ChatBuffer {
         // Send (or stop) on the right.
         let d = 28.0 * k;
         let send = Rect::from_center_size(egui::pos2(bar.right() - d / 2.0, cy), Vec2::splat(d));
-        let has_text = !self.prompt.doc.is_empty();
+        // Something to send: text, images, or a review waiting (as `send` has it).
+        let has_text = !self.prompt.doc.is_empty() || !self.attachments.is_empty() || !self.review.drafts().is_empty();
         let sresp = ui.interact(send, id.with("send"), egui::Sense::click()).on_hover_text(if self.running() { "Stop (C-c C-c)" } else { "Send (RET)" });
         if self.running() {
             painter.circle_filled(send.center(), d / 2.0, if sresp.hovered() { theme.fg } else { theme.fg_dim });
@@ -2626,6 +3845,21 @@ impl Buffer for ChatBuffer {
         if let Some(cmd) = run {
             self.focus = Focus::Prompt;
             ed.main_sender().send(move |ed| ed.call(cmd));
+        }
+        // Keys for a selection (comment on it) and for a comment being written.
+        if let Some(me) = ed.this_buffer() {
+            let selecting = self.focus == Focus::Transcript && self.commenting.is_none() && self.view.anchor.is_some_and(|a| a != self.view.cursor);
+            let commenting = self.commenting.is_some();
+            if let Some(m) = ed.meta_mut(me) {
+                for (mode, on) in [("chat-selection", selecting), ("chat-commenting", commenting)] {
+                    let has = m.minor_modes.iter().any(|x| x == mode);
+                    if on && !has {
+                        m.minor_modes.insert(0, mode.to_string());
+                    } else if !on && has {
+                        m.minor_modes.retain(|x| x != mode);
+                    }
+                }
+            }
         }
     }
 
@@ -2941,11 +4175,76 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_run_ends_with_its_report() {
+        use super::report_entries;
+        let user = |t: &str, queued: bool| Entry::User { text: t.into(), queued, images: Vec::new() };
+        let said = |t: &str| Entry::Assistant { blocks: vec![AssistantContent::Text { text: t.into(), text_signature: None }], model: "m".into(), streaming: false, continuation: false, usage: None, error: None, cache: None };
+        let long = "word ".repeat(100);
+        let entries = vec![user("go", false), said("Looking."), said(&long), user("again", false), said("done"), user("more", false), said(&long)];
+        // The first run's last message is long: its report. "done" is too short. The last run
+        // still goes on.
+        assert_eq!(report_entries(&entries, true, 80).into_iter().collect::<Vec<_>>(), vec![(2, 100)]);
+        let mut done = report_entries(&entries, false, 80).into_iter().collect::<Vec<_>>();
+        done.sort();
+        assert_eq!(done, vec![(2, 100), (6, 100)]);
+        // Only the last message of a run: narration before it is not a report.
+        let entries = vec![user("go", false), said(&long), said("short"), user("next", false)];
+        assert!(report_entries(&entries, false, 80).is_empty());
+        // A prompt queued while it runs steers the run; it does not end it.
+        let entries = vec![user("go", false), said(&long), user("also this", true), said(&long)];
+        assert_eq!(report_entries(&entries, false, 80).into_keys().collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[test]
+    fn reports_in_the_skills_shape_are_read_as_parts() {
+        use super::{Outcome, check_mark, shaped_report};
+        let text = "Done: the change is sound, but `a.b` is counted twice. It moves retries.\n\n## Needs you\n\n1. **Fix it.** Now.\n2. **Check it.**\n\n## Checked\n\n- **Tests:** passes.\n- **Not checked:** load.\n";
+        let sh = shaped_report(text).unwrap();
+        assert_eq!(sh.outcome, Outcome::Done);
+        // The first sentence, even with a period inside inline code.
+        assert_eq!(sh.headline, "The change is sound, but `a.b` is counted twice.");
+        assert_eq!(sh.intro, "It moves retries.");
+        assert_eq!(sh.sections.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["Needs you", "Checked"]);
+        assert_eq!(sh.needs_you(), 2);
+        assert_eq!(shaped_report("**Partly done:** half of it.").unwrap().outcome, Outcome::Partly);
+        assert_eq!(shaped_report("Blocked — no access.").unwrap().outcome, Outcome::Blocked);
+        // Anything else stays plain markdown.
+        assert!(shaped_report("I've finished the review.").is_none());
+        assert!(shaped_report("Doneness is relative.").is_none());
+        assert_eq!(check_mark("Tests: passes.").map(|m| m.0), Some("✓"));
+        assert_eq!(check_mark("Lint: failed on 2 files").map(|m| m.0), Some("✗"));
+        assert_eq!(check_mark("Not checked: the dashboards").map(|m| m.0), Some("○"));
+        assert_eq!(check_mark("Benchmarks: 120 ms → 40 ms"), None);
+    }
+
+    #[test]
+    fn code_references_are_links() {
+        use super::code_ref;
+        assert_eq!(code_ref("src/queue.rs:142"), Some(("src/queue.rs".into(), 142)));
+        assert_eq!(code_ref("./main.rs:3-9"), Some(("main.rs".into(), 3)));
+        assert_eq!(code_ref("lib.rs:7:12"), Some(("lib.rs".into(), 7)));
+        for no in ["RequestQueue::retry", "localhost:8080", "a b.rs:3", "x.rs:", "x.rs:0", "x.rs:12abc", "Ordering::AcqRel"] {
+            assert_eq!(code_ref(no), None, "{no}");
+        }
+        use super::code_links;
+        let link = |text: &str| code_links(text).into_iter().map(|(r, s)| (r.start, s)).collect::<Vec<_>>();
+        // Inline code (its backticks gone when drawn) and plain prose.
+        assert_eq!(link("Fixed (src/queue.rs:142) in RequestQueue::retry."), vec![(7, "src/queue.rs:142".into())]);
+        assert_eq!(link("See src/a.rs:3, then lib.rs:7:2."), vec![(4, "src/a.rs:3".into()), (21, "lib.rs:7:2".into())]);
+        // What tools print: grep, a compiler.
+        assert_eq!(link("src/a.rs:12:    let x = 1;"), vec![(0, "src/a.rs:12".into())]);
+        assert_eq!(link("  --> src/main.rs:12:5"), vec![(6, "src/main.rs:12:5".into())]);
+        // Columns count characters, not bytes.
+        assert_eq!(link("é → src/a.rs:1"), vec![(4, "src/a.rs:1".into())]);
+        assert!(code_links("at 12:30, Ordering::AcqRel, https://example.com/x").is_empty());
+    }
+
+    #[test]
     fn tables_measure_columns() {
         let t = crate::theme::Theme::default();
         let m = Measure::Chars(8.0);
         let md = "Results:\n\n| Run | Lead |\n|---|--:|\n| 1 connection, 60s | **91%** |\n| 3 | `x` |\n\nafter";
-        let lines = markdown_lines(md, &t, &m, 2000.0);
+        let lines = markdown_lines(md, &t, &m, 2000.0, false);
         let rows = table(&lines);
         assert_eq!(rows.len(), 3, "header and two rows, no ASCII rules");
         assert_eq!(rows[0].text, "Run Lead");
@@ -2962,7 +4261,22 @@ mod tests {
         assert!(rows[0].block.unwrap().top && rows[2].block.unwrap().bottom);
         assert!(rows.iter().all(|l| l.rule_below.is_some()));
         assert!(lines.iter().any(|l| l.text == "after"));
-        assert!(table(&markdown_lines("| not a table", &t, &m, 2000.0)).is_empty());
+        assert!(table(&markdown_lines("| not a table", &t, &m, 2000.0, false)).is_empty());
+    }
+
+    #[test]
+    fn table_digits_line_up() {
+        // A 1 half as wide as other digits: right-aligned, 71% starts where 78% does, the 1
+        // centered in a digit's width; and a 1 in code is left as it is.
+        let t = crate::theme::Theme::default();
+        let m = Measure::NarrowOne(8.0);
+        let rows = markdown_lines("| Hit rate |\n|--:|\n| 71% |\n| 78% |\n| `1` |", &t, &m, 2000.0, false);
+        let rows = table(&rows);
+        let x = |l: &StyledLine, at: usize| -> f32 { l.pads.iter().filter(|(o, _)| *o <= at).map(|(_, w)| *w).sum::<f32>() + m.width(&l.text[..at], l.face) };
+        assert_eq!(x(rows[1], 0), x(rows[2], 0), "71% starts where 78% does");
+        assert_eq!(x(rows[1], 1), x(rows[2], 1) + 2.0, "its 1 centered in a digit's width");
+        assert_eq!(x(rows[1], 2), x(rows[2], 2), "and the % under the %");
+        assert!(rows[3].pads.iter().all(|(o, _)| *o == 0), "code's digits as they are");
     }
 
     #[test]
@@ -2970,7 +4284,7 @@ mod tests {
         let t = crate::theme::Theme::default();
         let m = Measure::Chars(8.0);
         let md = "| Run | Result |\n|---|---|\n| 1 connection, 180s, Rust and Python together | ~1% / -90ms in both |\n| 3 | ok |";
-        let rows = markdown_lines(md, &t, &m, 300.0);
+        let rows = markdown_lines(md, &t, &m, 300.0, false);
         let rows = table(&rows);
         assert!(rows.len() > 3, "the long row wraps: {:?}", rows.iter().map(|l| &l.text).collect::<Vec<_>>());
         // Every physical line fits: its last cell ends inside the column.
@@ -2984,7 +4298,7 @@ mod tests {
     #[test]
     fn lists_hang_their_markers() {
         let t = crate::theme::Theme::default();
-        let lines = markdown_lines("- one\n- two\n  - nested\n3. three", &t, &Measure::Chars(8.0), 800.0);
+        let lines = markdown_lines("- one\n- two\n  - nested\n3. three", &t, &Measure::Chars(8.0), 800.0, false);
         let markers: Vec<&str> = lines.iter().filter_map(|l| l.marker.as_ref().map(|(m, _)| m.as_str())).collect();
         assert_eq!(markers, ["•", "•", "•", "3."]);
         assert_eq!(lines[0].text, "one");

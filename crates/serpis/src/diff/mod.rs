@@ -55,6 +55,14 @@ pub fn open(ed: &mut Editor, machine: Option<String>, dir: String, spec: Option<
     id
 }
 
+/// Show line `line` (1-based) of `path` in the diff page of `dir` (on `machine`): on the
+/// change, when the file has changes there; else the file itself. What a code reference in a
+/// chat (`src/main.rs:12`) opens.
+pub fn show_line(ed: &mut Editor, machine: Option<String>, dir: String, path: &str, line: u32) {
+    let id = open(ed, machine, dir, None, None);
+    ed.with_buffer_as::<DiffBuffer, _>(id, |b, ed| b.show_line(ed, path, line));
+}
+
 /// The page to act on: `id`, else the current buffer.
 pub fn page(ed: &Editor, id: Option<BufferId>) -> anyhow::Result<BufferId> {
     let id = id.unwrap_or_else(|| ed.current_buffer());
@@ -320,6 +328,18 @@ pub fn install(ed: &mut Editor) {
                 ed.with_buffer_as::<DiffBuffer, _>(id, |b, ed| b.select_file(ed, &c.value));
             }
         });
+        Ok(())
+    });
+    ed.define_command("diff-show-line", "Show a line of a file in the diff page: on its change, or the file itself when it has none (params: path, line, the folder; the current buffer's folder without one). Clicking a code reference in a chat (`src/main.rs:12`) runs it.", o, |ed, a| {
+        let path = a.str(0).ok_or_else(|| anyhow::anyhow!("diff-show-line: which file?"))?.to_string();
+        let line = a.params.get(1).and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(1).max(1) as u32;
+        let cur = ed.current_buffer();
+        let machine = ed.buffer_machine(cur);
+        let dir = match a.str(2) {
+            Some(d) => crate::expand_home(d).to_string_lossy().into_owned(),
+            None => ed.buffer_directory(cur).ok_or_else(|| anyhow::anyhow!("diff-show-line: this buffer has no folder"))?.to_string_lossy().into_owned(),
+        };
+        show_line(ed, machine, dir, &path, line);
         Ok(())
     });
     ed.define_command("diff-mark-viewed", "Mark the file as viewed and go to the next (or unmark it). Changing the file clears it.", o, |ed, _| {

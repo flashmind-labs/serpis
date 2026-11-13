@@ -41,6 +41,8 @@ pub struct ThemeSpec {
     pub diff_add_fg: Option<String>,
     pub diff_del_fg: Option<String>,
     pub accent_subtle: Option<String>,
+    /// The surface an agent's report sits on; derived from bg, fg and the accent when absent.
+    pub bg_report: Option<String>,
     pub ansi: Option<Vec<String>>,
 }
 
@@ -53,9 +55,13 @@ pub fn parse_hex(s: &str) -> Option<Color32> {
     Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-/// Linear blend from `a` to `b`.
 /// Perceived lightness (OKLab L, 0..1).
 fn ok_l(c: Color32) -> f32 {
+    oklab(c)[0]
+}
+
+/// A color in OKLab: lightness, then the green–red and blue–yellow axes.
+fn oklab(c: Color32) -> [f32; 3] {
     let lin = |v: u8| {
         let v = v as f32 / 255.0;
         if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
@@ -64,7 +70,11 @@ fn ok_l(c: Color32) -> f32 {
     let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_99 * b).cbrt();
     let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
     let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
-    0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
 }
 
 /// `c`, moved toward `body` until their lightness differs by at most `max` (hue kept).
@@ -80,7 +90,7 @@ fn within(body: Color32, c: Color32, max: f32) -> Color32 {
     mix(body, c, lo)
 }
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
@@ -155,6 +165,8 @@ impl ThemeSpec {
             ansi,
             user_bg: opt(&self.accent_subtle).unwrap_or_else(|| mix(body, accent, 0.12)),
             tool_bg: dim,
+            report_bg: opt(&self.bg_report).unwrap_or_else(|| report_surface(body, fg, accent, dark)),
+            report_border: (!dark).then(|| opt(&self.border).unwrap_or_else(|| mix(body, fg, 0.18))),
             font_size: base.font_size,
             mono_size: base.mono_size,
             radius: base.radius,
@@ -213,11 +225,29 @@ pub fn accent_color(t: &Theme, spec: &str) -> Option<Color32> {
     }
 }
 
-/// Use `c` as the accent, with what is derived from it (focus borders, your message bubbles).
+/// Use `c` as the accent, with what is derived from it (focus borders, your message bubbles,
+/// the report's surface).
 pub fn set_accent(t: &mut Theme, c: Color32) {
     t.accent = c;
     t.border_focused = c;
     t.user_bg = mix(t.bg_alt, c, if t.dark { 0.16 } else { 0.12 });
+    t.report_bg = report_surface(t.bg_alt, t.fg, c, t.dark);
+}
+
+/// The surface an agent's report sits on, for a theme whose windows are `body`. Dark themes:
+/// lifted toward the text, with a faint tint of the accent. Light themes: paper on the desk,
+/// lighter than the window where it can be (with a trace of the accent) and outlined
+/// (`report_border`), since near-white surfaces can't be told apart by fill alone. It must
+/// read as its own surface against the body and stay clear of the cards inside it (code: the
+/// dim frame color) and of your message bubbles (a stronger accent tint), in every theme.
+pub fn report_surface(body: Color32, fg: Color32, accent: Color32, dark: bool) -> Color32 {
+    if dark { mix(mix(body, fg, 0.06), accent, 0.06) } else { mix(mix(body, Color32::WHITE, 0.7), accent, 0.03) }
+}
+
+/// Perceptual distance between two colors (OKLab ΔE; about 0.02 is just noticeable).
+pub fn distance(a: Color32, b: Color32) -> f32 {
+    let (x, y) = (oklab(a), oklab(b));
+    ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
 }
 
 pub fn hex(c: Color32) -> String {
@@ -319,6 +349,19 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
+    fn print_report_surfaces() {
+        let base = Theme::dark();
+        let mut all: Vec<Theme> = bundled().iter().map(|(n, s)| s.to_theme(n, &base).unwrap()).collect();
+        all.push(Theme::dark());
+        all.push(Theme::light());
+        for t in &all {
+            let r = t.report_bg;
+            println!("{:32} {} dark={:5} border {:?} report {} window {} {:.3} card {} {:.3} bubble {} {:.3}", t.name, if t.dark { "D" } else { "L" }, t.dark, t.report_border.map(hex), hex(r), hex(t.bg_alt), distance(r, t.bg_alt), hex(t.tool_bg), distance(r, t.tool_bg), hex(t.user_bg), distance(r, t.user_bg));
+        }
+    }
+
+    #[test]
     fn bundled_themes_map() {
         let base = Theme::dark();
         assert!(bundled().len() >= 19);
@@ -341,6 +384,27 @@ mod tests {
         assert_eq!(hex(g.bg), "#04070d");
         assert_eq!(v.bg_alt, Color32::BLACK);
         assert_eq!(counterpart("modus-vivendi-tinted"), "modus-operandi-tinted");
+        // A report's surface reads as its own in every theme: apart from the window behind it,
+        // the code cards inside it and your message bubbles.
+        let mut all: Vec<Theme> = bundled().iter().map(|(n, s)| s.to_theme(n, &base).unwrap()).collect();
+        all.push(Theme::dark());
+        all.push(Theme::light());
+        for t in &all {
+            let r = t.report_bg;
+            let close = |what: &str, c: Color32, min: f32| assert!(distance(r, c) >= min, "{}: report {} too close to {what} {} ({:.3})", t.name, hex(r), hex(c), distance(r, c));
+            close("your bubble", t.user_bg, 0.015);
+            if t.dark {
+                // Dark: the fill alone sets it apart.
+                close("window", t.bg_alt, 0.03);
+                close("code card", t.tool_bg, 0.03);
+                assert_eq!(t.report_border, None, "{}", t.name);
+            } else {
+                // Light: paper on the desk, within a faint tint of the window (never a grey
+                // patch), with a visible outline.
+                assert!(ok_l(r) >= ok_l(t.bg_alt) - 0.03, "{}: report {} darker than the window {}", t.name, hex(r), hex(t.bg_alt));
+                assert!(t.report_border.is_some_and(|b| distance(b, r) >= 0.05), "{}: report needs a visible outline", t.name);
+            }
+        }
         assert_eq!(counterpart("github-light-high-contrast"), "github-dark-high-contrast");
     }
 }

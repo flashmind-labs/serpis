@@ -417,8 +417,24 @@ pub struct StyledLine {
     pub image: Option<(u64, egui::Vec2)>,
     /// A spinner of this color over the line's first character, turning while it is on screen.
     pub spinner: Option<Color32>,
-    /// What hovering these characters of the line says.
+    /// What hovering these characters of the line says (character columns, as `links`).
     pub hint: Option<(Range<usize>, String)>,
+    /// The widest it wraps at, in points, however wide the column (prose kept to a readable
+    /// line length while code and cards use the whole column).
+    pub measure: Option<f32>,
+    /// Text drawn this much larger than its face (an agent's report reads a size up).
+    pub scale: Option<f32>,
+    /// A surface behind the line's whole slot, under its card, a little wider than the column:
+    /// successive lines with one join into a single rounded panel (an agent's report).
+    pub backdrop: Option<Block>,
+    /// Parts of the line that are links: character columns and what they point at (a code
+    /// reference such as `src/main.rs:12`). Hovered, they underline; clicked, the view says so.
+    pub links: Vec<(Range<usize>, String)>,
+    /// Parts of the line marked with a color behind them and a line under them (character
+    /// columns): text a review comment is about.
+    pub marks: Vec<(Range<usize>, Color32)>,
+    /// A diagram drawn instead of text (a Mermaid block in a chat): its text stays for copying.
+    pub diagram: Option<crate::diagram::Placed>,
 }
 
 impl StyledLine {
@@ -458,6 +474,15 @@ impl StyledLine {
         self.spans = spans;
         self
     }
+    pub fn measure(mut self, w: f32) -> Self {
+        self.measure = Some(w);
+        self
+    }
+    /// A line that shows a diagram, laid out and placed (`crate::diagram::layout`).
+    pub fn diagram(mut self, d: crate::diagram::Placed) -> Self {
+        self.diagram = Some(d);
+        self
+    }
     /// A line that shows image `id` at `size` (points); its text stays for copying.
     pub fn image(mut self, id: u64, size: egui::Vec2) -> Self {
         self.image = Some((id, size));
@@ -484,6 +509,16 @@ impl StyledLine {
         self.marker.as_ref().map(|(m, f)| (m, *f as u8)).hash(&mut h);
         self.image.map(|(id, s)| (id, s.x.to_bits(), s.y.to_bits())).hash(&mut h);
         self.spinner.map(|c| c.to_array()).hash(&mut h);
+        self.measure.map(f32::to_bits).hash(&mut h);
+        self.scale.map(f32::to_bits).hash(&mut h);
+        self.backdrop.map(|b| (b.bg.to_array(), b.top, b.bottom, b.border.map(|c| c.to_array()))).hash(&mut h);
+        for (r, target) in &self.links {
+            (r.start, r.end, target).hash(&mut h);
+        }
+        for (r, c) in &self.marks {
+            (r.start, r.end, c.to_array()).hash(&mut h);
+        }
+        self.diagram.as_ref().map(|d| (Arc::as_ptr(&d.diagram) as usize, d.scale.to_bits(), d.text.to_bits())).hash(&mut h);
         if let Some(b) = &self.block {
             (b.bg.to_array(), b.bar.map(|c| c.to_array()), b.top, b.bottom, b.border.map(|c| c.to_array()), b.shrink.map(f32::to_bits)).hash(&mut h);
         }
@@ -498,7 +533,7 @@ pub fn layout_job(line: &StyledLine, theme: &Theme, wrap_width: f32) -> LayoutJo
 /// Lay out a line; a `fit` line is shrunk (to half size at most) rather than wrapped.
 pub fn layout_line(painter: &egui::Painter, line: &StyledLine, theme: &Theme, wrap_width: f32) -> std::sync::Arc<Galley> {
     if !line.fit {
-        return painter.layout_job(layout_job(line, theme, wrap_width));
+        return painter.layout_job(layout_job_scaled(line, theme, wrap_width, line.scale.unwrap_or(1.0)));
     }
     let g = painter.layout_job(layout_job(line, theme, f32::INFINITY));
     if g.size().x <= wrap_width || !wrap_width.is_finite() {
@@ -515,10 +550,20 @@ pub fn layout_job_scaled(line: &StyledLine, theme: &Theme, wrap_width: f32, scal
     job.halign = egui::Align::LEFT;
     // Spans share the line's line height, so bold and inline code sit on its baseline.
     let base_height = theme.format(line.face).line_height;
+    // In a line set larger than the reading text (a heading), its code, bold and links grow
+    // with it.
+    let grow = (theme.format(line.face).font_id.size / theme.format(Face::AssistantText).font_id.size).max(1.0);
     let fmt = |face: Face| {
         let mut f = theme.format(face);
         if base_height.is_some() {
             f.line_height = base_height;
+        }
+        if face == Face::InlineCode {
+            // Its chip is painted by the view (code_chips), centered on the code.
+            f.background = Color32::TRANSPARENT;
+        }
+        if matches!(face, Face::InlineCode | Face::Bold | Face::Italic | Face::BoldItalic | Face::Strike | Face::Link) && face != line.face {
+            f.font_id.size *= grow;
         }
         f.font_id.size *= scale;
         f.extra_letter_spacing *= scale;
@@ -549,17 +594,72 @@ pub fn layout_job_scaled(line: &StyledLine, theme: &Theme, wrap_width: f32, scal
         runs.push((at..line.text.len(), line.face));
     }
     let pad_at = |o: usize| line.pads.iter().filter(|(p, _)| *p == o).map(|(_, w)| *w).sum::<f32>() * scale;
+    // Room on either side of inline code for its chip.
+    let mut room = 0.0;
     for (r, face) in runs {
+        let code = face == Face::InlineCode;
+        let lead = std::mem::replace(&mut room, if code { CHIP_PAD * scale } else { 0.0 }) + if code { CHIP_PAD * scale } else { 0.0 };
         let mut cuts: Vec<usize> = line.pads.iter().map(|(o, _)| *o).filter(|o| *o > r.start && *o < r.end && line.text.is_char_boundary(*o)).collect();
         cuts.sort_unstable();
         cuts.dedup();
         let mut from = r.start;
         for c in cuts.into_iter().chain(std::iter::once(r.end)) {
-            job.append(&line.text[from..c], pad_at(from), fmt(face));
+            job.append(&line.text[from..c], pad_at(from) + if from == r.start { lead } else { 0.0 }, fmt(face));
             from = c;
         }
     }
     job
+}
+
+/// How far an inline code chip reaches past its code on either side.
+pub const CHIP_PAD: f32 = 3.0;
+
+/// Inline code's chips, in galley coordinates: a box a little wider than the code and as tall
+/// as its font, on its letters. (egui's own section background fills the line's whole height,
+/// half again the font's, so the code sat at the top of a tall box.)
+fn code_chips(g: &Galley, line: &StyledLine) -> Vec<Rect> {
+    let ranges: Vec<Range<usize>> = line
+        .spans
+        .iter()
+        .filter(|(_, f)| *f == Face::InlineCode)
+        .map(|(r, _)| {
+            let s = line.text.get(..r.start).map_or(0, |t| t.chars().count());
+            s..s + line.text.get(r.clone()).map_or(0, |t| t.chars().count())
+        })
+        .collect();
+    let mut out = Vec::new();
+    if ranges.is_empty() {
+        return out;
+    }
+    let mut idx = 0;
+    for row in &g.rows {
+        // The range being covered on this row, and its box so far.
+        let mut cur: Option<(usize, Rect)> = None;
+        for gl in &row.row.glyphs {
+            match ranges.iter().position(|r| r.contains(&idx)) {
+                Some(k) => {
+                    let (x, base) = (row.pos.x + gl.pos.x, row.pos.y + gl.pos.y);
+                    let r = Rect::from_min_max(egui::pos2(x, base - gl.font_ascent), egui::pos2(x + gl.advance_width, base - gl.font_ascent + gl.font_height));
+                    cur = match cur {
+                        Some((j, a)) if j == k => Some((j, a.union(r))),
+                        prev => {
+                            out.extend(prev.map(|(_, a)| a));
+                            Some((k, r))
+                        }
+                    };
+                }
+                None => out.extend(cur.take().map(|(_, a)| a)),
+            }
+            idx += 1;
+        }
+        out.extend(cur.take().map(|(_, a)| a));
+        if row.ends_with_newline {
+            idx += 1;
+        }
+    }
+    // As much as the room left for it beside the code (layout_job_scaled).
+    let pad = CHIP_PAD * line.scale.unwrap_or(1.0);
+    out.into_iter().map(|r| r.expand2(egui::vec2(pad, 0.0))).collect()
 }
 
 /// Source of styled lines for a [`DocView`].
@@ -732,6 +832,8 @@ pub struct ViewResponse {
     pub clicked: bool,
     /// The user scrolled up away from the tail.
     pub scrolled: bool,
+    /// A link was clicked: what it points at.
+    pub link: Option<String>,
 }
 
 impl DocView {
@@ -860,7 +962,7 @@ fn wrap_width(wrap: bool, line: &StyledLine, col_w: f32) -> f32 {
             Some(b) => col_w * b.shrink.unwrap_or(1.0) - 2.0 * line.indent,
             None => col_w - line.indent,
         };
-        w.max(20.0)
+        w.min(line.measure.unwrap_or(f32::INFINITY)).max(20.0)
     }
 }
 
@@ -879,9 +981,10 @@ impl DocView {
             let h = src.hash(i);
             if self.heights[i].0 != h {
                 let line = src.styled(i);
-                let size = match line.image {
-                    Some((_, s)) => s,
-                    None => layout_line(painter, &line, theme, self.wrap_width(&line, col_w)).size(),
+                let size = match (&line.diagram, line.image) {
+                    (Some(d), _) => d.size(),
+                    (None, Some((_, s))) => s,
+                    (None, None) => layout_line(painter, &line, theme, self.wrap_width(&line, col_w)).size(),
                 };
                 self.heights[i] = (h, size.y.max(1.0) + line.gap_above + line.pad_top + line.pad_bottom, size.x + 2.0 * line.indent, line.block);
             }
@@ -1027,6 +1130,17 @@ impl DocView {
         let radius = theme.radius + 4;
         // Outline of the card being drawn: top edge and horizontal extent.
         let mut outline: Option<(f32, f32, f32, Color32)> = None;
+        // Outline of the backdrop panel being drawn: top edge, extent, color, edge to edge.
+        let mut panel: Option<(f32, f32, f32, Color32, bool)> = None;
+        let stroke_panel = |painter: &egui::Painter, (top, x0, x1, c, band): (f32, f32, f32, Color32, bool), bottom: f32| {
+            let stroke = Stroke::new(1.0, c);
+            if band {
+                painter.hline(x0..=x1, top + 0.5, stroke);
+                painter.hline(x0..=x1, bottom - 0.5, stroke);
+            } else {
+                painter.rect_stroke(Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, bottom)), radius, stroke, egui::StrokeKind::Inside);
+            }
+        };
         // Width of the shrink-to-fit card a line belongs to.
         let mut shrink_w: Option<f32> = None;
         for i in 0..n {
@@ -1072,6 +1186,22 @@ impl DocView {
             };
             let g = layout_line(&painter, &line, theme, wrap_of(&line));
             let slot_top = y + line.gap_above;
+            if let Some(b) = line.backdrop {
+                // A rounded panel 20pt out past the column, from the first line's text down
+                // through the last line's slot; where the view's margin has no room for that, a
+                // band from edge to edge (a panel crammed against the edges looks like a mistake).
+                let band = side < 28.0;
+                let (x0, x1) = if band { (rect.left(), rect.right()) } else { (col_left - 20.0, col_right + 20.0) };
+                let r = Rect::from_min_max(egui::pos2(x0, if b.top { slot_top } else { y }), egui::pos2(x1, y + h));
+                let round = |edge: bool| if edge && !band { radius } else { 0 };
+                let cr = egui::CornerRadius { nw: round(b.top), ne: round(b.top), sw: round(b.bottom), se: round(b.bottom) };
+                painter.rect_filled(r, cr, b.bg);
+                if let Some(c) = b.border {
+                    if b.top || panel.is_none() {
+                        panel = Some((if b.top { slot_top } else { rect.top() - 40.0 }, x0, x1, c, band));
+                    }
+                }
+            }
             let origin = egui::pos2(if block.is_some() { bx0 + line.indent } else { col_left + line.indent }, slot_top + line.pad_top);
             let line_rect = Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), y + h));
             if let Some(b) = block {
@@ -1104,6 +1234,18 @@ impl DocView {
                 let first_row = g.rows.first().map(|r| r.rect().height()).unwrap_or(mg.size().y);
                 painter.galley(egui::pos2(origin.x - 8.0 - mg.size().x, origin.y + (first_row - mg.size().y) / 2.0), mg, theme.fg);
             }
+            // Marks: a tint behind, a line under.
+            for (range, color) in &line.marks {
+                for r in range_rects(&g, range.start, range.end, false) {
+                    let r = r.translate(origin.to_vec2());
+                    painter.rect_filled(r, 2.0, color.gamma_multiply(0.22));
+                    painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.5, color.gamma_multiply(0.8)));
+                }
+            }
+            // Inline code's chips, under any selection.
+            for r in code_chips(&g, &line) {
+                painter.rect_filled(r.translate(origin.to_vec2()), (r.height() * 0.2).min(4.0), theme.chip());
+            }
             // Selection.
             if let Some((a, b)) = selection {
                 if i >= a.line && i <= b.line {
@@ -1115,9 +1257,22 @@ impl DocView {
                             (if i == a.line { a.col } else { 0 }, if i == b.line { end } else { len + 1 })
                         }
                     };
-                    paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection);
+                    match &line.diagram {
+                        // A diagram is selected whole: tinted behind it.
+                        Some(d) => {
+                            painter.rect_filled(Rect::from_min_size(origin, d.size()).expand(4.0), 6.0, theme.selection);
+                        }
+                        None => paint_range(&painter, &g, origin, s, e.min(len), e > len, theme.selection),
+                    }
                 }
             }
+            if let Some(d) = &line.diagram {
+                // On whatever is behind it: its card, the report's surface, or the page.
+                let surface = line.block.map(|b| b.bg).filter(|c| *c != Color32::TRANSPARENT).or(line.backdrop.map(|b| b.bg)).unwrap_or(theme.bg);
+                if crate::diagram::paint(&painter, origin, d, theme, surface, response.hover_pos()).is_some() {
+                    ui.ctx().request_repaint();
+                }
+            } else {
             match line.image {
                 Some((id, size)) => {
                     let r = Rect::from_min_size(origin, size);
@@ -1128,12 +1283,27 @@ impl DocView {
                     painter.galley(origin, g.clone(), theme.fg);
                 }
             }
+            }
             if let (Some(color), Some(row)) = (line.spinner, g.rows.first()) {
                 let width = row.glyphs.first().map_or(row.rect().height(), |g| g.advance_width);
                 let time = painter.ctx().input(|i| i.time);
                 crate::chrome::spinner(&painter, origin + egui::vec2(width / 2.0, row.rect().height() / 2.0), row.rect().height() * 0.26, time, color);
                 // Only asked for while it is on screen.
                 painter.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            // Links: a pointing hand and an underline under the pointer, and the click reported.
+            for (range, target) in &line.links {
+                for r in range_rects(&g, range.start, range.end, false) {
+                    let r = r.translate(origin.to_vec2());
+                    let over = response.hover_pos().is_some_and(|p| r.expand2(egui::vec2(1.0, 2.0)).contains(p));
+                    if over {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.0, theme.format(Face::InlineCode).color));
+                    }
+                    if response.clicked() && response.interact_pointer_pos().is_some_and(|p| r.expand2(egui::vec2(1.0, 2.0)).contains(p)) {
+                        resp.link = Some(target.clone());
+                    }
+                }
             }
             if let Some((range, text)) = &line.hint {
                 for r in range_rects(&g, range.start, range.end, false) {
@@ -1151,6 +1321,11 @@ impl DocView {
                     shrink_w = None;
                 }
             }
+            if line.backdrop.is_some_and(|b| b.bottom) {
+                if let Some(p) = panel.take() {
+                    stroke_panel(&painter, p, y + h);
+                }
+            }
             self.placed.push(Placed {
                 line: i,
                 origin,
@@ -1158,6 +1333,10 @@ impl DocView {
                 rect: line_rect,
             });
             y += h;
+        }
+        // A panel running past the bottom edge.
+        if let Some(p) = panel {
+            stroke_panel(&painter, p, rect.bottom() + 40.0);
         }
         // A card running past the bottom edge.
         if let Some((top, x0, x1, c)) = outline {
@@ -1209,6 +1388,9 @@ impl DocView {
         // Mouse placement and drag selection.
         if let Some(pt) = response.interact_pointer_pos() {
             if response.drag_started() || response.clicked() {
+                // A drag starts where the button went down, not where it was noticed (a few
+                // points on, or more for a quick one).
+                let pt = if response.drag_started() { ui.input(|i| i.pointer.press_origin()).unwrap_or(pt) } else { pt };
                 if let Some(p) = self.pos_at(pt) {
                     self.drag_anchor = Some(p);
                     self.cursor = p;
@@ -1424,6 +1606,17 @@ impl TextSurface for TextArea {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prose_wraps_at_its_measure_however_wide_the_column() {
+        let prose = StyledLine::new("text", Face::AssistantText).measure(500.0);
+        assert_eq!(wrap_width(true, &prose, 860.0), 500.0);
+        // A narrower column still wins.
+        assert_eq!(wrap_width(true, &prose, 400.0), 400.0);
+        // Code and cards (no measure) use the whole column.
+        assert_eq!(wrap_width(true, &StyledLine::new("code", Face::Code), 860.0), 860.0);
+        assert_eq!(wrap_width(false, &prose, 860.0), f32::INFINITY);
+    }
 
     #[test]
     fn doc_insert_delete_undo() {
