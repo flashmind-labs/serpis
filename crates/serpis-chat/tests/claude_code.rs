@@ -167,6 +167,8 @@ fn setup() -> World {
         std::env::set_var("SERPIS_CLAUDE_CODE_PATH", serpis_testkit::fake_claude());
         std::env::set_var("FAKE_CLAUDE_LOG", &log);
         std::env::set_var("FAKE_CLAUDE_DIR", &sessions);
+        // As in the node chats run in: Claude Code isn't told it (below).
+        std::env::set_var("SERPIS_NODE_SOCKET", home.join("node.sock"));
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     let host = TestHost {
@@ -201,6 +203,7 @@ fn chats_run_on_claude_code() {
     let (starts, _) = w.log();
     assert_eq!(starts.len(), 1);
     assert!(w.log_lines().iter().any(|l| l["agent_env"] == "1"), "claude runs with SERPIS_AGENT, as its commands then do");
+    assert!(w.log_lines().iter().filter(|l| l.get("start").is_some()).all(|l| l["node_env"].is_null()), "nor where the node is: a serpis its commands start can't reach it");
     assert_eq!(after(&starts[0], "--thinking-display"), Some("summarized"), "its thinking is asked for");
     // It is offered serpis's skills to load as its own; those it has already aren't repeated,
     // and its own stay its own.

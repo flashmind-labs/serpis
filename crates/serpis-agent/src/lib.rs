@@ -8,5 +8,5 @@ pub mod skills;
 pub mod system_prompt;
 pub mod tools;
 
-pub use agent::{AGENT_ENV, AgentConfig, AgentEvent, AgentHandle, Answer, AskReply, EmitFn, ToolGate, ToolHooks, complete, run, supports_native_web_search};
+pub use agent::{AGENT_ENV, HIDDEN_ENV, AgentConfig, AgentEvent, AgentHandle, Answer, AskReply, EmitFn, ToolGate, ToolHooks, complete, run, supports_native_web_search};
 pub use tools::{AgentTool, ExecutionMode, ToolContext, ToolRef, ToolResult, builtin_tools};

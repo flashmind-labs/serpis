@@ -434,6 +434,9 @@ struct OpenChat {
     running: bool,
     #[serde(default)]
     cut: u32,
+    /// Mid-turn when the node was asked to stop: not continued, but the chat says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stopped: bool,
 }
 
 /// What `open.json` held: chats, or (from older nodes) their paths.
@@ -1539,7 +1542,7 @@ impl Node {
         let opened: Vec<Opened> = serde_json::from_str(&text).unwrap_or_default();
         let open: Vec<OpenChat> = opened.into_iter().map(|o| match o {
             Opened::Chat(c) => c,
-            Opened::Path(path) => OpenChat { path, running: false, cut: 0 },
+            Opened::Path(path) => OpenChat { path, running: false, cut: 0, stopped: false },
         }).collect();
         let keep_going = self.lua.var("chat-keep-going").and_then(|v| v.as_bool()).unwrap_or(true);
         let limit = self.lua.var("chat-keep-going-limit").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
@@ -1558,6 +1561,8 @@ impl Node {
             };
             if o.running {
                 self.cut_off(&id, o.cut, keep_going, limit, &ago);
+            } else if o.stopped {
+                self.stopped_mid_turn(&id, &ago);
             }
         }
         self.open_written = open;
@@ -1591,17 +1596,31 @@ impl Node {
         self.lua.run_hook_for(Some(id), "turn-cut-off", &payload);
     }
 
+    /// Chat `id`'s turn ran when the node was asked to stop (`ago`). A stop asked for cuts
+    /// nothing off, so it isn't continued; but it says so, or the chat would look finished, its
+    /// last tool call never answered.
+    fn stopped_mid_turn(&mut self, id: &str, ago: &str) {
+        let Some(slot) = self.chats.get_mut(id) else { return };
+        if !slot.chat.cut_off() {
+            return;
+        }
+        let text = format!("⏸ The node running this chat was stopped mid-turn {ago} (serpis-node stop, or a stop asked for): send a message to continue");
+        tracing::info!("chat {id}: {text}");
+        slot.chat.notice(text, serpis_proto::Tone::Warning);
+    }
+
     /// Note the open chats (their session files, and which are mid-turn), for [`Node::reopen`].
-    /// `stopping`: on purpose, so none is noted mid-turn.
+    /// `stopping`: on purpose, so none is noted mid-turn to continue, only as stopped.
     fn remember_open(&mut self, stopping: bool) {
         let mut open = Vec::new();
         for slot in self.chats.values_mut() {
-            let running = !stopping && (slot.chat.running() || slot.chat.compacting());
+            let mid_turn = slot.chat.running() || slot.chat.compacting();
+            let running = !stopping && mid_turn;
             if !running {
                 slot.cut = 0;
             }
             if let Some(w) = slot.chat.session.as_ref().filter(|w| w.exists()) {
-                open.push(OpenChat { path: w.path.to_string_lossy().into_owned(), running, cut: slot.cut });
+                open.push(OpenChat { path: w.path.to_string_lossy().into_owned(), running, cut: slot.cut, stopped: stopping && mid_turn });
             }
         }
         if open != self.open_written {

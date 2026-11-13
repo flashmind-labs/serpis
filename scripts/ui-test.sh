@@ -21,6 +21,9 @@ new_home() { mkdir -p "$1"; echo "PROMPT='%# '" > "$1/.zshrc"; }
 # Rust's own tools stay where they are (serpis builds its node with them when a machine needs one).
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 for v in $(compgen -e | grep -E '_(API_KEY|TOKEN)$' || true); do unset "$v"; done
+# Nor your node, found by these before HOME (inherited when run from a serpis chat or terminal):
+# its tests would run in it, and the `serpis-node stop` after each would stop it.
+unset SERPIS_NODE_SOCKET SERPIS_NODE_DIR
 # A local model (tests/ui/mock_llm.py) for tests that run agents end to end.
 python3 "$root/tests/ui/mock_llm.py" "$tmp/mock.port" "$tmp/mock.log" &
 mock=$!

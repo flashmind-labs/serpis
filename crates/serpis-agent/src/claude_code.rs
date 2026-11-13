@@ -535,6 +535,9 @@ impl Process {
                 None => args.extend(["--append-system-prompt".to_string(), text.clone()]),
             }
         }
+        for k in crate::agent::HIDDEN_ENV {
+            cmd.env_remove(k);
+        }
         cmd.args(&args).envs(l.env.iter().cloned()).current_dir(&l.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);

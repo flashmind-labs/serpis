@@ -104,9 +104,11 @@ impl AgentTool for BashTool {
                 .current_dir(&ctx.cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .envs(&ctx.env)
-                .kill_on_drop(true);
+                .stderr(Stdio::piped());
+            for k in crate::agent::HIDDEN_ENV {
+                cmd.env_remove(k);
+            }
+            cmd.envs(&ctx.env).kill_on_drop(true);
             #[cfg(unix)]
             cmd.process_group(0);
             let mut child = cmd.spawn()?;
