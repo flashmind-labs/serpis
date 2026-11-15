@@ -31,6 +31,20 @@ login shell's environment once (PATH, exported API keys), like VS Code; from a t
 the terminal's (`SERPIS_NO_SHELL_ENV=1` turns the import off). Rust plugins must be rebuilt
 against the installed version. The icon is drawn by `scripts/make-icon.py`.
 
+## Install (Linux)
+
+Build it from source with Rust and zig 0.16 installed:
+
+```sh
+scripts/install-linux.sh
+```
+
+This installs the app for the current user. The GUI and its private libraries go in
+`$XDG_DATA_HOME/serpis` (normally `~/.local/share/serpis`), its application-menu entry goes in
+`$XDG_DATA_HOME/applications`, and `serpis [dir]` goes in `~/.local/bin`. Run the script again to
+update. `SERPIS_APP_DIR`, `SERPIS_DESKTOP_DIR` and `SERPIS_BIN_DIR` override those locations.
+Desktop notifications use `notify-send` when it is installed.
+
 ## Install (iPhone)
 
 ```sh
