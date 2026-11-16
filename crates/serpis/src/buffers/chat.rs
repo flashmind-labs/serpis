@@ -2799,13 +2799,20 @@ impl ChatBuffer {
         })
     }
 
-    /// The transcript's selection in order, else the cursor's whole line.
-    fn selected_range(&self) -> (Pos, Pos) {
+    /// What is selected, as it is drawn: vim's line-wise selection (V) takes its lines whole, and
+    /// its character-wise one (v) the character under the cursor too. No selection: the line.
+    fn selected_range(&self, kind: crate::text::SelectionKind) -> (Pos, Pos) {
+        use crate::text::SelectionKind;
         let c = self.view.cursor;
-        match self.view.anchor.filter(|a| *a != c) {
-            Some(a) if a < c => (a, c),
-            Some(a) => (c, a),
-            None => (Pos::new(c.line, 0), Pos::new(c.line, char_len(self.lines.get(c.line).map_or("", |l| l.text.as_str())))),
+        let len = |line: usize| char_len(self.lines.get(line).map_or("", |l| l.text.as_str()));
+        let whole = |a: Pos, b: Pos| (Pos::new(a.line, 0), Pos::new(b.line, len(b.line)));
+        let Some(anchor) = self.view.anchor else { return whole(c, c) };
+        let (a, b) = if anchor <= c { (anchor, c) } else { (c, anchor) };
+        match kind {
+            SelectionKind::Lines => whole(a, b),
+            SelectionKind::Inclusive => (a, Pos::new(b.line, (b.col + 1).min(len(b.line)))),
+            _ if a == b => whole(c, c),
+            _ => (a, b),
         }
     }
 
@@ -2871,7 +2878,8 @@ impl ChatBuffer {
             self.focus_comment(ed);
             return;
         }
-        let (a, b) = self.selected_range();
+        let kind = ed.this_buffer().map(|id| crate::packages::vim::selection_kind(ed, id)).unwrap_or_default();
+        let (a, b) = self.selected_range(kind);
         let entry = self.line_entry.get(a.line).copied().flatten().filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. })));
         let Some(entry) = entry else {
             ed.message("Select part of what the agent wrote to comment on it");

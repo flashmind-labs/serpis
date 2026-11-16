@@ -1236,7 +1236,7 @@ impl DocView {
             }
             // Marks: a tint behind, a line under.
             for (range, color) in &line.marks {
-                for r in range_rects(&g, range.start, range.end, false) {
+                for r in row_rects(&g, range.start, range.end) {
                     let r = r.translate(origin.to_vec2());
                     painter.rect_filled(r, 2.0, color.gamma_multiply(0.22));
                     painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.5, color.gamma_multiply(0.8)));
@@ -1477,6 +1477,33 @@ fn paint_range(painter: &egui::Painter, g: &Galley, origin: Pos2, s: usize, e: u
 
 /// The rectangles (one per row it spans, in galley coordinates) covering chars `s..e` of a
 /// laid-out line; `to_eol` reaches a little past the end, for a selection that goes on.
+/// Characters `s..e` of a galley as one box per row they cover, each as wide as the text it
+/// holds on that row (a wrapped row's trailing space left out): what a review's comment is
+/// about, marked without spilling past the words.
+fn row_rects(g: &Galley, s: usize, e: usize) -> Vec<Rect> {
+    use egui::epaint::text::CharIndex;
+    let mut out = Vec::new();
+    let mut start = 0;
+    for row in &g.rows {
+        let n = row.char_count_excluding_newline().0;
+        let (a, mut b) = (s.max(start), e.min(start + n));
+        while b > a && row.glyphs.get(b - 1 - start).is_some_and(|gl| gl.chr.is_whitespace()) {
+            b -= 1;
+        }
+        if a < b {
+            let r = row.rect();
+            let x0 = row.pos.x + row.x_offset(CharIndex(a - start));
+            let x1 = row.pos.x + row.x_offset(CharIndex(b - start));
+            out.push(Rect::from_min_max(egui::pos2(x0, r.min.y), egui::pos2(x1, r.max.y)));
+        }
+        start += row.char_count_including_newline().0;
+        if start >= e {
+            break;
+        }
+    }
+    out
+}
+
 fn range_rects(g: &Galley, s: usize, e: usize, to_eol: bool) -> Vec<Rect> {
     let a = g.pos_from_cursor(CCursor::new(s));
     let b = g.pos_from_cursor(CCursor::new(e));
