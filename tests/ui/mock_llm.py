@@ -13,6 +13,7 @@ models.json). What it says depends on the last user message:
                   skills/report/SKILL.md)
   /skill:challenge, expanded (a report's challenge): reply with challenge.md, what a
                   challenger found wrong with report-skill.md
+  Prove this finding ...   (Prove it on a challenge's finding) confirm it, with evidence
   Review comments on what you wrote. ...   (a review serpis sent) answer each comment,
                   quoting it as asked: "> quote" then "Answer N."
   READ:<path>     call read on that path
@@ -118,6 +119,8 @@ class Handler(BaseHTTPRequestHandler):
             if prompt.startswith('<skill name="challenge"'):
                 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "challenge.md")) as f:
                     delta["content"] = f.read()
+            if prompt.startswith("Prove this finding"):
+                delta["content"] = "[confirmed] With 8 threads it fails.\nEvidence: 3 of 500 runs failed with 8 threads."
             if prompt.startswith("INLINE"):
                 delta["content"] = "Run `cargo test` now."
             if prompt.startswith("CODE"):

@@ -44,6 +44,12 @@ pub struct Finding {
     /// What it ran and what that showed, or what it read.
     #[serde(default)]
     pub evidence: String,
+    /// Its challenger was asked to prove it (Prove it), and hasn't answered yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proving: bool,
+    /// Asked to prove it, the challenger took it back: why. It isn't sent (Keep anyway undoes it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
 }
 
 impl Finding {
@@ -81,8 +87,10 @@ pub struct Saved {
 }
 
 impl Saved {
+    /// What goes with your next message: comments not sent yet (a finding its challenger
+    /// withdrew left out).
     pub fn drafts(&self) -> Vec<&Comment> {
-        self.comments.iter().filter(|c| c.state == State::Draft).collect()
+        self.comments.iter().filter(|c| c.state == State::Draft && !c.challenge.as_ref().is_some_and(|f| f.withdrawn.is_some())).collect()
     }
 
     /// Keep a comment being written: a new one, or the saved one it changes. Empty text
@@ -428,7 +436,7 @@ pub fn to_json(c: &Comment) -> Value {
         "text": c.text,
         "kind": c.ask.name(),
         "state": c.state.name(),
-        "challenge": c.challenge.as_ref().map(|f| serde_json::json!({"verdict": f.verdict(), "finding": f.text, "evidence": f.evidence})),
+        "challenge": c.challenge.as_ref().map(|f| serde_json::json!({"verdict": f.verdict(), "finding": f.text, "evidence": f.evidence, "proving": f.proving, "withdrawn": f.withdrawn})),
     })
 }
 
@@ -496,9 +504,9 @@ mod tests {
 
     #[test]
     fn challenges_go_first_and_are_read_back() {
-        let finding = Finding { confirmed: true, text: "The race is still there.".into(), evidence: "8 workers: 3 of 500 failed.".into() };
+        let finding = Finding { confirmed: true, text: "The race is still there.".into(), evidence: "8 workers: 3 of 500 failed.".into(), ..Default::default() };
         let ch = Comment { quote: "This is the likely cause.".into(), label: "Changed 1".into(), opening: "Done: retries".into(), text: "Agreed. Add the run to the test.".into(), ask: Ask::Fix, challenge: Some(finding.clone()), ..Default::default() };
-        let bare = Comment { quote: "passed every time.".into(), label: "Checked 2".into(), ask: Ask::Fix, challenge: Some(Finding { confirmed: false, text: "One thread can't race.".into(), evidence: String::new() }), ..Default::default() };
+        let bare = Comment { quote: "passed every time.".into(), label: "Checked 2".into(), ask: Ask::Fix, challenge: Some(Finding { confirmed: false, text: "One thread can't race.".into(), ..Default::default() }), ..Default::default() };
         let q = Comment { quote: "Added jitter.".into(), label: "Changed 2".into(), text: "Same as the old client?".into(), ask: Ask::Question, ..Default::default() };
         let p = prompt(&[&q, &ch, &bare], "");
         assert!(p.starts_with(&format!("Review comments on what you wrote.\n\n## {CHALLENGED}\n")), "{p}");

@@ -1,8 +1,11 @@
--- Challenging a report: a chat in a git checkout with uncommitted work ends with a report; the
--- challenge makes a worktree with that work copied in, starts the challenger there (the mock
--- model's challenge.md answers the challenge skill), and puts its findings in the chat's review
--- under the claims they dispute. Sent, they go first, under their own heading. Once its chat
--- is closed and its time is up (chat-report-challenge-worktree-ttl), the worktree goes.
+-- Challenging a report, through real clicks and keys: a chat in a git checkout with uncommitted
+-- work ends with a report; its header's Challenge sets the challenge up in the composer (model,
+-- thinking, default from now on, a note), and RET starts it: a worktree with that work copied in,
+-- the challenger there (the mock model's challenge.md answers the challenge skill), and its
+-- findings in the chat's review under the claims they dispute, the claims that held marked. One
+-- is dismissed, one proven (Prove it), one gets a note; sent, they go first, under their own
+-- heading. Once its chat is closed and its time is up (chat-report-challenge-worktree-ttl), the
+-- worktree goes.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 local d = serpis.debug
 local agent_dir = os.getenv("SERPIS_AGENT_DIR")
@@ -47,6 +50,44 @@ local function find_asked(prefix)
   end
 end
 
+-- The transcript line (1-based) holding `text`, and the column it starts at (in characters).
+local function find(text)
+  local n = 0
+  for line in ((serpis.chat.transcript(chat) or "") .. "\n"):gmatch("(.-)\n") do
+    n = n + 1
+    local at = line:find(text, 1, true)
+    if at then return n, select(2, line:sub(1, at - 1):gsub("[^\128-\191]", "")) + 1 end
+  end
+end
+local function click_at(x, y)
+  d.mouse_move(x, y)
+  serpis.defer(100, function()
+    d.mouse_button(x, y, "left", true)
+    d.mouse_button(x, y, "left", false)
+  end)
+end
+local function click(r) if r then click_at(r.x + r.w / 2, r.y + r.h / 2) end end
+-- Click the words `label` on the line holding `text` (scrolled to first).
+local function click_words(text, label)
+  local line = find(text)
+  if not line then return T.check("found " .. text, nil, "a line") end
+  serpis.buffer.set_cursor(line, 1)
+  serpis.defer(400, function()
+    local _, col = find(text)
+    local t = ""
+    local n = 0
+    for l in ((serpis.chat.transcript(chat) or "") .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if n == line then t = l end
+    end
+    local at = t:find(label, 1, true)
+    local c = select(2, t:sub(1, at - 1):gsub("[^\128-\191]", "")) + 1
+    local r = d.cell_rect(line, c + 1)
+    if not r then return T.check("on screen: " .. label, nil, "a rect") end
+    click(r)
+  end)
+end
+
 local chat, run
 local claim = "This is the likely cause of the flaky retries_respect_limit test in CI."
 local check2 = "retries_respect_limit, 200 runs in a loop: passed every time."
@@ -58,7 +99,53 @@ local steps = {
     return 2500
   end,
   function()
-    serpis.command.run("chat-report-challenge", { model = "mock/other", note = "Focus on the race." })
+    serpis.command.run("chat-focus-transcript")
+    serpis.command.run("beginning-of-buffer")
+    return 600
+  end,
+  function()
+    local b = d.rect("report-challenge")
+    T.check("the report's header has Challenge", b ~= nil, true)
+    click(b)
+    return 600
+  end,
+  function()
+    local form = serpis.chat.review(chat).challenge_form
+    T.check("Challenge sets it up in the composer", form ~= nil, true)
+    T.check("on the chat's model", form and form.model, "mock/m")
+    T.check("its keys are on", (table.concat(serpis.buffer.modes(), ",")):find("chat-challenging", 1, true) ~= nil, true)
+    shot("1-form")
+    -- Another model (the picker is serpis's usual one), thinking off, and default from now on.
+    serpis.command.run("chat-challenge-form-model", "mock/other")
+    click(d.rect("challenge-thinking"))
+    return 500
+  end,
+  function()
+    click(d.rect("challenge-remember"))
+    return 400
+  end,
+  function()
+    local form = serpis.chat.review(chat).challenge_form
+    T.check("the model chosen", form and form.model, "mock/other")
+    T.check("a click on Thinking: the next level", form and form.thinking, "off")
+    T.check("default from now on, ticked", form and form.remember, true)
+    d.text("Focus on the race.")
+    return 400
+  end,
+  function()
+    shot("2-form-filled")
+    T.press("RET")
+    return 300
+  end,
+  function()
+    T.check("RET starts it", serpis.chat.review(chat).challenge_form, nil)
+    T.check("the composer is empty again", d.composer_state().text, "")
+    T.check("they are the default now", serpis.var.get("chat-report-challenge-model"), "mock/other")
+    T.check("its thinking too", serpis.var.get("chat-report-challenge-thinking"), "off")
+    return 200
+  end,
+  function()
+    shot("3-running")
     return 5000
   end,
   function()
@@ -76,11 +163,11 @@ local steps = {
     T.check("and the report", sent:find("retries_respect_limit", 1, true) ~= nil, true)
     T.check("and where it is", sent:find(run.worktree, 1, true) ~= nil, true)
     T.check("and what you added", sent:find("Focus on the race.", 1, true) ~= nil, true)
-    T.check("its findings are counted", run.findings, 2)
+    T.check("its findings are counted", run.findings, 3)
     T.check("and the claims that held", table.concat(run.held, ","), "Changed 2,Checked 1")
     local r = serpis.chat.review(chat)
-    T.check("they wait in the review", r.drafts, 2)
-    local a, b = r.comments[1], r.comments[2]
+    T.check("they wait in the review", r.drafts, 3)
+    local a, b = r.comments[1], r.comments[3]
     T.check("the first under the words it quotes", a and a.quote, claim)
     T.check("its place", a and a.label, "Changed 1")
     T.check("confirmed", a and a.challenge and a.challenge.verdict, "confirmed")
@@ -90,12 +177,60 @@ local steps = {
     local t = serpis.chat.transcript(chat) or ""
     T.check("its card is under the claim", t:find("Challenge   CONFIRMED   ·  draft · click to add a note", 1, true) ~= nil, true)
     T.check("with the finding", t:find("The race is still there: push_front runs before the counter is stored.", 1, true) ~= nil, true)
+    T.check("the header says how it went", d.rect("report-challenge-again") ~= nil and d.rect("report-challenge-open") ~= nil, true)
     serpis.command.run("chat-focus-transcript")
     serpis.command.run("beginning-of-buffer")
     return 600
   end,
   function()
-    shot("1-findings")
+    shot("4-findings")
+    -- Dismiss the one about Changed 3: its card in view first.
+    local line = find("A test helper in tests/common.rs still calls it.")
+    if line then serpis.buffer.set_cursor(line, 1) end
+    return 400
+  end,
+  function()
+    local line = find("A test helper in tests/common.rs still calls it.")
+    -- Its card's head is the line above.
+    local head = line and select(1, (function()
+      local n, t = 0, nil
+      for l in ((serpis.chat.transcript(chat) or "") .. "\n"):gmatch("(.-)\n") do
+        n = n + 1
+        if n == line - 1 then t = l end
+      end
+      return t
+    end)())
+    T.check("its card offers dismiss", head and head:find("dismiss", 1, true) ~= nil, true)
+    if head then click_words(head, "dismiss") end
+    return 900
+  end,
+  function()
+    local r = serpis.chat.review(chat)
+    T.check("dismissed: two left", r.drafts, 2)
+    -- Prove the plausible one left (Checked 2).
+    local line = find("The loop ran on one thread, which can't hit a race between workers.")
+    local head
+    local n = 0
+    for l in ((serpis.chat.transcript(chat) or "") .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if n == (line or 0) - 1 then head = l end
+    end
+    T.check("a plausible finding offers prove it", head and head:find("prove it", 1, true) ~= nil, true)
+    if head then click_words(head, "prove it") end
+    return 3000
+  end,
+  function()
+    local r = serpis.chat.review(chat)
+    local c = r.comments[#r.comments]
+    T.check("proven: now confirmed", c and c.challenge and c.challenge.verdict, "confirmed")
+    T.check("with what it ran", c and c.challenge and c.challenge.evidence, "3 of 500 runs failed with 8 threads.")
+    local sent = find_asked("Prove this finding") or ""
+    T.check("the challenger was asked about it", sent:find("Checked 2", 1, true) ~= nil, true)
+    serpis.command.run("beginning-of-buffer")
+    return 400
+  end,
+  function()
+    shot("5-proven")
     -- A note on the first: its card, in the composer.
     serpis.command.run("chat-comment-edit", serpis.chat.review(chat).comments[1].id)
     return 300

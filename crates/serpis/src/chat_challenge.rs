@@ -41,6 +41,10 @@ pub struct Run {
     pub error: Option<String>,
     /// Kept: its worktree isn't removed by itself.
     pub keep: bool,
+    /// A finding its challenger was asked to prove: (its comment's id in the challenged chat's
+    /// review, the challenger's entries when it was asked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proving: Option<(u64, usize)>,
 }
 
 /// The challenges this window started (kept in `<config>/challenges.json`, so a worktree is
@@ -116,6 +120,7 @@ pub fn to_json(ed: &Editor, r: &Run) -> Value {
         "held": r.held,
         "error": r.error,
         "keep": r.keep,
+        "proving": r.proving.map(|(id, _)| id),
         "removed_in": r.ended.filter(|_| !r.keep && ttl > 0).map(|e| (e + ttl).saturating_sub(now())),
     })
 }
@@ -417,6 +422,35 @@ pub fn tick(ed: &mut Editor) {
         let run = ed.challenges.runs[i].clone();
         ed.run_hook("chat-challenge-finished", &to_json(ed, &run));
     }
+    // A finding a challenger was asked to prove: its answer.
+    for i in 0..ed.challenges.runs.len() {
+        let run = ed.challenges.runs[i].clone();
+        let Some((id, before)) = run.proving else { continue };
+        let Some(buf) = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.challenger) else {
+            // Its chat was closed: no answer coming.
+            ed.challenges.runs[i].proving = None;
+            set_finding(ed, &run, id, |f| f.proving = false);
+            changed = true;
+            continue;
+        };
+        let Some(Some(done)) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| (c.entry_count() > before + 1).then(|| c.finished_reply()).flatten()) else { continue };
+        ed.challenges.runs[i].proving = None;
+        changed = true;
+        let answer = done.map(|t| parse_proof(&t));
+        set_finding(ed, &run, id, |f| {
+            f.proving = false;
+            match answer {
+                Ok(Proof::Confirmed(evidence)) => {
+                    f.confirmed = true;
+                    if !evidence.is_empty() {
+                        f.evidence = evidence;
+                    }
+                }
+                Ok(Proof::Withdrawn(why)) => f.withdrawn = Some(why),
+                Ok(Proof::Unclear) | Err(_) => {}
+            }
+        });
+    }
     // Worktrees whose time is up, their chats closed.
     let ttl = ttl(ed);
     let due: Vec<Run> = ed
@@ -466,7 +500,7 @@ pub fn comment_of(entry: usize, opening: &str, f: Found, quote: Option<String>) 
         label: f.label,
         opening: opening.to_string(),
         ask: crate::chat_review::Ask::Fix,
-        challenge: Some(crate::chat_review::Finding { confirmed: f.confirmed, text: f.text, evidence: f.evidence }),
+        challenge: Some(crate::chat_review::Finding { confirmed: f.confirmed, text: f.text, evidence: f.evidence, ..Default::default() }),
         ..Default::default()
     }
 }
@@ -509,6 +543,103 @@ pub fn keep(ed: &mut Editor, id: &str, on: bool) {
     save(ed);
 }
 
+/// What a challenger answered when asked to prove a finding.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Proof {
+    /// It ran something that shows it: what (its evidence).
+    Confirmed(String),
+    /// It took it back: why.
+    Withdrawn(String),
+    Unclear,
+}
+
+/// A challenger's answer to Prove it: `[confirmed]` with an `Evidence:` line, or `[withdrawn]`
+/// and why.
+pub fn parse_proof(text: &str) -> Proof {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let after_tag = |tag: &str| -> Option<String> {
+        let i = lines.iter().position(|l| l.to_lowercase().contains(tag))?;
+        let l = lines[i].replace("**", "");
+        let at = l.to_lowercase().find(tag)? + tag.len();
+        let rest = l[at..].trim().trim_start_matches(':').trim().to_string();
+        Some(if rest.is_empty() { lines.get(i + 1).map(|s| s.to_string()).unwrap_or_default() } else { rest })
+    };
+    let evidence = lines.iter().find_map(|l| l.replace("**", "").strip_prefix("Evidence:").map(|e| e.trim().to_string()));
+    if let Some(why) = after_tag("[withdrawn]") {
+        return Proof::Withdrawn(why);
+    }
+    match after_tag("[confirmed]") {
+        Some(rest) => Proof::Confirmed(evidence.unwrap_or(rest)),
+        None => Proof::Unclear,
+    }
+}
+
+/// Change finding `id` of `run`'s challenged chat: in its buffer when open, else its saved review.
+fn set_finding(ed: &mut Editor, run: &Run, id: u64, f: impl FnOnce(&mut crate::chat_review::Finding)) {
+    match crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.chat) {
+        Some(buf) => {
+            ed.with_buffer_as::<ChatBuffer, _>(buf, |c, ed| c.update_finding(ed, id, f));
+        }
+        None => {
+            let mut saved = crate::chat_review::load(None, &run.chat);
+            if let Some(found) = saved.comments.iter_mut().find(|c| c.id == id).and_then(|c| c.challenge.as_mut()) {
+                f(found);
+                let _ = crate::chat_review::save(None, &run.chat, &saved);
+            }
+        }
+    }
+}
+
+/// Prove it: ask the challenger of chat buffer `buf`'s finding `id` to show it by running
+/// something, or take it back. Its answer changes the finding (tick).
+pub fn prove(ed: &mut Editor, buf: BufferId, id: u64) -> anyhow::Result<()> {
+    load(ed);
+    let (chat, comment) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| (c.chat_id(), c.comment(id))).ok_or_else(|| anyhow::anyhow!("Not a chat buffer"))?;
+    let comment = comment.ok_or_else(|| anyhow::anyhow!("No comment {id} in the review"))?;
+    let finding = comment.challenge.clone().ok_or_else(|| anyhow::anyhow!("That comment isn't a challenge's"))?;
+    let i = ed.challenges.runs.iter().rposition(|r| r.chat == chat && r.entry == comment.entry).ok_or_else(|| anyhow::anyhow!("The challenge it came from is gone"))?;
+    let run = ed.challenges.runs[i].clone();
+    if run.ended.is_none() || run.proving.is_some() {
+        anyhow::bail!("Its challenger is busy: try again when it is done");
+    }
+    let challenger = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.challenger).ok_or_else(|| anyhow::anyhow!("Its challenger's chat is closed"))?;
+    let place = if comment.label.is_empty() { "In the report".to_string() } else { comment.label.clone() };
+    let quote: String = comment.quote.lines().map(|l| format!("> {l}\n")).collect();
+    let prompt = format!(
+        "Prove this finding of yours, or take it back.\n\n{place}:\n{quote}Your finding: {}\n\nRun something that shows it. Then answer with a line starting `[confirmed]` and a line `Evidence: what you ran and what it showed`, or a line starting `[withdrawn]` and why it doesn't hold.",
+        finding.text
+    );
+    let before = ed.with_buffer_as::<ChatBuffer, _>(challenger, |c, ed| {
+        let n = c.entry_count();
+        c.submit(ed, prompt, false);
+        n
+    });
+    ed.challenges.runs[i].proving = Some((id, before.unwrap_or(0)));
+    save(ed);
+    ed.with_buffer_as::<ChatBuffer, _>(buf, |c, ed| c.update_finding(ed, id, |f| f.proving = true));
+    ed.message("Asked the challenger to prove it…");
+    Ok(())
+}
+
+/// Show challenge `id`'s chat.
+pub fn open(ed: &mut Editor, id: &str) -> anyhow::Result<()> {
+    load(ed);
+    let challenger = ed.challenges.runs.iter().find(|r| r.id == id).map(|r| r.challenger.clone()).unwrap_or_default();
+    match crate::remote::chat_buffer(ed, crate::remote::LOCAL, &challenger) {
+        Some(b) => ed.show_buffer(b),
+        None => anyhow::bail!("Challenge {id}'s chat is closed"),
+    }
+    Ok(())
+}
+
+/// Stop challenge `id`'s challenger.
+pub fn stop(ed: &mut Editor, id: &str) {
+    let challenger = ed.challenges.runs.iter().find(|r| r.id == id).map(|r| r.challenger.clone()).unwrap_or_default();
+    if let Some(b) = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &challenger) {
+        ed.with_buffer_as::<ChatBuffer, _>(b, |c, _| c.abort());
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Settings and commands
 // ---------------------------------------------------------------------------------------------
@@ -523,16 +654,108 @@ pub fn install(ed: &mut Editor) {
     let o = crate::editor::BUILTIN;
     ed.define_command(
         "chat-report-challenge",
-        "Challenge the chat's latest report (or the report at entry `entry`): a fresh agent in a new worktree tries to prove its claims wrong, and its findings go to your review. Param: {model, thinking, note, entry}, each optional; chat-report-challenge-model and -thinking by default.",
+        "Challenge the chat's latest report: a fresh agent in a new worktree tries to prove its claims wrong, and its findings go to your review. With no param, set it up in the composer first (its model, thinking, and what to tell it); with {model, thinking, note, entry}, each optional, start it now (chat-report-challenge-model and -thinking by default; entry: the report's, 1-based).",
         o,
         |ed, a| {
             let buf = crate::commands::current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+            if a.params.is_empty() {
+                return crate::commands::with_chat(ed, |c, ed| c.open_challenge_form(ed, None));
+            }
             let p = a.params.first().cloned().unwrap_or(Value::Null);
             let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
             let entry = p.get("entry").and_then(Value::as_u64).map(|e| e.saturating_sub(1) as usize);
             start(ed, buf, entry, Options { model: s("model"), thinking: s("thinking"), note: s("note").unwrap_or_default() })
         },
     );
+    let form = |ed: &mut Editor, f: &mut dyn FnMut(&mut ChatBuffer, &mut Editor)| crate::commands::with_chat(ed, |c, ed| f(c, ed));
+    ed.define_command("chat-challenge-form-submit", "Start the challenge set up in the composer, with what you typed as its note.", o, move |ed, _| form(ed, &mut |c, ed| c.submit_challenge_form(ed)));
+    ed.define_command("chat-challenge-form-cancel", "Drop the challenge being set up in the composer.", o, move |ed, _| form(ed, &mut |c, _| {
+        c.cancel_challenge_form();
+    }));
+    ed.define_command("chat-challenge-form-escape", "In vim's insert state, back to normal; otherwise drop the challenge being set up.", o, |ed, _| {
+        let id = ed.current_buffer();
+        if crate::packages::vim::state_of(ed, id).is_some_and(|s| s == crate::packages::vim::State::Insert) {
+            crate::packages::vim::set_state(ed, id, crate::packages::vim::State::Normal);
+            return Ok(());
+        }
+        crate::commands::with_chat(ed, |c, _| {
+            c.cancel_challenge_form();
+        })
+    });
+    ed.define_command("chat-challenge-form-model", "The model of the challenge being set up (param: provider/model-id; none: choose it).", o, |ed, a| {
+        if let Some(spec) = a.str(0).map(str::to_string) {
+            return crate::commands::with_chat(ed, |c, _| {
+                if let Some(f) = c.challenge_form_mut() {
+                    f.model = Some(spec);
+                }
+            });
+        }
+        let id = crate::commands::current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+        let ours = ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.state_now().model).flatten();
+        let vendor = |spec: &str| vendor_of(spec);
+        let ours_vendor = ours.as_deref().map(vendor).unwrap_or_default();
+        let configured = ed.registry.configured_providers();
+        let mut specs: Vec<(String, String)> = ed
+            .registry
+            .models()
+            .into_iter()
+            .filter(|m| configured.contains(&m.provider) && serpis_ai::api::chat_api(&m.api))
+            .map(|m| (format!("{}/{}", m.provider, m.id), m.display_name().to_string()))
+            .collect();
+        // Another vendor's models first: they catch more of what the author's missed.
+        specs.sort_by_key(|(spec, _)| (vendor(spec) == ours_vendor, spec.clone()));
+        let cands = specs.into_iter().map(|(spec, name)| {
+            let other = vendor(&spec) != ours_vendor;
+            crate::minibuffer::Candidate::new(spec).detail(if other { format!("{name}  · another vendor") } else { name })
+        }).collect();
+        ed.completing_read("Challenger's model: ", cands, true, move |ed, c, _| {
+            let Some(c) = c else { return };
+            ed.with_buffer_as::<ChatBuffer, _>(id, |chat, _| {
+                if let Some(f) = chat.challenge_form_mut() {
+                    f.model = Some(c.value);
+                }
+            });
+        });
+        Ok(())
+    });
+    ed.define_command("chat-challenge-form-thinking", "The thinking level of the challenge being set up: the next one, or the param (off, minimal, low, medium, high, xhigh, max; \"default\": new chats').", o, |ed, a| {
+        let set = a.str(0).map(str::to_string);
+        crate::commands::with_chat(ed, |c, _| {
+            let Some(f) = c.challenge_form_mut() else { return };
+            let levels: Vec<Option<String>> = std::iter::once(None).chain(serpis_ai::ThinkingLevel::ALL.iter().map(|l| Some(l.as_str().to_string()))).collect();
+            f.thinking = match set.as_deref() {
+                Some("default") => None,
+                Some(s) => Some(s.to_string()),
+                None => levels[(levels.iter().position(|l| *l == f.thinking).map_or(0, |p| p + 1)) % levels.len()].clone(),
+            };
+        })
+    });
+    ed.define_command("chat-challenge-form-remember", "Whether the model and thinking of the challenge being set up become the default (chat-report-challenge-model, -thinking).", o, |ed, _| {
+        crate::commands::with_chat(ed, |c, _| {
+            if let Some(f) = c.challenge_form_mut() {
+                f.remember = !f.remember;
+            }
+        })
+    });
+    ed.define_command("chat-challenge-prove", "Prove it: ask a finding's challenger to show it by running something, or take it back (param: the finding's comment id).", o, |ed, a| {
+        let id = a.params.first().and_then(Value::as_u64).ok_or_else(|| anyhow::anyhow!("chat-challenge-prove: which finding (its comment id)?"))?;
+        let buf = crate::commands::current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
+        prove(ed, buf, id)
+    });
+    ed.define_command("chat-challenge-keep-finding", "Keep a finding its challenger withdrew: it goes with your next message again (param: its comment id).", o, |ed, a| {
+        let id = a.params.first().and_then(Value::as_u64).ok_or_else(|| anyhow::anyhow!("chat-challenge-keep-finding: which finding (its comment id)?"))?;
+        crate::commands::with_chat(ed, |c, ed| {
+            c.update_finding(ed, id, |f| f.withdrawn = None);
+        })
+    });
+    ed.define_command("chat-challenge-stop", "Stop a challenge's challenger (param: its id; default the current chat's latest).", o, |ed, a| {
+        let id = challenge_id(ed, a.str(0))?;
+        stop(ed, &id);
+        Ok(())
+    });
+    for (k, c) in [("RET", "chat-challenge-form-submit"), ("C-RET", "chat-challenge-form-submit"), ("C-c C-c", "chat-challenge-form-submit"), ("C-c C-k", "chat-challenge-form-cancel"), ("ESC", "chat-challenge-form-escape"), ("M-m", "chat-challenge-form-model"), ("M-t", "chat-challenge-form-thinking")] {
+        ed.bind("chat-challenging", k, c, o);
+    }
     ed.define_command("chat-challenge-keep", "Keep a challenge's worktree instead of removing it a while after it ends (param: its id; default the current chat's latest). With C-u, let it go again.", o, |ed, a| {
         let id = challenge_id(ed, a.str(0))?;
         let on = a.prefix.is_none();
@@ -547,13 +770,23 @@ pub fn install(ed: &mut Editor) {
     });
     ed.define_command("chat-challenge-open", "Show a challenge's chat (param: its id; default the current chat's latest).", o, |ed, a| {
         let id = challenge_id(ed, a.str(0))?;
-        let challenger = ed.challenges.runs.iter().find(|r| r.id == id).map(|r| r.challenger.clone()).unwrap_or_default();
-        match crate::remote::chat_buffer(ed, crate::remote::LOCAL, &challenger) {
-            Some(b) => ed.show_buffer(b),
-            None => anyhow::bail!("Challenge {id}'s chat is closed"),
-        }
-        Ok(())
+        open(ed, &id)
     });
+}
+
+/// Who makes model `spec` (`provider/id`, or `openrouter/org/id`): the org OpenRouter names,
+/// else told by the model's name (`claude-…` is Anthropic's whichever provider serves it).
+pub fn vendor_of(spec: &str) -> String {
+    let parts: Vec<&str> = spec.split('/').collect();
+    let id = parts.last().copied().unwrap_or("").to_lowercase();
+    let by_name = [("claude", "anthropic"), ("gpt", "openai"), ("o1", "openai"), ("o3", "openai"), ("o4", "openai"), ("codex", "openai"), ("gemini", "google"), ("gemma", "google"), ("grok", "x-ai"), ("llama", "meta-llama"), ("mistral", "mistralai"), ("deepseek", "deepseek"), ("qwen", "qwen"), ("kimi", "moonshotai"), ("glm", "z-ai")];
+    if let Some((_, v)) = by_name.iter().find(|(p, _)| id.starts_with(p)) {
+        return v.to_string();
+    }
+    if parts.len() >= 3 {
+        return parts[parts.len() - 2].to_lowercase();
+    }
+    parts.first().map(|p| p.to_lowercase()).unwrap_or_default()
 }
 
 /// `given`, or the current chat's latest challenge.
@@ -592,6 +825,22 @@ mod tests {
         assert_eq!(plain(&found[0].quote), "This is the likely cause of the flaky retries_respect_limit test in CI.");
         // Nothing found.
         assert_eq!(parse_findings("Done: every claim held.\n\n## Checked\n\n- **Headline:** held.\n"), (vec![], vec!["Headline".to_string()]));
+    }
+
+    #[test]
+    fn vendors_are_told_apart() {
+        assert_eq!(vendor_of("anthropic/claude-opus-5-5"), vendor_of("openrouter/anthropic/claude-opus-5-5"));
+        assert_eq!(vendor_of("openrouter/google/gemini-3-pro"), "google");
+        assert_eq!(vendor_of("openai/gpt-5.1"), "openai");
+        assert_eq!(vendor_of("mock/m"), "mock");
+    }
+
+    #[test]
+    fn proofs_are_read() {
+        assert_eq!(parse_proof("[confirmed] It fails.\nEvidence: 3 of 500 runs failed with 8 threads."), Proof::Confirmed("3 of 500 runs failed with 8 threads.".into()));
+        assert_eq!(parse_proof("**[confirmed]** It fails with 8 threads."), Proof::Confirmed("It fails with 8 threads.".into()));
+        assert_eq!(parse_proof("Looked again.\n\n**[withdrawn]**\nThe test spawns its own workers."), Proof::Withdrawn("The test spawns its own workers.".into()));
+        assert_eq!(parse_proof("Hm, not sure."), Proof::Unclear);
     }
 
     #[test]
