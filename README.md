@@ -134,6 +134,19 @@ as a link back, and what you wrote; a diff page's review the same, with the code
 answer once it quotes them; the quote in the answer links back. All of it is read from the
 transcript, so it lasts as long as the chat.
 
+A report can be challenged (`chat-report-challenge`, with an optional `{model, thinking, note}`):
+a fresh agent, in a new worktree of the chat's checkout with its uncommitted work copied in, is
+sent the report with the `challenge` skill (`skills/challenge`) and tries to prove its claims
+wrong, running its checks again where it may (`chat-report-challenge-run`). What it finds goes to
+your review as drafts under the claims it disputes, each marked confirmed (it ran something) or
+plausible (it read the code), with its evidence. Click one to add your note, or delete it from
+the review. Sent, they go first, under their own heading, and the agent is asked to fix each or
+show why it is wrong. The challenger's model and thinking default to
+`chat-report-challenge-model` and `-thinking` (the chat's own model when unset); its worktree and
+branch are removed `chat-report-challenge-worktree-ttl` seconds (1800) after it ends, once its
+chat is closed (`chat-challenge-keep` keeps them, `chat-challenge-remove` removes them now,
+`chat-challenge-open` shows its chat). `serpis.chat.challenges()` lists a chat's challenges.
+
 Mermaid diagrams (` ```mermaid ` blocks) in a chat are drawn as part of the page, not as a
 picture: ariel-rs lays them out, and serpis paints the boxes, lines and text in its own font and
 the theme's colors (`diagram.rs`). Flowcharts, sequence and state diagrams draw; a
