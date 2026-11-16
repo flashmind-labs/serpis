@@ -43,6 +43,7 @@ pub mod minibuffer;
 pub mod motion;
 pub mod mouse;
 pub mod packages;
+pub mod pins;
 pub mod pickers;
 pub mod remote;
 pub mod terminals;
@@ -214,6 +215,7 @@ pub fn bootstrap(ed: &mut Editor) {
     mouse::install(ed);
     sidebar::install(ed);
     session_ui::install(ed);
+    pins::install(ed);
     remote::install(ed);
     terminals::install(ed);
     machines::install(ed);

@@ -11,7 +11,7 @@
 //! a worktree of their own (`worktree-new-chat`). Typing in the sidebar searches all buffers
 //! by name, title, project, branch, state and (from three characters) content.
 //!
-//! Settings: `sidebar-visible`, `sidebar-width`, `sidebar-kinds`, `sidebar-sort`,
+//! Settings: `sidebar-visible`, `sidebar-width`, `sidebar-kinds`, `sidebar-sort`, `chat-pins`,
 //! `sidebar-show-other-buffers`, `sidebar-show-empty-worktrees`, `sidebar-git-refresh`,
 //! `sidebar-jump-to-workspace`, `sidebar-buffer-menu`, `sidebar-project-menu`,
 //! `sidebar-worktree-menu`, `projects`, `agent-programs`, `new-buffer-directory`,
@@ -56,6 +56,8 @@ pub struct GitInfo {
 /// A selectable sidebar row (keyboard navigation and commands act on the selected one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowRef {
+    /// A persistent shortcut to a chat, whether its buffer is currently open or not.
+    Pinned(crate::pins::Pin),
     Project(PathBuf),
     Worktree(PathBuf),
     Item(BufferId),
@@ -724,6 +726,13 @@ pub fn self_insert(ed: &mut Editor, chord: &KeyChord) {
 
 fn activate(ed: &mut Editor, split: bool) {
     match selected_row(ed) {
+        Some(RowRef::Pinned(pin)) => {
+            if split {
+                ed.sidebar.focused = false;
+                ed.split_window(false);
+            }
+            crate::pins::open(ed, &pin);
+        }
         Some(RowRef::Item(id)) => {
             if split {
                 ed.sidebar.focused = false;
@@ -1058,7 +1067,7 @@ pub fn install(ed: &mut Editor) {
                     toggle_collapsed(ed, w);
                 }
             }
-            Some(RowRef::Session(_)) | None => {}
+            Some(RowRef::Pinned(_) | RowRef::Session(_)) | None => {}
         }
         Ok(())
     });
@@ -1245,6 +1254,8 @@ pub fn install(ed: &mut Editor) {
 /// Something a row asked for this frame (applied after drawing).
 enum Act {
     Open(BufferId),
+    OpenPin(crate::pins::Pin),
+    Unpin(crate::pins::Pin),
     Select(usize),
     Toggle(PathBuf),
     Resume(PathBuf),
@@ -1397,6 +1408,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list_rect).id_salt("sidebar-list"));
     child.set_clip_rect(list_rect);
     let projects = if query.is_empty() { projects(ed) } else { Vec::new() };
+    let pinned = if query.is_empty() { crate::pins::list(ed) } else { Vec::new() };
     let found = if query.is_empty() { Vec::new() } else { search(ed, &query) };
     let found_sessions = if query.is_empty() { Vec::new() } else { search_sessions(ed, &query) };
     let roots: Vec<PathBuf> = projects.iter().filter(|p| p.git).filter_map(|p| p.root.clone()).collect();
@@ -1435,10 +1447,17 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
             let hovered = ui.rect_contains_pointer(card);
             let id = ui.scope_id().with(("sb-item", buffer_id_to_u64(it.buffer)));
             let kill_r = Rect::from_center_size(egui::pos2(card.right() - 14.0 * k, card.center().y), Vec2::splat(22.0 * k));
+            let pin_r = Rect::from_center_size(egui::pos2(kill_r.left() - 12.0 * k, card.center().y), Vec2::splat(22.0 * k));
+            let chat = it.kind == "chat";
+            let pinned = chat && crate::pins::is_pinned(ed_ref, it.buffer);
+            if hovered && chat && chrome::ghost_button(ui, pin_r, id.with("pin"), t, if pinned { "Unpin chat" } else { "Pin chat" }, crate::pins::icon).clicked() {
+                acts.push(Act::Run("chat-pin-toggle".into(), vec![json!(buffer_id_to_u64(it.buffer))]));
+            }
             if hovered && chrome::ghost_button(ui, kill_r, id.with("kill"), t, "Kill buffer", chrome::cross).clicked() {
                 acts.push(Act::Run("sidebar-kill".into(), vec![json!(buffer_id_to_u64(it.buffer))]));
             }
-            let main_r = if hovered { Rect::from_min_max(card.min, egui::pos2(kill_r.left() - 2.0, card.bottom())) } else { card };
+            let buttons_left = if chat { pin_r.left() } else { kill_r.left() };
+            let main_r = if hovered { Rect::from_min_max(card.min, egui::pos2(buttons_left - 2.0, card.bottom())) } else { card };
             let resp = ui.interact(main_r, id, Sense::click());
             let p = ui.painter();
             let bg = if it.current { chrome::selected_bg(t) } else if resp.hovered() || is_sel { chrome::hover_bg(t) } else { Color32::TRANSPARENT };
@@ -1473,7 +1492,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 chrome::text(p, egui::pos2(rx - aw, y1), &age, tiny.clone(), t.fg_faint, aw + 1.0);
                 rx -= aw + 8.0 * k;
             } else {
-                rx = kill_r.left() - 4.0 * k;
+                rx = buttons_left - 4.0 * k;
             }
             if it.attention {
                 p.circle_filled(egui::pos2(rx - 3.0 * k, y1), 3.5 * k, if st == ActivityState::Error { t.red } else { t.accent });
@@ -1496,7 +1515,16 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 acts.push(Act::Run("sidebar-kill".into(), vec![json!(buffer_id_to_u64(it.buffer))]));
             }
             let mut chosen = None;
-            resp.context_menu(|ui| crate::mouse::menu_ui(ui, ed_ref, &bmenu, &mut chosen));
+            resp.context_menu(|ui| {
+                if chat {
+                    if ui.button(if pinned { "Unpin chat" } else { "Pin chat" }).clicked() {
+                        chosen = Some(("chat-pin-toggle".into(), Vec::new()));
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                crate::mouse::menu_ui(ui, ed_ref, &bmenu, &mut chosen)
+            });
             if let Some((cmd, mut args)) = chosen {
                 args.push(json!(buffer_id_to_u64(it.buffer)));
                 if cmd.starts_with("project-") || cmd.starts_with("worktree-") {
@@ -1566,6 +1594,67 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
                 }
             }
             return;
+        }
+
+        if !pinned.is_empty() {
+            section(ui, &format!("Pinned · {}", pinned.len()), 4.0 * k);
+            for (slot, chat) in pinned.iter().enumerate() {
+                let (idx, r, is_sel) = row(ui, RowRef::Pinned(chat.pin.clone()), 44.0 * k);
+                let card = Rect::from_min_max(egui::pos2(x0, r.top() + 1.0), egui::pos2(x1, r.bottom() - 1.0));
+                let hovered = ui.rect_contains_pointer(card);
+                let id = ui.scope_id().with(("sb-pin", &chat.pin.machine, &chat.pin.id));
+                let unpin_r = Rect::from_center_size(egui::pos2(card.right() - 14.0 * k, card.center().y), Vec2::splat(22.0 * k));
+                if hovered && chrome::ghost_button(ui, unpin_r, id.with("unpin"), t, "Unpin chat", chrome::cross).clicked() {
+                    acts.push(Act::Unpin(chat.pin.clone()));
+                }
+                let main_r = if hovered { Rect::from_min_max(card.min, egui::pos2(unpin_r.left() - 2.0, card.bottom())) } else { card };
+                let resp = ui.interact(main_r, id, Sense::click());
+                let p = ui.painter();
+                let current = chat.buffer.is_some_and(|buffer| ed_ref.current_buffer() == buffer);
+                let bg = if current { chrome::selected_bg(t) } else if resp.hovered() || is_sel { chrome::hover_bg(t) } else { Color32::TRANSPARENT };
+                p.rect_filled(card, 8.0 * k, bg);
+                if is_sel {
+                    p.rect_stroke(card, 8.0 * k, Stroke::new(1.0, chrome::tint(t.accent, 0.5)), StrokeKind::Inside);
+                }
+                let col = state_color(t, chat.state);
+                let icon_at = egui::pos2(card.left() + 15.0 * k, card.top() + 14.0 * k);
+                match chat.state {
+                    ActivityState::Working => {
+                        any_working = true;
+                        chrome::spinner(p, icon_at, 5.0 * k, time, col);
+                    }
+                    ActivityState::Waiting => { p.circle_filled(icon_at, 4.0 * k, col); }
+                    ActivityState::Error => chrome::cross(p, Rect::from_center_size(icon_at, Vec2::splat(9.0 * k)), col),
+                    _ => crate::pins::icon(p, Rect::from_center_size(icon_at, Vec2::splat(11.0 * k)), if current { t.accent } else { t.fg_faint }),
+                }
+                let tx = card.left() + 30.0 * k;
+                let mut rx = if hovered { unpin_r.left() - 4.0 * k } else { card.right() - 10.0 * k };
+                if !hovered {
+                    let label = format!("{}", slot + 1);
+                    let width = chrome::text_width(p, &label, tiny.clone());
+                    chrome::text(p, egui::pos2(rx - width, card.top() + 14.0 * k), &label, tiny.clone(), t.fg_faint, width + 1.0);
+                    rx -= width + 8.0 * k;
+                }
+                chrome::text(p, egui::pos2(tx, card.top() + 14.0 * k), &chat.title, title_font.clone(), if current || chat.attention { t.fg } else { chrome::tint(t.fg, 0.82) }, rx - tx);
+                let detail = if chat.project.is_empty() { chat.detail.clone() } else { format!("{} · {}", chat.project, chat.detail) };
+                chrome::text(p, egui::pos2(tx, card.bottom() - 13.0 * k), &detail, small.clone(), if matches!(chat.state, ActivityState::Idle | ActivityState::Exited) { t.fg_faint } else { col }, card.right() - 10.0 * k - tx);
+                if resp.clicked() {
+                    acts.push(Act::Select(idx));
+                    acts.push(Act::OpenPin(chat.pin.clone()));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Open").clicked() {
+                        acts.push(Act::OpenPin(chat.pin.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Unpin chat").clicked() {
+                        acts.push(Act::Unpin(chat.pin.clone()));
+                        ui.close();
+                    }
+                });
+            }
+            ui.add_space(6.0 * k);
+            section(ui, "Projects", 4.0 * k);
         }
 
         for pr in &projects {
@@ -1759,6 +1848,10 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
     for a in acts {
         match a {
             Act::Open(id) => ed.open_buffer(id),
+            Act::OpenPin(pin) => crate::pins::open(ed, &pin),
+            Act::Unpin(pin) => {
+                crate::pins::unpin_key(ed, &pin);
+            }
             Act::Select(i) => ed.sidebar.selected = i,
             Act::Toggle(p) => toggle_collapsed(ed, p),
             Act::Resume(p) => {

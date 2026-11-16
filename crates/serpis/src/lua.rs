@@ -817,9 +817,10 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         })?;
         lua_of(lua, &v)
     })?)?;
-    // serpis.sidebar.selected(): the selected row as {kind = "buffer"|"project"|"worktree", id|path}.
+    // serpis.sidebar.selected(): the selected row as {kind = "pin"|"buffer"|"project"|"worktree", id|path}.
     sb.set("selected", lua.create_function(|lua, ()| {
         let v = ed(|e| match e.sidebar.rows.get(e.sidebar.selected) {
+            Some(crate::sidebar::RowRef::Pinned(pin)) => json!({"kind": "pin", "machine": pin.machine, "id": pin.id}),
             Some(crate::sidebar::RowRef::Item(id)) => json!({"kind": "buffer", "id": buffer_id_to_u64(*id)}),
             Some(crate::sidebar::RowRef::Project(p)) => json!({"kind": "project", "path": p.to_string_lossy()}),
             Some(crate::sidebar::RowRef::Worktree(p)) => json!({"kind": "worktree", "path": p.to_string_lossy()}),
@@ -1240,6 +1241,21 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let id = chat_id(id)?;
         ed(|e| e.chats.get(&id).is_some_and(|c| c.running))
     })?)?;
+    // serpis.chat.pin(buf?): keep a persistent shortcut to the chat.
+    chat.set("pin", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| crate::pins::pin(e, id).map_err(|err| mlua::Error::runtime(err.to_string())))?
+    })?)?;
+    // serpis.chat.unpin(buf?): remove its persistent shortcut.
+    chat.set("unpin", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| crate::pins::unpin(e, id).map_err(|err| mlua::Error::runtime(err.to_string())))?
+    })?)?;
+    // serpis.chat.pinned(): ordered persistent shortcuts, including closed saved sessions.
+    chat.set("pinned", lua.create_function(|lua, ()| {
+        let v = ed(|e| crate::pins::list(e).into_iter().map(|chat| chat.to_json()).collect::<Vec<_>>())?;
+        lua_of(lua, &v)
+    })?)?;
     // serpis.chat.abort(buf?): stop the running agent (safe from the chat's own hooks).
     chat.set("abort", lua.create_function(move |_, id: Option<u64>| {
         let id = chat_id(id)?;
@@ -1563,6 +1579,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                 .zip(&e.sidebar.row_rects)
                 .map(|(row, r)| {
                     let mut o = match row {
+                        crate::sidebar::RowRef::Pinned(pin) => json!({"kind": "pin", "machine": pin.machine, "id": pin.id}),
                         crate::sidebar::RowRef::Item(id) => json!({"kind": "buffer", "id": buffer_id_to_u64(*id)}),
                         crate::sidebar::RowRef::Project(p) => json!({"kind": "project", "path": p.to_string_lossy()}),
                         crate::sidebar::RowRef::Worktree(p) => json!({"kind": "worktree", "path": p.to_string_lossy()}),

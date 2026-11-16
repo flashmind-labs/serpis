@@ -194,6 +194,13 @@ The buttons at the top of the sidebar, and those on a project's or worktree's ro
 over it, include Review changes (`±`), which opens `diff-view` for the current folder, or for that
 row's project or worktree.
 
+Pin high-priority chats from their sidebar hover button, right-click menu, or the `chat-pin`
+command. They stay in a compact **Pinned** section above the project tree and remain there after
+restart or after their buffer closes; opening a closed pin resumes its saved session. `pinned-chats`
+opens a dashboard of the same shortcuts, and `pinned-chats-split` keeps that dashboard beside the
+active chat. Slots are stable in pin order, so `chat-pin-open 1` opens the first one. Use
+`chat-unpin` (or the row's ×) to remove a shortcut; the chat and its project remain untouched.
+
 Every project can have any number of chats. `worktree-new-chat` (`s-N`) asks for a branch,
 runs `git worktree add` under `worktree-directory` (default `~/.serpis/worktrees/<project>/<branch>`)
 and opens a chat there; `worktree-remove` kills the worktree's buffers and removes it after
@@ -202,6 +209,7 @@ it is listed with no buffers open. Chats are titled by their first prompt (`buff
 renames).
 
 From Lua: `serpis.sidebar.toggle/focus/query/items/selected/open`,
+`serpis.chat.pin/unpin/pinned`,
 `serpis.project.list/add/remove/repo/worktrees/new_worktree`,
 `serpis.buffer.activity/set_activity/title/set_title`, and the hooks `buffer-activity-changed`
 ({buffer, name, kind, state, previous, detail, agent, attention}), `worktree-created` and
