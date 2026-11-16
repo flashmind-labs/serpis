@@ -2855,12 +2855,20 @@ impl ChatBuffer {
         }
     }
 
+    fn focus_comment(&mut self, ed: &mut Editor) {
+        self.focus = Focus::Prompt;
+        let id = ed.current_buffer();
+        if crate::packages::vim::state_of(ed, id).is_some() {
+            crate::packages::vim::set_state(ed, id, crate::packages::vim::State::Insert);
+        }
+    }
+
     /// Start a comment on the transcript's selection (or the cursor's line): written in the
     /// composer, what was being typed there kept aside.
     pub fn start_comment(&mut self, ed: &mut Editor, ask: crate::chat_review::Ask) {
         self.ensure_review();
         if self.commenting.is_some() {
-            self.focus = Focus::Prompt;
+            self.focus_comment(ed);
             return;
         }
         let (a, b) = self.selected_range();
@@ -2880,7 +2888,7 @@ impl ChatBuffer {
         self.prompt.set_text("");
         self.commenting = Some((crate::chat_review::Writing { id: None, entry, quote, label, opening, ask, text: String::new() }, stash));
         self.view.anchor = None;
-        self.focus = Focus::Prompt;
+        self.focus_comment(ed);
         self.dirty = true;
         self.persist_review(ed);
     }
@@ -2896,7 +2904,7 @@ impl ChatBuffer {
         self.prompt.set_text(&c.text);
         self.prompt.move_to_end();
         self.commenting = Some((crate::chat_review::Writing { id: Some(id), entry: c.entry, quote: c.quote, label: c.label, opening: c.opening, ask: c.ask, text: String::new() }, stash));
-        self.focus = Focus::Prompt;
+        self.focus_comment(ed);
         self.dirty = true;
         self.persist_review(ed);
     }
