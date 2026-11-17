@@ -3677,7 +3677,10 @@ impl ChatBuffer {
             let run = runs.iter().rev().find(|(r, _)| r.entry == *entry);
             // Buttons, right to left, then what to say before them.
             let mut buttons: Vec<(&str, bool, ReportAct, &'static str)> = Vec::new();
-            let mut say: Option<(String, Color32)> = None;
+            // What to say, longest first: the first that fits is shown (a spinner alone, at least,
+            // while it runs).
+            let mut say: Vec<String> = Vec::new();
+            let mut color = theme.accent;
             let mut spinning = false;
             match run {
                 None if enabled && !self.running() => buttons.push(("Challenge", true, ReportAct::Challenge(*entry), "report-challenge")),
@@ -3689,8 +3692,12 @@ impl ChatBuffer {
                     }
                     let secs = now.saturating_sub(r.started);
                     let model = r.model.as_deref().map(|m| short_model(m.rsplit('/').next().unwrap_or(m)).to_string()).unwrap_or_default();
-                    let what = if r.challenger.is_empty() { "Setting up the challenge".to_string() } else { format!("Challenging · {model} · {}:{:02}", secs / 60, secs % 60) };
-                    say = Some((what, theme.accent));
+                    let time = format!("{}:{:02}", secs / 60, secs % 60);
+                    say = if r.challenger.is_empty() {
+                        vec!["Setting up the challenge".into(), "Setting up".into()]
+                    } else {
+                        vec![format!("Challenging · {model} · {time}"), format!("Challenging · {time}"), time]
+                    };
                     spinning = true;
                 }
                 Some((r, open)) => {
@@ -3701,12 +3708,12 @@ impl ChatBuffer {
                         buttons.push(("Open chat", false, ReportAct::OpenChat(r.id.clone()), "report-challenge-open"));
                     }
                     let held = if r.held.is_empty() { String::new() } else { format!("  ·  {} held", r.held.len()) };
-                    say = Some(match (&r.error, r.findings) {
-                        (Some(_), _) => ("The challenge stopped".to_string(), theme.yellow),
-                        (None, 0) => (format!("Challenged: nothing wrong found{held}"), theme.green),
-                        (None, 1) => (format!("Challenged: 1 finding{held}"), theme.red),
-                        (None, n) => (format!("Challenged: {n} findings{held}"), theme.red),
-                    });
+                    let plural = if r.findings == 1 { "" } else { "s" };
+                    (say, color) = match (&r.error, r.findings) {
+                        (Some(_), _) => (vec!["The challenge stopped".into(), "Stopped".into()], theme.yellow),
+                        (None, 0) => (vec![format!("Challenged: nothing wrong found{held}"), "Nothing wrong found".into(), "Held".into()], theme.green),
+                        (None, n) => (vec![format!("Challenged: {n} finding{plural}{held}"), format!("{n} finding{plural}")], theme.red),
+                    };
                 }
             }
             let total: f32 = buttons.iter().map(|(l, ..)| w(l) + 6.0 * k).sum();
@@ -3726,17 +3733,25 @@ impl ChatBuffer {
                 }
                 right = r.left() - 6.0 * k;
             }
-            if let Some((text, color)) = say {
-                let tw = crate::chrome::text_width(&painter, &text, small.clone());
-                let x = right - 6.0 * k - tw;
-                if x > text_end + 12.0 * k {
-                    crate::chrome::text(&painter, egui::pos2(x, cy), &text, small.clone(), color, tw + 1.0);
-                    if spinning {
-                        let time = ui.ctx().input(|i| i.time);
-                        crate::chrome::spinner(&painter, egui::pos2(x - 10.0 * k, cy), 5.0 * k, time, color);
-                        ui.ctx().request_repaint_after(Duration::from_millis(50));
-                    }
+            // Room the spinner takes before the text.
+            let lead = if spinning { 16.0 * k } else { 0.0 };
+            let mut x = right - 6.0 * k;
+            for text in &say {
+                let tw = crate::chrome::text_width(&painter, text, small.clone());
+                if right - 6.0 * k - tw - lead > text_end + 12.0 * k {
+                    x = right - 6.0 * k - tw;
+                    crate::chrome::text(&painter, egui::pos2(x, cy), text, small.clone(), color, tw + 1.0);
+                    rects.push(("report-challenge-status", Rect::from_min_max(egui::pos2(x, cy - 8.0 * k), egui::pos2(x + tw, cy + 8.0 * k))));
+                    break;
                 }
+            }
+            if spinning {
+                if x - lead > text_end + 12.0 * k {
+                    let time = ui.ctx().input(|i| i.time);
+                    crate::chrome::spinner(&painter, egui::pos2(x - 10.0 * k, cy), 5.0 * k, time, color);
+                    rects.push(("report-challenge-spinner", Rect::from_center_size(egui::pos2(x - 10.0 * k, cy), egui::vec2(10.0 * k, 10.0 * k))));
+                }
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
             }
             // Claims that held, marked after their text.
             for label in run.filter(|(r, _)| r.ended.is_some()).map(|(r, _)| r.held.clone()).unwrap_or_default() {
