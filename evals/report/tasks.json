@@ -1,0 +1,22 @@
+[
+  {
+    "id": "phase-heading",
+    "kind": "investigate",
+    "prompt": "When I comment on a paragraph that sits under a heading ending in a number, like `## Phase 2`, in a chat, the review message serpis sends for it says `item 2 under \"Phase\"` instead of `under \"Phase 2\"`. Find out why. Don't change any code yet."
+  },
+  {
+    "id": "test-order",
+    "kind": "investigate",
+    "prompt": "`scripts/ui-test.sh \"report_replies report_challenge\"` fails two checks in report_challenge (\"sent, challenges come first\" and \"with your note\"), but `scripts/ui-test.sh report_challenge` on its own passes. Find out why. Don't run the UI tests (they open windows), and don't change any code yet."
+  },
+  {
+    "id": "ls-hidden",
+    "kind": "change",
+    "prompt": "Give the `ls` tool (crates/serpis-agent/src/tools/ls.rs) a `hidden` parameter: false leaves out entries whose name starts with a dot. Default true, so it lists them as it does now. Add a test.",
+    "review": {
+      "fix_needs_you": "Go with what you recommend.",
+      "fix": "Say in the tool's description that dotfiles are listed unless hidden is false.",
+      "question": "Why did you do it this way?"
+    }
+  }
+]

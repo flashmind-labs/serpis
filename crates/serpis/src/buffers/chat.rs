@@ -1620,14 +1620,14 @@ fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap
 
 /// How a report written to the report skill (skills/report) turned out: its first word.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Outcome {
+pub enum Outcome {
     Done,
     Partly,
     Blocked,
 }
 
 impl Outcome {
-    fn badge(self) -> (&'static str, Face) {
+    pub fn badge(self) -> (&'static str, Face) {
         match self {
             Outcome::Done => ("Done", Face::BadgeGood),
             Outcome::Partly => ("Partly done", Face::BadgeWarn),
@@ -1637,30 +1637,33 @@ impl Outcome {
 }
 
 /// A report in the report skill's shape: the outcome, its first sentence (the headline), the
-/// rest of the opening, then its `##` sections in order (title, body).
+/// rest of the opening, then its `##` sections in order (title, body). Public for the report
+/// eval (evals/report), which scores reports as serpis reads them.
 #[derive(Debug)]
-struct Shaped {
-    outcome: Outcome,
-    headline: String,
-    intro: String,
-    sections: Vec<(String, String)>,
+pub struct Shaped {
+    pub outcome: Outcome,
+    pub headline: String,
+    pub intro: String,
+    pub sections: Vec<(String, String)>,
 }
 
 impl Shaped {
     /// Items under "Needs you".
-    fn needs_you(&self) -> usize {
+    pub fn needs_you(&self) -> usize {
         self.sections.iter().filter(|(t, _)| t.eq_ignore_ascii_case("needs you")).map(|(_, b)| top_items(b)).sum()
     }
 }
 
 /// Top-level list items in markdown.
-fn top_items(body: &str) -> usize {
+pub fn top_items(body: &str) -> usize {
     body.lines().filter(|l| !l.starts_with(' ') && list_item(l).is_some()).count()
 }
 
 /// `text` read as a report written to the report skill: it opens with `Done`, `Partly done`
-/// or `Blocked` and a colon. None for anything else (it is shown as plain markdown).
-fn shaped_report(text: &str) -> Option<Shaped> {
+/// or `Blocked` and a colon. None for anything else (it is shown as plain markdown). `Found` and
+/// `Found it` count as Done: agents open about one investigation report in six with them,
+/// whatever the skill says (evals/report).
+pub fn shaped_report(text: &str) -> Option<Shaped> {
     let text = text.trim_start();
     let (head, body) = match text.find("\n## ") {
         Some(i) => (&text[..i], &text[i + 1..]),
@@ -1669,7 +1672,7 @@ fn shaped_report(text: &str) -> Option<Shaped> {
     let (first, rest) = head.split_once("\n\n").unwrap_or((head, ""));
     let first = first.trim().trim_start_matches("**");
     let lower = first.to_lowercase();
-    let (outcome, n) = [("partly done", Outcome::Partly), ("partially done", Outcome::Partly), ("done", Outcome::Done), ("blocked", Outcome::Blocked)]
+    let (outcome, n) = [("partly done", Outcome::Partly), ("partially done", Outcome::Partly), ("done", Outcome::Done), ("found it", Outcome::Done), ("found", Outcome::Done), ("blocked", Outcome::Blocked)]
         .into_iter()
         .find(|(w, _)| lower.starts_with(w))
         .map(|(w, o)| (o, w.len()))?;
@@ -1707,7 +1710,7 @@ fn shaped_report(text: &str) -> Option<Shaped> {
 
 /// What a check under "Checked" found, from the first word of its result ("**Tests:**
 /// passes"): ✓, ✗, or ○ for what was not checked. None when it can't tell (a plain bullet).
-fn check_mark(text: &str) -> Option<(&'static str, Face)> {
+pub fn check_mark(text: &str) -> Option<(&'static str, Face)> {
     let lower = text.trim().to_lowercase();
     if ["not checked", "not tested", "not run", "unchecked", "untested"].iter().any(|p| lower.starts_with(p)) {
         return Some(("○", Face::MetaWarn));
@@ -4855,6 +4858,10 @@ mod tests {
         assert_eq!(sh.needs_you(), 2);
         assert_eq!(shaped_report("**Partly done:** half of it.").unwrap().outcome, Outcome::Partly);
         assert_eq!(shaped_report("Blocked — no access.").unwrap().outcome, Outcome::Blocked);
+        // What agents write for an investigation.
+        assert_eq!(shaped_report("Found it: the key ignores the locale.").map(|s| (s.outcome, s.headline)), Some((Outcome::Done, "The key ignores the locale.".to_string())));
+        assert_eq!(shaped_report("**Found:** a race.").unwrap().outcome, Outcome::Done);
+        assert!(shaped_report("Found three files in src.").is_none());
         // Anything else stays plain markdown.
         assert!(shaped_report("I've finished the review.").is_none());
         assert!(shaped_report("Doneness is relative.").is_none());

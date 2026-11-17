@@ -866,6 +866,7 @@ cargo test                 # unit tests
 scripts/ui-test.sh         # drives a real window: vim grammar, emacs keys, terminal, layout, workspaces, sidebar, sessions
 scripts/ui-test.sh --narrow  # the same at 760x560, however big the window is
 scripts/promo/build.sh     # the promo video, from a scripted run (scripts/promo/README.md)
+scripts/report-eval.sh     # agents' reports with each variant of the report skill, on real tasks (costs money: evals/report/README.md)
 ```
 
 Every UI test also checks that no controls overlap or spill out of their place. These are
