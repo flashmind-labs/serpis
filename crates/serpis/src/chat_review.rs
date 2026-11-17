@@ -149,6 +149,13 @@ pub struct Framing {
     pub fix: String,
 }
 
+/// chat-review-reply-instructions' default.
+pub const REPLY_INSTRUCTIONS: &str = "Reply with a report, as after any task. Each change asked for is a bullet under `## Changed`. Each answer comes after the report's first line, quoting what it answers. A place such as item 2 under \"Needs you\" is in your last report: don't use it as a heading.";
+/// chat-review-question-instructions' default.
+pub const QUESTION_INSTRUCTIONS: &str = "Answer each, quoting it. Change nothing for these.";
+/// chat-review-fix-instructions' default.
+pub const FIX_INSTRUCTIONS: &str = "Make these changes. When one is unclear or wrong, say so instead of guessing.";
+
 /// What a review message says, from the settings: how to reply only when the agent writes
 /// reports (chat-report-skill).
 pub fn framing(ed: &crate::editor::Editor) -> Framing {
@@ -442,13 +449,9 @@ pub fn install(ed: &mut crate::editor::Editor) {
     use crate::commands::with_chat;
     use serde_json::json;
     let o = crate::editor::BUILTIN;
-    ed.defvar(
-        "chat-review-reply-instructions",
-        json!("Reply with a report, as after any task. Each change asked for is a bullet under `## Changed`. Each answer comes after the report's first line, quoting what it answers. A place such as item 2 under \"Needs you\" is in your last report: don't use it as a heading."),
-        "What a review sent to a chat's agent says first, about how to reply (only while chat-report-skill is on). Empty: nothing.",
-    );
-    ed.defvar("chat-review-question-instructions", json!("Answer each, quoting it. Change nothing for these."), "What a review sent to a chat's agent says about questions.");
-    ed.defvar("chat-review-fix-instructions", json!("Make these changes. When one is unclear or wrong, say so instead of guessing."), "What a review sent to a chat's agent says about changes asked for.");
+    ed.defvar("chat-review-reply-instructions", json!(REPLY_INSTRUCTIONS), "What a review sent to a chat's agent says first, about how to reply (only while chat-report-skill is on). Empty: nothing.");
+    ed.defvar("chat-review-question-instructions", json!(QUESTION_INSTRUCTIONS), "What a review sent to a chat's agent says about questions.");
+    ed.defvar("chat-review-fix-instructions", json!(FIX_INSTRUCTIONS), "What a review sent to a chat's agent says about changes asked for.");
     ed.define_command("chat-ask", "Ask a question about the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Question)));
     ed.define_command("chat-comment", "Ask for a change about the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Fix)));
     ed.define_command("chat-comment-save", "Save the comment being written to the chat's review, sent with your next message (emptied, a saved one is deleted).", o, |ed, _| with_chat(ed, |c, ed| c.save_comment(ed)));
