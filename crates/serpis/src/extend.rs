@@ -99,6 +99,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.chat.attachments", "(buf?): images waiting for the next message: {name, width, height, mime}."),
     ("serpis.chat.transcript", "(buf?): the transcript's text as shown (on screen or not)."),
     ("serpis.chat.review", "(buf?): the chat's review of what the agent wrote: {comments = {{id, entry, quote, label, text, kind = \"question\"|\"fix\", state = \"draft\"|\"sent\"}}, drafts, writing = {quote, label, kind, text, id}?}. Comments start from a selection (chat-ask, chat-comment), are saved as you read (kept between runs) and go with your next message."),
+    ("serpis.chat.challenges", "(buf?): the challenges of its reports (chat-report-challenge), oldest first: {{id, entry, challenger (its chat's id), challenger_buffer, model, worktree, branch, running, findings, held = {claims}, error, keep, removed_in = seconds | nil}}."),
     ("serpis.chat.prompt", "(buf?, text): send text as if typed (a running agent is steered)."),
     ("serpis.chat.append", "(buf?, type, data): add a custom entry to its session file (pi's `custom` entries); kept when the session is resumed."),
     ("serpis.chat.entries", "(buf?, type?): its custom entries' data (of one type), oldest first; restored on resume, so use them for per-chat state."),
@@ -243,6 +244,8 @@ pub const HOOKS: &[(&str, &str)] = &[
     ("diff-comment-added", "{id, path}: a comment was written on the diff page."),
     ("diff-review-send", "{text, comments, target, compared}: a review is about to go to an agent. Return a string to send that instead, or false to not send it."),
     ("diff-review-sent", "{comments = ids, target}: it went."),
+    ("chat-challenge-started", "{id, chat, worktree}: a report's challenge started (chat-report-challenge)."),
+    ("chat-challenge-finished", "A challenge ended: as serpis.chat.challenges lists it."),
     ("worktree-created", "{project, path, branch}."),
     ("worktree-removed", "{project, path, branch}."),
 ];

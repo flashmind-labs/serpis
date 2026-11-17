@@ -11,6 +11,9 @@ models.json). What it says depends on the last user message:
   REPORT          reply with report.md (beside this file): an agent's summary of a code review
   REPORT:<name>   reply with report-<name>.md: the same review written another way (skill: by
                   skills/report/SKILL.md)
+  /skill:challenge, expanded (a report's challenge): reply with challenge.md, what a
+                  challenger found wrong with report-skill.md
+  Prove this finding ...   (Prove it on a challenge's finding) confirm it, with evidence
   Review comments on what you wrote. ...   (a review serpis sent) answer each comment,
                   quoting it as asked: "> quote" then "Answer N."
   READ:<path>     call read on that path
@@ -64,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
                 "tool_content": text_of(last.get("content")) if last.get("role") == "tool" else None,
                 "tools": [t["function"]["name"] for t in body.get("tools", [])],
                 "images": sum(1 for p in (last.get("content") if isinstance(last.get("content"), list) else []) if isinstance(p, dict) and p.get("type") == "image_url"),
-                "text": text_of(last.get("content"))[:4000],
+                "text": text_of(last.get("content"))[:12000],
                 "skills": "<available_skills>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
                 "serpis_docs": "Call serpis_api first" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
                 "report_skill": "<name>report</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
@@ -113,6 +116,11 @@ class Handler(BaseHTTPRequestHandler):
                 name = f"report-{variant}.md" if variant.isidentifier() else "report.md"
                 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
                     delta["content"] = f.read()
+            if prompt.startswith('<skill name="challenge"'):
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "challenge.md")) as f:
+                    delta["content"] = f.read()
+            if prompt.startswith("Prove this finding"):
+                delta["content"] = "[confirmed] With 8 threads it fails.\nEvidence: 3 of 500 runs failed with 8 threads."
             if prompt.startswith("INLINE"):
                 delta["content"] = "Run `cargo test` now."
             if prompt.startswith("CODE"):

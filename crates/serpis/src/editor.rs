@@ -304,6 +304,8 @@ pub struct Editor {
     pub remote: crate::remote::Remotes,
     /// Work in progress the window shows (busy-indicator): connecting to a machine, ...
     pub busy: Vec<Busy>,
+    /// Reports being challenged, and challenges whose worktree is still there.
+    pub challenges: crate::chat_challenge::Challenges,
 }
 
 impl Editor {
@@ -395,6 +397,7 @@ impl Editor {
             loaded_extensions: Vec::new(),
             remote: Default::default(),
             busy: Vec::new(),
+            challenges: Default::default(),
             frame_parts: Vec::new(),
             slow_frames: Default::default(),
         }
@@ -1492,6 +1495,7 @@ impl Editor {
         crate::plugins::poll_reload(self);
         crate::remote::tick(self);
         crate::terminals::tick(self);
+        crate::chat_challenge::tick(self);
         if let Some((_, _, t)) = &self.echo {
             if t.elapsed() > Duration::from_secs(8) && self.minibuffer.is_none() {
                 self.echo = None;

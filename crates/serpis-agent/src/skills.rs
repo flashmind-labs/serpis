@@ -49,10 +49,12 @@ pub struct Places {
 
 /// The skills serpis comes with: (name, its SKILL.md). `report`: how to write the message that
 /// ends a task (serpis draws one written that way as its parts). `diagrams`: when to draw a
-/// diagram, and how to write one so serpis draws it.
+/// diagram, and how to write one so serpis draws it. `challenge`: how an agent challenges
+/// another's report (serpis places what it finds on that report); by name only.
 pub const BUILTIN: &[(&str, &str)] = &[
     ("report", include_str!("../../../skills/report/SKILL.md")),
     ("diagrams", include_str!("../../../skills/diagrams/SKILL.md")),
+    ("challenge", include_str!("../../../skills/challenge/SKILL.md")),
 ];
 
 /// The skills serpis comes with, as files in `agent_dir`'s `builtin-skills` (a model reads a

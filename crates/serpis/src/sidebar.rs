@@ -938,6 +938,13 @@ pub fn remove_worktree(ed: &mut Editor, path: PathBuf) {
     });
 }
 
+/// A worktree of project `root` was removed outside the sidebar: forget it, and list them again.
+pub fn worktree_removed(ed: &mut Editor, root: &Path, wt: &Path) {
+    ed.sidebar.repos.clear();
+    ed.sidebar.collapsed.remove(wt);
+    refresh_git(ed, &[root.to_path_buf()], true);
+}
+
 pub fn add_project(ed: &mut Editor, dir: &Path) {
     let root = ed.project_root_of(dir).unwrap_or_else(|| dir.to_path_buf());
     let mut list = var_list(ed, "projects");

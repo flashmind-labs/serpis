@@ -24,9 +24,38 @@ pub struct Comment {
     /// How the message it is about starts, so the agent knows which one.
     #[serde(default)]
     pub opening: String,
+    /// What you wrote: the question or change, or your note on a challenge's finding.
     pub text: String,
     pub ask: Ask,
     pub state: State,
+    /// A finding of an agent that challenged the report ([`crate::chat_challenge`]), placed
+    /// here as a draft: `text` is then your note on it (may be empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<Finding>,
+}
+
+/// What a challenger found wrong with a claim.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Finding {
+    /// It ran something that shows it (else it only read the code).
+    pub confirmed: bool,
+    /// What is wrong.
+    pub text: String,
+    /// What it ran and what that showed, or what it read.
+    #[serde(default)]
+    pub evidence: String,
+    /// Its challenger was asked to prove it (Prove it), and hasn't answered yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proving: bool,
+    /// Asked to prove it, the challenger took it back: why. It isn't sent (Keep anyway undoes it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
+}
+
+impl Finding {
+    pub fn verdict(&self) -> &'static str {
+        if self.confirmed { "confirmed" } else { "plausible" }
+    }
 }
 
 /// A comment being written in the composer (`id`: the saved one being changed).
@@ -58,14 +87,17 @@ pub struct Saved {
 }
 
 impl Saved {
+    /// What goes with your next message: comments not sent yet (a finding its challenger
+    /// withdrew left out).
     pub fn drafts(&self) -> Vec<&Comment> {
-        self.comments.iter().filter(|c| c.state == State::Draft).collect()
+        self.comments.iter().filter(|c| c.state == State::Draft && !c.challenge.as_ref().is_some_and(|f| f.withdrawn.is_some())).collect()
     }
 
     /// Keep a comment being written: a new one, or the saved one it changes. Empty text
     /// deletes it. Its id.
     pub fn keep(&mut self, w: &Writing) -> Option<u64> {
-        if w.text.trim().is_empty() {
+        let finding = w.id.and_then(|id| self.comments.iter().find(|c| c.id == id)).and_then(|c| c.challenge.clone());
+        if w.text.trim().is_empty() && finding.is_none() {
             if let Some(id) = w.id {
                 self.comments.retain(|c| c.id != id);
             }
@@ -80,8 +112,21 @@ impl Saved {
             }
         };
         let c = self.comments.iter_mut().find(|c| c.id == id)?;
-        *c = Comment { id, entry: w.entry, quote: w.quote.clone(), label: w.label.clone(), opening: w.opening.clone(), text: w.text.trim().to_string(), ask: w.ask, state: State::Draft };
+        *c = Comment { id, entry: w.entry, quote: w.quote.clone(), label: w.label.clone(), opening: w.opening.clone(), text: w.text.trim().to_string(), ask: w.ask, state: State::Draft, challenge: finding };
         Some(id)
+    }
+
+    /// Add a challenger's findings as drafts. Their ids.
+    pub fn add_findings(&mut self, found: Vec<Comment>) -> Vec<u64> {
+        let mut ids = Vec::new();
+        for mut c in found {
+            self.next_id = self.next_id.max(self.comments.iter().map(|c| c.id).max().unwrap_or(0)) + 1;
+            c.id = self.next_id;
+            c.state = State::Draft;
+            ids.push(c.id);
+            self.comments.push(c);
+        }
+        ids
     }
 }
 
@@ -96,20 +141,38 @@ pub fn opening_of(text: &str) -> String {
 /// The message an agent gets for these comments, and what was typed with them (`also`).
 pub fn prompt(comments: &[&Comment], also: &str) -> String {
     let mut out = String::from("Review comments on what you wrote.");
+    let place_of = |c: &Comment| match (c.opening.is_empty(), c.label.is_empty()) {
+        (false, false) => format!("In your message that starts \"{}\", {}:", c.opening, c.label),
+        (false, true) => format!("In your message that starts \"{}\":", c.opening),
+        (true, false) => format!("{}:", c.label),
+        (true, true) => "On this:".to_string(),
+    };
+    let challenged: Vec<&&Comment> = comments.iter().filter(|c| c.challenge.is_some()).collect();
+    if !challenged.is_empty() {
+        out.push_str(&format!("\n\n## {CHALLENGED}\nAnother agent checked your report and found these. Answer each, quoting it: fix it, or show why it is wrong.\n"));
+        for c in challenged {
+            let Some(f) = &c.challenge else { continue };
+            out.push_str(&format!("\n{}\n", place_of(c)));
+            for l in c.quote.lines() {
+                out.push_str(&format!("> {}\n", l.trim_end()));
+            }
+            out.push_str(&format!("Challenge ({}): {}\n", f.verdict(), f.text.trim()));
+            if !f.evidence.trim().is_empty() {
+                out.push_str(&format!("Evidence: {}\n", f.evidence.trim()));
+            }
+            if !c.text.trim().is_empty() {
+                out.push_str(&format!("My note: {}\n", c.text.trim()));
+            }
+        }
+    }
     let section = |out: &mut String, ask: Ask, title: &str, how: &str| {
-        let of: Vec<&&Comment> = comments.iter().filter(|c| c.ask == ask).collect();
+        let of: Vec<&&Comment> = comments.iter().filter(|c| c.ask == ask && c.challenge.is_none()).collect();
         if of.is_empty() {
             return;
         }
         out.push_str(&format!("\n\n## {title}\n{how}\n"));
         for c in of {
-            let place = match (c.opening.is_empty(), c.label.is_empty()) {
-                (false, false) => format!("In your message that starts \"{}\", {}:", c.opening, c.label),
-                (false, true) => format!("In your message that starts \"{}\":", c.opening),
-                (true, false) => format!("{}:", c.label),
-                (true, true) => "On this:".to_string(),
-            };
-            out.push_str(&format!("\n{place}\n"));
+            out.push_str(&format!("\n{}\n", place_of(c)));
             for l in c.quote.lines() {
                 out.push_str(&format!("> {}\n", l.trim_end()));
             }
@@ -125,6 +188,9 @@ pub fn prompt(comments: &[&Comment], also: &str) -> String {
     }
     out
 }
+
+/// The heading challenges go under in a review message.
+pub const CHALLENGED: &str = "Challenged by another agent";
 
 /// A review message as sent, read back from the transcript: what each comment asked, where and
 /// about what. A chat's review (of what the agent wrote) or a diff page's (of code).
@@ -147,6 +213,9 @@ pub struct SentItem {
     /// The quote is code (a diff's).
     pub code: bool,
     pub text: String,
+    /// A challenge's finding (`text` is then the finding, and `note` what you added).
+    pub challenge: Option<Finding>,
+    pub note: String,
 }
 
 /// `text` read as a review message serpis sent (`prompt` here, or a diff page's): None for
@@ -166,6 +235,7 @@ pub fn parse_sent(text: &str) -> Option<Sent> {
     let diff = compared.is_some();
     let mut out = Sent { compared, ..Default::default() };
     let mut ask: Option<Ask> = None;
+    let mut challenges = false;
     let mut also: Option<Vec<&str>> = None;
     let mut item: Option<SentItem> = None;
     let mut in_code = false;
@@ -173,6 +243,31 @@ pub fn parse_sent(text: &str) -> Option<Sent> {
     let finish = |out: &mut Sent, item: &mut Option<SentItem>, text_lines: &mut Vec<&str>| {
         if let Some(mut it) = item.take() {
             it.text = text_lines.join("\n").trim().to_string();
+            if let Some(f) = it.challenge.as_mut() {
+                // "Challenge (confirmed): …", "Evidence: …", "My note: …".
+                let (mut finding, mut evidence, mut note) = (Vec::new(), Vec::new(), Vec::new());
+                let mut into = 0;
+                for l in it.text.lines() {
+                    if let Some(rest) = l.strip_prefix("Challenge (") {
+                        let (verdict, rest) = rest.split_once("): ").unwrap_or(("", rest));
+                        f.confirmed = verdict == "confirmed";
+                        finding.push(rest);
+                        into = 0;
+                    } else if let Some(rest) = l.strip_prefix("Evidence: ") {
+                        evidence.push(rest);
+                        into = 1;
+                    } else if let Some(rest) = l.strip_prefix("My note: ") {
+                        note.push(rest);
+                        into = 2;
+                    } else {
+                        [&mut finding, &mut evidence, &mut note][into].push(l);
+                    }
+                }
+                f.text = finding.join("\n").trim().to_string();
+                f.evidence = evidence.join("\n").trim().to_string();
+                it.note = note.join("\n").trim().to_string();
+                it.text = f.text.clone();
+            }
             out.items.push(it);
         }
         text_lines.clear();
@@ -192,7 +287,9 @@ pub fn parse_sent(text: &str) -> Option<Sent> {
         }
         if let Some(h) = line.strip_prefix("## ") {
             finish(&mut out, &mut item, &mut text_lines);
+            challenges = h.trim() == CHALLENGED;
             match h.trim() {
+                CHALLENGED => ask = Some(Ask::Fix),
                 "Questions" => ask = Some(Ask::Question),
                 "Changes asked for" | "Fix" => ask = Some(Ask::Fix),
                 "Also" => also = Some(Vec::new()),
@@ -216,7 +313,7 @@ pub fn parse_sent(text: &str) -> Option<Sent> {
         };
         if let Some(place) = place {
             finish(&mut out, &mut item, &mut text_lines);
-            item = Some(SentItem { ask: kind, place: place.replace('`', ""), code: diff, ..Default::default() });
+            item = Some(SentItem { ask: kind, place: place.replace('`', ""), code: diff, challenge: challenges.then(Finding::default), ..Default::default() });
             continue;
         }
         let Some(it) = item.as_mut() else { continue };
@@ -339,6 +436,7 @@ pub fn to_json(c: &Comment) -> Value {
         "text": c.text,
         "kind": c.ask.name(),
         "state": c.state.name(),
+        "challenge": c.challenge.as_ref().map(|f| serde_json::json!({"verdict": f.verdict(), "finding": f.text, "evidence": f.evidence, "proving": f.proving, "withdrawn": f.withdrawn})),
     })
 }
 
@@ -402,6 +500,31 @@ mod tests {
         assert_eq!((sent.items[1].ask, sent.items[1].place.as_str(), sent.items[1].text.as_str()), (Ask::Question, "src/a.rs:30 (on the old version)", "Why run it here?"));
         assert!(parse_sent("Review comments on the plan, please").is_none());
         assert!(parse_sent("Hello").is_none());
+    }
+
+    #[test]
+    fn challenges_go_first_and_are_read_back() {
+        let finding = Finding { confirmed: true, text: "The race is still there.".into(), evidence: "8 workers: 3 of 500 failed.".into(), ..Default::default() };
+        let ch = Comment { quote: "This is the likely cause.".into(), label: "Changed 1".into(), opening: "Done: retries".into(), text: "Agreed. Add the run to the test.".into(), ask: Ask::Fix, challenge: Some(finding.clone()), ..Default::default() };
+        let bare = Comment { quote: "passed every time.".into(), label: "Checked 2".into(), ask: Ask::Fix, challenge: Some(Finding { confirmed: false, text: "One thread can't race.".into(), ..Default::default() }), ..Default::default() };
+        let q = Comment { quote: "Added jitter.".into(), label: "Changed 2".into(), text: "Same as the old client?".into(), ask: Ask::Question, ..Default::default() };
+        let p = prompt(&[&q, &ch, &bare], "");
+        assert!(p.starts_with(&format!("Review comments on what you wrote.\n\n## {CHALLENGED}\n")), "{p}");
+        assert!(p.contains("In your message that starts \"Done: retries\", Changed 1:\n> This is the likely cause.\nChallenge (confirmed): The race is still there.\nEvidence: 8 workers: 3 of 500 failed.\nMy note: Agreed. Add the run to the test.\n"), "{p}");
+        assert!(p.contains("Checked 2:\n> passed every time.\nChallenge (plausible): One thread can't race.\n\n"), "{p}");
+        // Not repeated under the changes asked for.
+        assert!(!p.contains("## Changes asked for"), "{p}");
+        let sent = parse_sent(&p).unwrap();
+        assert_eq!(sent.items.len(), 3);
+        let (a, b, c) = (&sent.items[0], &sent.items[1], &sent.items[2]);
+        assert_eq!((a.place.as_str(), a.challenge.as_ref(), a.note.as_str(), a.text.as_str()), ("Changed 1", Some(&finding), "Agreed. Add the run to the test.", "The race is still there."));
+        assert_eq!((b.challenge.as_ref().map(|f| f.confirmed), b.note.as_str()), (Some(false), ""));
+        assert_eq!((c.ask, c.challenge.is_none()), (Ask::Question, true));
+        // A note emptied keeps the finding; a plain comment emptied goes.
+        let mut s = Saved::default();
+        let ids = s.add_findings(vec![bare.clone()]);
+        assert_eq!(s.keep(&Writing { id: Some(ids[0]), quote: bare.quote.clone(), ask: Ask::Fix, ..Default::default() }), Some(ids[0]));
+        assert!(s.comments[0].challenge.is_some());
     }
 
     #[test]

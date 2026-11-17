@@ -965,7 +965,7 @@ impl Chat {
                 }));
             }
         }
-        serpis_agent::skills::Places { agent_dir, pi_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default(), builtin: [("report", "chat-report-skill"), ("diagrams", "chat-diagrams")].into_iter().filter(|(_, var)| host.var_bool(var, true)).map(|(name, _)| name.to_string()).collect() }
+        serpis_agent::skills::Places { agent_dir, pi_dir, cwd: self.cwd.clone(), paths, claude: host.var_bool("agent-skills-claude", false), home: dirs::home_dir().unwrap_or_default(), builtin: [("report", "chat-report-skill"), ("diagrams", "chat-diagrams"), ("challenge", "chat-report-challenge")].into_iter().filter(|(_, var)| host.var_bool(var, true)).map(|(name, _)| name.to_string()).collect() }
     }
 
     /// The skills this chat has (none with `agent-skills` off).

@@ -127,6 +127,11 @@ pub struct ChatBuffer {
     commenting: Option<(crate::chat_review::Writing, String)>,
     /// The review's comments listed in the composer.
     review_open: bool,
+    /// A report's challenge being set up in the composer (its text is the note), and what was
+    /// typed there before.
+    challenge_form: Option<(ChallengeForm, String)>,
+    /// Each report's header line: (line, entry), for its Challenge button.
+    report_heads: Vec<(usize, usize)>,
     /// Transcript lines that show a comment: (line, its id), to change it on a click.
     comment_lines: Vec<(usize, u64)>,
     /// Where `find:<i>` links go: (text to find, entry, after it rather than before it).
@@ -154,6 +159,16 @@ pub struct ChatBuffer {
     pub attachments: Vec<Attachment>,
     /// chat-cache-indicator and chat-cache-status, as last read.
     show_cache: (bool, bool),
+}
+
+/// How a report's challenge is set up, in the composer: the challenger's model and thinking
+/// (None: new chats' default), and whether they become the default.
+#[derive(Debug, Clone, Default)]
+pub struct ChallengeForm {
+    pub entry: usize,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub remember: bool,
 }
 
 const PREVIEW_LINES: usize = 10;
@@ -207,6 +222,8 @@ impl ChatBuffer {
             review_key: None,
             commenting: None,
             review_open: false,
+            challenge_form: None,
+            report_heads: Vec::new(),
             comment_lines: Vec::new(),
             find_targets: Vec::new(),
             writing_saved: (String::new(), None),
@@ -936,6 +953,17 @@ impl ChatBuffer {
                 l.links.extend(code_links(&l.text));
             }
         }
+        // Each report's header: its first line.
+        let mut heads: Vec<(usize, usize)> = Vec::new();
+        for (i, e) in owner.iter().enumerate() {
+            if let Some(e) = *e
+                && reports.contains_key(&e)
+                && !heads.iter().any(|(_, h)| *h == e)
+            {
+                heads.push((i, e));
+            }
+        }
+        self.report_heads = heads;
         self.lines = out;
         self.line_entry = owner;
         self.thinking_lines = thinking_lines;
@@ -2626,6 +2654,18 @@ enum ReviewAct {
     Discard,
     Edit(u64),
     Delete(u64),
+    ChallengeSubmit,
+    ChallengeCancel,
+    ChallengeModel,
+    ChallengeThinking,
+    ChallengeRemember,
+}
+
+/// What a report's header was asked: challenge it (again), show the challenger's chat, stop it.
+enum ReportAct {
+    Challenge(usize),
+    OpenChat(String),
+    Stop(String),
 }
 
 /// A review serpis sent, drawn in your bubble: what it is, then each comment (its kind, where it
@@ -2633,9 +2673,13 @@ enum ReviewAct {
 fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut Vec<(String, usize, bool)>, k: f32) -> Vec<StyledLine> {
     use crate::chat_review::Ask;
     let mut out = Vec::new();
+    let challenges = sent.items.iter().filter(|i| i.challenge.is_some()).count();
     let questions = sent.items.iter().filter(|i| i.ask == Ask::Question).count();
-    let changes = sent.items.len() - questions;
+    let changes = sent.items.len() - questions - challenges;
     let mut parts = Vec::new();
+    if challenges > 0 {
+        parts.push(format!("{challenges} challenge{}", if challenges == 1 { "" } else { "s" }));
+    }
     if questions > 0 {
         parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
     }
@@ -2650,16 +2694,18 @@ fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut
     out.push(StyledLine::new(text, Face::Label).spans(vec![(0..head.len(), Face::Accent)]));
     for it in &sent.items {
         let (kind, face) = match (it.ask, sent.compared.is_some()) {
+            _ if it.challenge.is_some() => ("Challenge", Face::Error),
             (Ask::Question, _) => ("Question", Face::Accent),
             (Ask::Fix, true) => ("Fix", Face::MetaWarn),
             (Ask::Fix, false) => ("Change", Face::MetaWarn),
         };
         let place = if sent.compared.is_some() { it.place.clone() } else if it.place.is_empty() { "↑ in the report".to_string() } else { format!("↑ {}", it.place) };
-        let mut l = StyledLine::new(format!("{kind}   {place}"), Face::Meta).spans(vec![(0..kind.len(), face)]);
+        let verdict = it.challenge.as_ref().map(|f| format!("  {}", f.verdict())).unwrap_or_default();
+        let mut l = StyledLine::new(format!("{kind}{verdict}   {place}"), Face::Meta).spans(vec![(0..kind.len(), face)]);
         l.pad_top = 10.0 * k;
         if sent.compared.is_none() && !it.quote.is_empty() {
             targets.push((it.quote.join("\n"), ei, false));
-            let at = kind.chars().count() + 3;
+            let at = kind.chars().count() + verdict.chars().count() + 3;
             l.links.push((at..at + place.chars().count(), format!("find:{}", targets.len() - 1)));
         }
         out.push(l);
@@ -2668,7 +2714,24 @@ fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut
             let more = if j + 1 == shown && it.quote.len() > shown { " …" } else { "" };
             out.push(StyledLine::new(format!("│ {q}{more}"), if it.code { Face::CodeDim } else { Face::Dim }));
         }
-        out.extend(it.text.lines().map(|t| StyledLine::new(t, Face::UserText)));
+        // A challenge's words are markdown, as the challenger wrote them.
+        let md = |l: &str, face: Face| match it.challenge {
+            Some(_) => {
+                let (text, spans) = inline_spans(l);
+                StyledLine::new(text, face).spans(spans)
+            }
+            None => StyledLine::new(l, face),
+        };
+        out.extend(it.text.lines().map(|t| md(t, Face::UserText)));
+        if let Some(f) = it.challenge.as_ref().filter(|f| !f.evidence.is_empty()) {
+            out.push(md(&format!("Evidence: {}", f.evidence), Face::Dim));
+        }
+        if !it.note.is_empty() {
+            let mut lines = it.note.lines();
+            let first = format!("You  {}", lines.next().unwrap_or(""));
+            out.push(StyledLine::new(first, Face::UserText).spans(vec![(0.."You".len(), Face::MetaWarn)]));
+            out.extend(lines.map(|t| StyledLine::new(t, Face::UserText)));
+        }
     }
     if !sent.also.is_empty() {
         let mut l = StyledLine::new("Also", Face::Label);
@@ -2713,6 +2776,167 @@ fn locate_quote(out: &[StyledLine], owner: &[Option<usize>], entry: usize, quote
 }
 
 impl ChatBuffer {
+    /// The text of what the agent wrote at `entry` (None: not one of its messages, or empty).
+    pub fn report_text(&self, entry: usize) -> Option<String> {
+        let Entry::Assistant { blocks, .. } = self.entries.get(entry)? else { return None };
+        let text = blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// The chat's reports (as chat-report finds them): (entry, text), oldest first.
+    pub fn reports(&self, ed: &Editor) -> Vec<(usize, String)> {
+        let min_words = ed.var("chat-report-min-words").and_then(Value::as_u64).unwrap_or(80) as usize;
+        let mut out: Vec<(usize, String)> = report_entries(&self.entries, self.running(), min_words).into_keys().filter_map(|e| self.report_text(e).map(|t| (e, t))).collect();
+        out.sort_by_key(|(e, _)| *e);
+        out
+    }
+
+    /// Once the agent has been asked something and has stopped: its last message, or why it
+    /// failed. None while it works, before it starts, or when it ended on no text.
+    pub fn finished_reply(&self) -> Option<Result<String, String>> {
+        if self.running() {
+            return None;
+        }
+        let last_user = self.entries.iter().rposition(|e| matches!(e, Entry::User { .. }))?;
+        let last = self.entries.len() - 1;
+        let Entry::Assistant { streaming, error, .. } = &self.entries[last] else { return None };
+        if last <= last_user || *streaming {
+            return None;
+        }
+        if let Some(e) = error {
+            return Some(Err(e.clone()));
+        }
+        self.report_text(last).map(Ok)
+    }
+
+    /// A challenger's findings on the report at `entry`: drafts of the review, each under the
+    /// words it disputes (or else the start of the claim it names).
+    pub fn add_findings(&mut self, ed: &mut Editor, entry: usize, opening: &str, found: Vec<crate::chat_challenge::Found>) {
+        self.ensure_review();
+        self.rebuild(ed);
+        let comments = found
+            .into_iter()
+            .map(|f| {
+                let quote = self.finding_quote(entry, &f);
+                crate::chat_challenge::comment_of(entry, opening, f, quote)
+            })
+            .collect();
+        self.review.add_findings(comments);
+        self.dirty = true;
+        self.persist_review(ed);
+    }
+
+    /// Where a finding goes on the report at `entry`: its quote as drawn, else the first sentence
+    /// of the claim its label names (`Changed 2`, `Headline`).
+    fn finding_quote(&self, entry: usize, f: &crate::chat_challenge::Found) -> Option<String> {
+        let found = |q: &str| !q.is_empty() && locate_quote(&self.lines, &self.line_entry, entry, q).is_some();
+        let quote = crate::chat_challenge::plain(&f.quote);
+        if found(&quote) {
+            return Some(quote);
+        }
+        let first_sentence = |s: &str| -> String {
+            let s = s.trim();
+            match s.find(". ") {
+                Some(i) => s[..=i].to_string(),
+                None => s.to_string(),
+            }
+        };
+        let claim = self.claim_line(entry, &f.label).map(|i| self.lines[i].text.clone());
+        claim.map(|c| first_sentence(&c)).filter(|c| found(c)).or_else(|| (!quote.is_empty()).then_some(quote))
+    }
+
+    /// The transcript line of the claim `label` names in the report at `entry`: `Headline`, or
+    /// the nth item under a section (`Changed 2`).
+    fn claim_line(&self, entry: usize, label: &str) -> Option<usize> {
+        let lines: Vec<usize> = (0..self.lines.len()).filter(|i| self.line_entry.get(*i).copied().flatten() == Some(entry)).collect();
+        if label.eq_ignore_ascii_case("headline") {
+            return lines.into_iter().find(|i| self.lines[*i].face == Face::Heading);
+        }
+        let (section, n) = label.rsplit_once(' ')?;
+        let n: usize = n.trim().parse().ok()?;
+        let section = section.trim().to_lowercase();
+        let at = lines.iter().position(|i| self.lines[*i].face == Face::Heading && self.lines[*i].text.trim_start().to_lowercase().starts_with(&section))?;
+        lines[at + 1..].iter().copied().take_while(|i| self.lines[*i].face != Face::Heading).filter(|i| self.lines[*i].marker.is_some()).nth(n.checked_sub(1)?)
+    }
+
+    /// How many transcript entries it has (a challenger's reply comes after those it had).
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Change challenge finding `id` of the review (Prove it's answer, Keep anyway).
+    pub fn update_finding(&mut self, ed: &mut Editor, id: u64, f: impl FnOnce(&mut crate::chat_review::Finding)) -> bool {
+        self.ensure_review();
+        let Some(found) = self.review.comments.iter_mut().find(|c| c.id == id).and_then(|c| c.challenge.as_mut()) else { return false };
+        f(found);
+        self.dirty = true;
+        self.persist_review(ed);
+        true
+    }
+
+    /// The review's comment `id`.
+    pub fn comment(&mut self, id: u64) -> Option<crate::chat_review::Comment> {
+        self.ensure_review();
+        self.review.comments.iter().find(|c| c.id == id).cloned()
+    }
+
+    /// Set up a challenge of the report at `entry` (None: the latest) in the composer.
+    pub fn open_challenge_form(&mut self, ed: &mut Editor, entry: Option<usize>) {
+        if self.challenge_form.is_some() {
+            self.focus_comment(ed);
+            return;
+        }
+        if self.commenting.is_some() {
+            self.save_comment(ed);
+        }
+        let Some(entry) = entry.or_else(|| self.reports(ed).last().map(|(e, _)| *e)) else {
+            ed.message("No report to challenge here");
+            return;
+        };
+        let model = ed.var_str("chat-report-challenge-model").filter(|m| !m.is_empty()).or_else(|| self.node.state.model.clone());
+        let thinking = ed.var_str("chat-report-challenge-thinking").filter(|t| !t.is_empty());
+        let stash = self.prompt.text();
+        self.prompt.set_text("");
+        self.challenge_form = Some((ChallengeForm { entry, model, thinking, remember: false }, stash));
+        self.focus_comment(ed);
+        self.dirty = true;
+    }
+
+    pub fn challenge_form_mut(&mut self) -> Option<&mut ChallengeForm> {
+        self.challenge_form.as_mut().map(|(f, _)| f)
+    }
+
+    /// Drop the challenge being set up; the composer gets back what it had.
+    pub fn cancel_challenge_form(&mut self) -> bool {
+        let Some((_, stash)) = self.challenge_form.take() else { return false };
+        self.prompt.set_text(&stash);
+        self.prompt.move_to_end();
+        self.dirty = true;
+        true
+    }
+
+    /// Start the challenge set up in the composer, with what was typed as its note.
+    pub fn submit_challenge_form(&mut self, ed: &mut Editor) {
+        let Some((f, stash)) = self.challenge_form.take() else { return };
+        let note = self.prompt.text();
+        self.prompt.set_text(&stash);
+        self.prompt.move_to_end();
+        self.dirty = true;
+        if f.remember {
+            ed.set_var("chat-report-challenge-model", f.model.clone().map(Value::String).unwrap_or(Value::Null));
+            ed.set_var("chat-report-challenge-thinking", f.thinking.clone().map(Value::String).unwrap_or(Value::Null));
+        }
+        let Some(id) = ed.this_buffer() else { return };
+        let opts = crate::chat_challenge::Options { model: f.model, thinking: f.thinking, note };
+        let entry = f.entry;
+        // This buffer is busy now: started from the main loop.
+        ed.main_sender().send(move |ed| {
+            if let Err(e) = crate::chat_challenge::start(ed, id, Some(entry), opts) {
+                ed.error(format!("{e:#}"));
+            }
+        });
+    }
+
     fn review_machine(&self) -> Option<String> {
         (!self.node.local()).then(|| self.node.machine.clone())
     }
@@ -2796,16 +3020,24 @@ impl ChatBuffer {
             "comments": self.review.comments.iter().map(crate::chat_review::to_json).collect::<Vec<_>>(),
             "drafts": self.review.drafts().len(),
             "writing": self.commenting.as_ref().map(|(w, _)| serde_json::json!({"quote": w.quote, "label": w.label, "kind": w.ask.name(), "text": text, "id": w.id})),
+            "challenge_form": self.challenge_form.as_ref().map(|(f, _)| serde_json::json!({"entry": f.entry + 1, "model": f.model, "thinking": f.thinking, "remember": f.remember, "note": text})),
         })
     }
 
-    /// The transcript's selection in order, else the cursor's whole line.
-    fn selected_range(&self) -> (Pos, Pos) {
+    /// What is selected, as it is drawn: vim's line-wise selection (V) takes its lines whole, and
+    /// its character-wise one (v) the character under the cursor too. No selection: the line.
+    fn selected_range(&self, kind: crate::text::SelectionKind) -> (Pos, Pos) {
+        use crate::text::SelectionKind;
         let c = self.view.cursor;
-        match self.view.anchor.filter(|a| *a != c) {
-            Some(a) if a < c => (a, c),
-            Some(a) => (c, a),
-            None => (Pos::new(c.line, 0), Pos::new(c.line, char_len(self.lines.get(c.line).map_or("", |l| l.text.as_str())))),
+        let len = |line: usize| char_len(self.lines.get(line).map_or("", |l| l.text.as_str()));
+        let whole = |a: Pos, b: Pos| (Pos::new(a.line, 0), Pos::new(b.line, len(b.line)));
+        let Some(anchor) = self.view.anchor else { return whole(c, c) };
+        let (a, b) = if anchor <= c { (anchor, c) } else { (c, anchor) };
+        match kind {
+            SelectionKind::Lines => whole(a, b),
+            SelectionKind::Inclusive => (a, Pos::new(b.line, (b.col + 1).min(len(b.line)))),
+            _ if a == b => whole(c, c),
+            _ => (a, b),
         }
     }
 
@@ -2871,7 +3103,8 @@ impl ChatBuffer {
             self.focus_comment(ed);
             return;
         }
-        let (a, b) = self.selected_range();
+        let kind = ed.this_buffer().map(|id| crate::packages::vim::selection_kind(ed, id)).unwrap_or_default();
+        let (a, b) = self.selected_range(kind);
         let entry = self.line_entry.get(a.line).copied().flatten().filter(|e| matches!(self.entries.get(*e), Some(Entry::Assistant { .. })));
         let Some(entry) = entry else {
             ed.message("Select part of what the agent wrote to comment on it");
@@ -2987,14 +3220,24 @@ impl ChatBuffer {
             id: Option<u64>,
             state: String,
             text: String,
+            /// A challenger's finding, `text` being your note on it.
+            challenge: Option<crate::chat_review::Finding>,
             /// The answer: a `find:` target.
             reply: Option<usize>,
         }
         // (entry it was on, the quote, kind, its card)
         let mut places: Vec<(usize, String, Ask, Option<Card>)> = Vec::new();
         for c in self.review.comments.iter().filter(|c| c.state == State::Draft) {
-            let state = if editing == Some(c.id) { "being changed in the composer" } else { "draft · click to change" };
-            places.push((c.entry, c.quote.clone(), c.ask, Some(Card { id: Some(c.id), state: state.into(), text: c.text.clone(), reply: None })));
+            let f = c.challenge.as_ref();
+            let state = match (editing == Some(c.id), f) {
+                (true, _) => "being changed in the composer".to_string(),
+                (false, Some(f)) if f.withdrawn.is_some() => "not in your review  ·  keep anyway".to_string(),
+                (false, Some(f)) if f.proving => "proving…".to_string(),
+                (false, Some(f)) if f.confirmed => "draft · click to add a note  ·  dismiss".to_string(),
+                (false, Some(_)) => "draft · click to add a note  ·  prove it  ·  dismiss".to_string(),
+                (false, None) => "draft · click to change".to_string(),
+            };
+            places.push((c.entry, c.quote.clone(), c.ask, Some(Card { id: Some(c.id), state, text: c.text.clone(), challenge: c.challenge.clone(), reply: None })));
         }
         if let Some((w, _)) = self.commenting.as_ref().filter(|(w, _)| w.id.is_none()) {
             places.push((w.entry, w.quote.clone(), w.ask, None));
@@ -3025,7 +3268,11 @@ impl ChatBuffer {
                     to
                 });
                 let state = if reply.is_some() { "sent  ·  answered ↓" } else { "sent" };
-                places.push((on, quote, it.ask, Some(Card { id: None, state: state.into(), text: it.text.clone(), reply })));
+                let (text, challenge) = match &it.challenge {
+                    Some(f) => (it.note.clone(), Some(f.clone())),
+                    None => (it.text.clone(), None),
+                };
+                places.push((on, quote, it.ask, Some(Card { id: None, state: state.into(), text, challenge, reply })));
             }
         }
         let mut inserts: Vec<(usize, Vec<StyledLine>, Option<u64>)> = Vec::new();
@@ -3033,13 +3280,45 @@ impl ChatBuffer {
             // Where it was, else where that text is now (the transcript moved: a compaction).
             let found = locate_quote(out, owner, entry, &quote).or_else(|| assistant(&mut (0..self.entries.len()).rev()).into_iter().find_map(|e| locate_quote(out, owner, e, &quote)));
             let Some(segments) = found else { continue };
+            let challenged = card.as_ref().and_then(|c| c.challenge.as_ref());
+            let mark = match challenged {
+                Some(f) if f.withdrawn.is_some() => t.fg_faint,
+                Some(_) => t.red,
+                None => color(ask),
+            };
             for (line, r) in &segments {
-                out[*line].marks.push((r.clone(), color(ask)));
+                out[*line].marks.push((r.clone(), mark));
             }
             let (Some(c), Some((last, _))) = (card, segments.last()) else { continue };
-            let kind = if ask == Ask::Question { "Question" } else { "Change" };
-            let head = format!("{kind}  ·  {}", c.state);
-            let mut first = StyledLine::new(head.clone(), Face::Meta).spans(vec![(0..kind.len(), if ask == Ask::Question { Face::Accent } else { Face::MetaWarn })]);
+            let (kind, kind_face) = match (&c.challenge, ask) {
+                (Some(_), _) => ("Challenge", Face::Error),
+                (None, Ask::Question) => ("Question", Face::Accent),
+                (None, Ask::Fix) => ("Change", Face::MetaWarn),
+            };
+            // A challenge's verdict as a badge, as a report's outcome is.
+            let verdict = c.challenge.as_ref().map(|f| format!(" {} ", if f.withdrawn.is_some() { "WITHDRAWN" } else { f.verdict() }.to_uppercase()));
+            let head = match &verdict {
+                Some(v) => format!("{kind}  {v}  ·  {}", c.state),
+                None => format!("{kind}  ·  {}", c.state),
+            };
+            let mut spans = vec![(0..kind.len(), kind_face)];
+            let mut first_links: Vec<(Range<usize>, String)> = Vec::new();
+            if let (Some(v), Some(f)) = (&verdict, &c.challenge) {
+                let at = kind.len() + 2;
+                spans.push((at..at + v.len(), if f.withdrawn.is_some() { Face::Meta } else if f.confirmed { Face::BadgeBad } else { Face::BadgeWarn }));
+            }
+            // A finding's actions, as links.
+            if let Some(id) = c.id.filter(|_| c.challenge.is_some()) {
+                for (label, what) in [("dismiss", "dismiss"), ("prove it", "prove"), ("keep anyway", "keep")] {
+                    if let Some(at) = head.rfind(label) {
+                        let s = head[..at].chars().count();
+                        first_links.push((s..s + label.chars().count(), format!("challenge-{what}:{id}")));
+                        spans.push((at..at + label.len(), Face::Accent));
+                    }
+                }
+            }
+            let mut first = StyledLine::new(head.clone(), Face::Meta).spans(spans);
+            first.links.append(&mut first_links);
             if let Some(to) = c.reply {
                 let label = "answered ↓";
                 if let Some(at) = head.find(label) {
@@ -3049,8 +3328,31 @@ impl ChatBuffer {
                 }
             }
             let mut lines = vec![first];
-            lines.extend(c.text.lines().map(|l| StyledLine::new(l, Face::UserText)));
-            let card = Block::new(t.bg_elevated).border(t.border);
+            match &c.challenge {
+                Some(f) => {
+                    // Its words are markdown: inline code as chips, as in the report.
+                    let md = |l: &str, face: Face| {
+                        let (text, spans) = inline_spans(l);
+                        StyledLine::new(text, face).spans(spans)
+                    };
+                    let face = if f.withdrawn.is_some() { Face::Strike } else { Face::UserText };
+                    lines.extend(f.text.lines().map(|l| md(l, face)));
+                    if let Some(why) = &f.withdrawn {
+                        lines.push(md(&format!("The challenger: {why}"), Face::Dim));
+                    }
+                    if !f.evidence.is_empty() {
+                        lines.push(md(&format!("Evidence: {}", f.evidence), Face::Dim));
+                    }
+                    let mut note = c.text.lines();
+                    if let Some(l) = note.next() {
+                        let first = format!("Your note  {l}");
+                        lines.push(StyledLine::new(first, Face::UserText).spans(vec![(0.."Your note".len(), Face::MetaWarn)]));
+                        lines.extend(note.map(|l| StyledLine::new(l, Face::UserText)));
+                    }
+                }
+                None => lines.extend(c.text.lines().map(|l| StyledLine::new(l, Face::UserText))),
+            }
+            let card = if c.challenge.is_some() { Block::new(t.bg_elevated).border(t.border).bar(t.red) } else { Block::new(t.bg_elevated).border(t.border) };
             let n = lines.len();
             for (i, l) in lines.iter_mut().enumerate() {
                 l.block = Some(card.nth(i, n));
@@ -3180,9 +3482,11 @@ impl ChatBuffer {
             (r, resp.clicked())
         };
         let kind_of = |ask: Ask| if ask == Ask::Question { ("Question", theme.accent) } else { ("Change", theme.yellow) };
+        let kind_of_comment = |c: &crate::chat_review::Comment| if c.challenge.is_some() { ("Challenge", theme.red) } else { kind_of(c.ask) };
         if let Some((w, _)) = &self.commenting {
             let cy = area.top() + 11.0 * k;
-            let (kind, kc) = kind_of(w.ask);
+            let on_challenge = w.id.is_some_and(|id| self.review.comments.iter().any(|c| c.id == id && c.challenge.is_some()));
+            let (kind, kc) = if on_challenge { ("Note", theme.red) } else { kind_of(w.ask) };
             let kw = crate::chrome::text_width(painter, kind, small.clone());
             let kr = Rect::from_min_size(egui::pos2(area.left() - 4.0 * k, cy - 11.0 * k), egui::vec2(kw + 8.0 * k, 22.0 * k));
             let kresp = ui.interact(kr, ui.scope_id().with("review-kind"), egui::Sense::click()).on_hover_text("Question or change (M-k)");
@@ -3196,7 +3500,12 @@ impl ChatBuffer {
             let (r1, save) = button(ui, area.right(), cy, "Save", true, "save");
             let (r2, now) = button(ui, r1.left() - 6.0 * k, cy, "Send now", false, "now");
             let (r3, cancel) = button(ui, r2.left() - 6.0 * k, cy, "Cancel", false, "cancel");
-            let place = if w.label.is_empty() { "on the selection".to_string() } else { format!("on {}", w.label) };
+            let place = match (on_challenge, w.label.is_empty()) {
+                (true, true) => "on the challenge".to_string(),
+                (true, false) => format!("on the challenge to {}", w.label),
+                (false, true) => "on the selection".to_string(),
+                (false, false) => format!("on {}", w.label),
+            };
             crate::chrome::text(painter, egui::pos2(area.left() + kw + 8.0 * k, cy), &place, small.clone(), theme.fg_dim, (r3.left() - area.left() - kw - 16.0 * k).max(0.0));
             // What it quotes: two lines at most, beside a bar of its kind's color.
             let lines: Vec<&str> = w.quote.lines().collect();
@@ -3221,10 +3530,14 @@ impl ChatBuffer {
         painter.rect_filled(row, 7.0 * k, theme.bg_alt);
         painter.rect_stroke(row, 7.0 * k, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
         let cy = row.center().y;
-        let questions = drafts.iter().filter(|c| c.ask == Ask::Question).count();
-        let changes = drafts.len() - questions;
+        let challenges = drafts.iter().filter(|c| c.challenge.is_some()).count();
+        let questions = drafts.iter().filter(|c| c.ask == Ask::Question && c.challenge.is_none()).count();
+        let changes = drafts.len() - questions - challenges;
         let rw = crate::chrome::text(painter, egui::pos2(row.left() + 10.0 * k, cy), "Review", small.clone(), theme.accent, 80.0 * k);
         let mut parts = Vec::new();
+        if challenges > 0 {
+            parts.push(format!("{challenges} challenge{}", if challenges == 1 { "" } else { "s" }));
+        }
         if questions > 0 {
             parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
         }
@@ -3248,7 +3561,7 @@ impl ChatBuffer {
                 if resp.hovered() {
                     painter.rect_filled(r, 5.0 * k, crate::chrome::hover_bg(theme));
                 }
-                let (kind, kc) = kind_of(c.ask);
+                let (kind, kc) = kind_of_comment(c);
                 let kw = crate::chrome::text(painter, egui::pos2(r.left() + 10.0 * k, cy), kind, small.clone(), kc, 90.0 * k);
                 let mut x = r.left() + 18.0 * k + kw;
                 if !c.label.is_empty() {
@@ -3257,12 +3570,186 @@ impl ChatBuffer {
                 let xr = Rect::from_center_size(egui::pos2(r.right() - 14.0 * k, cy), egui::vec2(20.0 * k, 20.0 * k));
                 let xresp = ui.interact(xr, ui.scope_id().with(("review-delete", c.id)), egui::Sense::click()).on_hover_text("Delete it");
                 painter.text(xr.center(), egui::Align2::CENTER_CENTER, "×", small.clone(), if xresp.hovered() { theme.fg } else { theme.fg_faint });
-                crate::chrome::text(painter, egui::pos2(x, cy), c.text.lines().next().unwrap_or(""), small.clone(), theme.fg, (xr.left() - x - 8.0 * k).max(0.0));
+                // A challenge: its finding, and your note after it if you wrote one.
+                let shown = match &c.challenge {
+                    Some(f) if c.text.trim().is_empty() => f.text.lines().next().unwrap_or("").to_string(),
+                    Some(f) => format!("{} · you: {}", f.text.lines().next().unwrap_or(""), c.text.lines().next().unwrap_or("")),
+                    None => c.text.lines().next().unwrap_or("").to_string(),
+                };
+                crate::chrome::text(painter, egui::pos2(x, cy), &shown, small.clone(), theme.fg, (xr.left() - x - 8.0 * k).max(0.0));
                 if xresp.clicked() {
                     act = Some(ReviewAct::Delete(c.id));
                 } else if resp.clicked() {
                     act = Some(ReviewAct::Edit(c.id));
                 }
+            }
+        }
+        act
+    }
+
+    /// The composer's header while a report's challenge is set up: what it does, its model and
+    /// thinking (pills), whether they become the default, and Cancel and Challenge. `facts`: where
+    /// it runs and for how long its worktree stays.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_challenge_form(&self, ui: &mut egui::Ui, painter: &egui::Painter, area: Rect, theme: &crate::theme::Theme, k: f32, rects: &mut Vec<(&'static str, Rect)>, facts: &str) -> Option<ReviewAct> {
+        let (f, _) = self.challenge_form.as_ref()?;
+        let small = egui::FontId::proportional(theme.font_size - 2.0);
+        let mut act = None;
+        let button = |ui: &mut egui::Ui, r: Rect, label: &str, main: bool, key: &'static str, rects: &mut Vec<(&'static str, Rect)>| -> bool {
+            let resp = ui.interact(r, ui.scope_id().with(("challenge-form", key)), egui::Sense::click());
+            rects.push((key, r));
+            let bg = if main { theme.accent } else if resp.hovered() { crate::chrome::hover_bg(theme) } else { theme.chip() };
+            painter.rect_filled(r, 6.0 * k, bg);
+            let fg = if main { crate::chrome::on(theme.accent, theme) } else { theme.fg };
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, label, small.clone(), fg);
+            resp.clicked()
+        };
+        let w = |label: &str| crate::chrome::text_width(painter, label, small.clone()) + 20.0 * k;
+        // What it is, and Cancel, Challenge.
+        let cy = area.top() + 11.0 * k;
+        let go = Rect::from_min_max(egui::pos2(area.right() - w("Challenge"), cy - 11.0 * k), egui::pos2(area.right(), cy + 11.0 * k));
+        let cancel = Rect::from_min_max(egui::pos2(go.left() - 6.0 * k - w("Cancel"), go.top()), egui::pos2(go.left() - 6.0 * k, go.bottom()));
+        if button(ui, go, "Challenge", true, "c-submit", rects) {
+            act = Some(ReviewAct::ChallengeSubmit);
+        }
+        if button(ui, cancel, "Cancel", false, "c-cancel", rects) {
+            act = Some(ReviewAct::ChallengeCancel);
+        }
+        let kw = crate::chrome::text(painter, egui::pos2(area.left(), cy), "Challenge", small.clone(), theme.red, 100.0 * k);
+        crate::chrome::text(painter, egui::pos2(area.left() + kw + 8.0 * k, cy), "this report: a fresh agent tries to prove its claims wrong", small.clone(), theme.fg_dim, (cancel.left() - area.left() - kw - 16.0 * k).max(0.0));
+        // Its model and thinking, and whether they stay.
+        let cy = area.top() + 40.0 * k;
+        let model = f.model.as_deref().map(|m| short_model(m.rsplit('/').next().unwrap_or(m)).to_string()).unwrap_or_else(|| "the chat's model".into());
+        let provider = f.model.as_deref().and_then(|m| m.split_once('/')).map(|(p, _)| p.to_string()).unwrap_or_default();
+        let model_label = if provider.is_empty() { format!("◆ {model}  ▾") } else { format!("◆ {model} · {provider}  ▾") };
+        let thinking_label = format!("Thinking · {}  ▾", f.thinking.as_deref().unwrap_or("default"));
+        let mut x = area.left();
+        let mr = Rect::from_min_size(egui::pos2(x, cy - 11.0 * k), egui::vec2(w(&model_label), 22.0 * k));
+        if button(ui, mr, &model_label, false, "c-model", rects) {
+            act = Some(ReviewAct::ChallengeModel);
+        }
+        x = mr.right() + 6.0 * k;
+        let tr = Rect::from_min_size(egui::pos2(x, cy - 11.0 * k), egui::vec2(w(&thinking_label), 22.0 * k));
+        if button(ui, tr, &thinking_label, false, "c-thinking", rects) {
+            act = Some(ReviewAct::ChallengeThinking);
+        }
+        x = tr.right() + 14.0 * k;
+        // A box to tick: they become the default from now on.
+        let label = "default from now on";
+        let cr = Rect::from_min_size(egui::pos2(x, cy - 11.0 * k), egui::vec2(18.0 * k + w(label), 22.0 * k));
+        let resp = ui.interact(cr, ui.scope_id().with("challenge-remember"), egui::Sense::click());
+        rects.push(("c-remember", cr));
+        let bx = Rect::from_center_size(egui::pos2(cr.left() + 7.0 * k, cy), egui::vec2(12.0 * k, 12.0 * k));
+        if f.remember {
+            painter.rect_filled(bx, 3.0 * k, theme.accent);
+            painter.text(bx.center(), egui::Align2::CENTER_CENTER, "✓", egui::FontId::proportional(theme.font_size - 4.0), crate::chrome::on(theme.accent, theme));
+        } else {
+            painter.rect_stroke(bx, 3.0 * k, Stroke::new(1.0, if resp.hovered() { theme.fg_dim } else { theme.fg_faint }), egui::StrokeKind::Inside);
+        }
+        crate::chrome::text(painter, egui::pos2(bx.right() + 6.0 * k, cy), label, small.clone(), theme.fg_dim, w(label));
+        if resp.clicked() {
+            act = Some(ReviewAct::ChallengeRemember);
+        }
+        // Where it runs, and for how long.
+        crate::chrome::text(painter, egui::pos2(area.left(), area.top() + 66.0 * k), facts, egui::FontId::proportional(theme.font_size - 3.0), theme.fg_faint, area.width());
+        act
+    }
+
+    /// On each report's header line, at the right: Challenge, or how its challenge goes (with
+    /// Open chat and Stop, or Again once done). Over a claim that held, a "held" mark after it.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_report_actions(&self, ui: &mut egui::Ui, area: Rect, theme: &crate::theme::Theme, k: f32, runs: &[(crate::chat_challenge::Run, bool)], enabled: bool, now: u64, rects: &mut Vec<(&'static str, Rect)>) -> Option<ReportAct> {
+        if !enabled && runs.is_empty() {
+            return None;
+        }
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, ui.scope_id().with("chat-report-actions"))).with_clip_rect(area);
+        let small = egui::FontId::proportional(theme.font_size - 2.0);
+        let col_right = area.center().x + self.text_w / 2.0;
+        let mut act = None;
+        let w = |label: &str| crate::chrome::text_width(&painter, label, small.clone()) + 20.0 * k;
+        for (n, (line, entry)) in self.report_heads.iter().enumerate() {
+            let Some(head) = self.view.screen_rect(Pos::new(*line, 0)) else { continue };
+            if head.bottom() < area.top() || head.top() > area.bottom() {
+                continue;
+            }
+            let text_end = self.lines.get(*line).and_then(|l| self.view.screen_rect(Pos::new(*line, char_len(&l.text)))).map_or(head.right(), |r| r.right());
+            let cy = head.center().y;
+            let run = runs.iter().rev().find(|(r, _)| r.entry == *entry);
+            // Buttons, right to left, then what to say before them.
+            let mut buttons: Vec<(&str, bool, ReportAct, &'static str)> = Vec::new();
+            let mut say: Option<(String, Color32)> = None;
+            let mut spinning = false;
+            match run {
+                None if enabled && !self.running() => buttons.push(("Challenge", true, ReportAct::Challenge(*entry), "report-challenge")),
+                None => continue,
+                Some((r, open)) if r.ended.is_none() => {
+                    buttons.push(("Stop", false, ReportAct::Stop(r.id.clone()), "report-challenge-stop"));
+                    if *open {
+                        buttons.push(("Open chat", false, ReportAct::OpenChat(r.id.clone()), "report-challenge-open"));
+                    }
+                    let secs = now.saturating_sub(r.started);
+                    let model = r.model.as_deref().map(|m| short_model(m.rsplit('/').next().unwrap_or(m)).to_string()).unwrap_or_default();
+                    let what = if r.challenger.is_empty() { "Setting up the challenge".to_string() } else { format!("Challenging · {model} · {}:{:02}", secs / 60, secs % 60) };
+                    say = Some((what, theme.accent));
+                    spinning = true;
+                }
+                Some((r, open)) => {
+                    if enabled && !self.running() {
+                        buttons.push(("Again", false, ReportAct::Challenge(*entry), "report-challenge-again"));
+                    }
+                    if *open {
+                        buttons.push(("Open chat", false, ReportAct::OpenChat(r.id.clone()), "report-challenge-open"));
+                    }
+                    let held = if r.held.is_empty() { String::new() } else { format!("  ·  {} held", r.held.len()) };
+                    say = Some(match (&r.error, r.findings) {
+                        (Some(_), _) => ("The challenge stopped".to_string(), theme.yellow),
+                        (None, 0) => (format!("Challenged: nothing wrong found{held}"), theme.green),
+                        (None, 1) => (format!("Challenged: 1 finding{held}"), theme.red),
+                        (None, n) => (format!("Challenged: {n} findings{held}"), theme.red),
+                    });
+                }
+            }
+            let total: f32 = buttons.iter().map(|(l, ..)| w(l) + 6.0 * k).sum();
+            if col_right - total < text_end + 12.0 * k {
+                continue;
+            }
+            let mut right = col_right;
+            for (label, main, a, key) in buttons {
+                let r = Rect::from_min_max(egui::pos2(right - w(label), cy - 11.0 * k), egui::pos2(right, cy + 11.0 * k));
+                let resp = ui.interact(r, ui.scope_id().with(("report-action", n, key)), egui::Sense::click());
+                rects.push((key, r));
+                let bg = if main { if resp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent } } else if resp.hovered() { crate::chrome::hover_bg(theme) } else { theme.chip() };
+                painter.rect_filled(r, 6.0 * k, bg);
+                painter.text(r.center(), egui::Align2::CENTER_CENTER, label, small.clone(), if main { crate::chrome::on(theme.accent, theme) } else { theme.fg });
+                if resp.clicked() {
+                    act = Some(a);
+                }
+                right = r.left() - 6.0 * k;
+            }
+            if let Some((text, color)) = say {
+                let tw = crate::chrome::text_width(&painter, &text, small.clone());
+                let x = right - 6.0 * k - tw;
+                if x > text_end + 12.0 * k {
+                    crate::chrome::text(&painter, egui::pos2(x, cy), &text, small.clone(), color, tw + 1.0);
+                    if spinning {
+                        let time = ui.ctx().input(|i| i.time);
+                        crate::chrome::spinner(&painter, egui::pos2(x - 10.0 * k, cy), 5.0 * k, time, color);
+                        ui.ctx().request_repaint_after(Duration::from_millis(50));
+                    }
+                }
+            }
+            // Claims that held, marked after their text.
+            for label in run.filter(|(r, _)| r.ended.is_some()).map(|(r, _)| r.held.clone()).unwrap_or_default() {
+                let Some(l) = self.claim_line(*entry, &label) else { continue };
+                let Some(end) = self.view.screen_rect(Pos::new(l, char_len(&self.lines[l].text))) else { continue };
+                let chip = egui::FontId::proportional(theme.font_size - 3.5);
+                let cw = crate::chrome::text_width(&painter, "held", chip.clone()) + 10.0 * k;
+                let r = Rect::from_center_size(egui::pos2(end.right() + 8.0 * k + cw / 2.0, end.center().y), egui::vec2(cw, 16.0 * k));
+                if r.right() > col_right + 16.0 * k {
+                    continue;
+                }
+                painter.rect_filled(r, 4.0 * k, theme.green.gamma_multiply(0.18));
+                painter.text(r.center(), egui::Align2::CENTER_CENTER, "held", chip, theme.green);
             }
         }
         act
@@ -3285,6 +3772,9 @@ impl ChatBuffer {
 
     /// Height of the composer's header: the comment being written, or the review's row.
     fn review_header_h(&self, k: f32) -> f32 {
+        if self.challenge_form.is_some() {
+            return 86.0 * k;
+        }
         if let Some((w, _)) = &self.commenting {
             let quote_lines = w.quote.lines().count().clamp(1, 2) as f32;
             return (12.0 + 24.0 + quote_lines * 19.0 + 8.0) * k;
@@ -3404,7 +3894,7 @@ impl Buffer for ChatBuffer {
         });
         if resp.clicked {
             self.focus = Focus::Transcript;
-            if let Some(l) = resp.clicked_line {
+            if let Some(l) = resp.clicked_line.filter(|_| resp.link.is_none()) {
                 // A comment's card: change it.
                 match self.comment_lines.iter().find(|(line, _)| *line == l).map(|(_, id)| *id) {
                     Some(id) => self.edit_comment(ed, id),
@@ -3414,13 +3904,57 @@ impl Buffer for ChatBuffer {
                 }
             }
         }
+        // A challenge's finding: dismiss it, prove it, keep it after all.
+        if let Some((what, id)) = resp.link.as_deref().and_then(|l| l.strip_prefix("challenge-")).and_then(|l| l.split_once(':')).and_then(|(w, id)| id.parse::<u64>().ok().map(|id| (w.to_string(), id))) {
+            match what.as_str() {
+                "dismiss" => self.delete_comment(ed, id),
+                "keep" => {
+                    self.update_finding(ed, id, |f| f.withdrawn = None);
+                }
+                "prove" => {
+                    if let Some(me) = ed.this_buffer() {
+                        ed.main_sender().send(move |ed| {
+                            if let Err(e) = crate::chat_challenge::prove(ed, me, id) {
+                                ed.error(format!("{e:#}"));
+                            }
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A report's Challenge, or how its challenge goes.
+        let runs: Vec<(crate::chat_challenge::Run, bool)> = crate::chat_challenge::runs_of(ed, &self.node.chat).into_iter().map(|r| {
+            let open = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &r.challenger).is_some();
+            (r, open)
+        }).collect();
+        if runs.iter().any(|(r, _)| r.ended.is_none()) {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let enabled = ed.var_bool("chat-report-challenge") && self.node.local();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut action_rects = Vec::new();
+        let report_act = self.draw_report_actions(ui, transcript_rect, &theme, k, &runs, enabled, now, &mut action_rects);
+        for (name, r) in action_rects {
+            ed.debug_rects.insert(name, r);
+        }
+        match report_act {
+            Some(ReportAct::Challenge(entry)) => self.open_challenge_form(ed, Some(entry)),
+            Some(ReportAct::OpenChat(id)) => ed.main_sender().send(move |ed| {
+                if let Err(e) = crate::chat_challenge::open(ed, &id) {
+                    ed.error(format!("{e:#}"));
+                }
+            }),
+            Some(ReportAct::Stop(id)) => ed.main_sender().send(move |ed| crate::chat_challenge::stop(ed, &id)),
+            None => {}
+        }
         // A link within the chat: what a review's comment is about, or the answer to it.
         if let Some(i) = resp.link.as_deref().and_then(|l| l.strip_prefix("find:")).and_then(|i| i.parse::<usize>().ok()) {
             self.jump_to_find(i);
         }
         // A code reference: that line, in the diff page of the chat's folder (or the file).
         // (Its folder is asked for from the main loop: while drawn, the chat is out of its slot.)
-        if let Some((path, line)) = resp.link.as_deref().filter(|l| !l.starts_with("find:")).and_then(code_ref) {
+        if let Some((path, line)) = resp.link.as_deref().filter(|l| !l.starts_with("find:") && !l.starts_with("challenge-")).and_then(code_ref) {
             ed.main_sender().send(move |ed| match ed.buffer_directory(id) {
                 Some(dir) => crate::diff::show_line(ed, ed.buffer_machine(id), dir.to_string_lossy().into_owned(), &path, line),
                 None => ed.message("This chat has no folder to look in"),
@@ -3486,9 +4020,17 @@ impl Buffer for ChatBuffer {
             self.focus = Focus::Prompt;
         }
         let mut header_rects = Vec::new();
-        let review_act = if review_h > 0.0 { self.draw_review_header(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects) } else { None };
+        let facts = {
+            let ttl = ed.var("chat-report-challenge-worktree-ttl").and_then(Value::as_u64).unwrap_or(1800);
+            let runs = if ed.var("chat-report-challenge-run").and_then(Value::as_bool).unwrap_or(true) { "may run the report's checks" } else { "reads the code only" };
+            let removed = if ttl == 0 { "worktree kept".to_string() } else { format!("worktree removed {} min after", ttl.div_ceil(60)) };
+            format!("Runs in a new worktree of this checkout, its uncommitted work copied in  ·  {runs}  ·  {removed}")
+        };
+        let review_act = if self.challenge_form.is_some() {
+            self.draw_challenge_form(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects, &facts)
+        } else if review_h > 0.0 { self.draw_review_header(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects) } else { None };
         for (key, r) in header_rects {
-            ed.debug_rects.insert(match key { "save" => "review-save", "now" => "review-send-now", "cancel" => "review-cancel", "discard" => "review-discard", _ => "review-toggle" }, r);
+            ed.debug_rects.insert(match key { "c-submit" => "challenge-submit", "c-cancel" => "challenge-cancel", "c-model" => "challenge-model", "c-thinking" => "challenge-thinking", "c-remember" => "challenge-remember", "save" => "review-save", "now" => "review-send-now", "cancel" => "review-cancel", "discard" => "review-discard", _ => "review-toggle" }, r);
         }
         match review_act {
             Some(ReviewAct::Save) => self.save_comment(ed),
@@ -3499,6 +4041,17 @@ impl Buffer for ChatBuffer {
             Some(ReviewAct::Discard) => ed.main_sender().send(|ed| ed.call("chat-review-discard")),
             Some(ReviewAct::Edit(id)) => self.edit_comment(ed, id),
             Some(ReviewAct::Delete(id)) => self.delete_comment(ed, id),
+            Some(ReviewAct::ChallengeSubmit) => self.submit_challenge_form(ed),
+            Some(ReviewAct::ChallengeCancel) => {
+                self.cancel_challenge_form();
+            }
+            Some(ReviewAct::ChallengeModel) => ed.main_sender().send(|ed| ed.call("chat-challenge-form-model")),
+            Some(ReviewAct::ChallengeThinking) => ed.main_sender().send(|ed| ed.call("chat-challenge-form-thinking")),
+            Some(ReviewAct::ChallengeRemember) => {
+                if let Some(f) = self.challenge_form_mut() {
+                    f.remember = !f.remember;
+                }
+            }
             None => {}
         }
         if review_act.is_some() {
@@ -3517,7 +4070,7 @@ impl Buffer for ChatBuffer {
             self.focus = Focus::Prompt;
         }
         if self.prompt.doc.is_empty() {
-            let hint = if self.running() { "Steer the agent…" } else { "Ask anything…" };
+            let hint = if self.challenge_form.is_some() { "Also tell the challenger (optional)…" } else if self.running() { "Steer the agent…" } else { "Ask anything…" };
             painter.text(text_rect.min + self.prompt.view.padding + egui::vec2(2.0, 0.0), egui::Align2::LEFT_TOP, hint, theme.prop(), theme.fg_faint);
         }
 
@@ -3872,7 +4425,8 @@ impl Buffer for ChatBuffer {
             let selecting = self.focus == Focus::Transcript && self.commenting.is_none() && self.view.anchor.is_some_and(|a| a != self.view.cursor);
             let commenting = self.commenting.is_some();
             if let Some(m) = ed.meta_mut(me) {
-                for (mode, on) in [("chat-selection", selecting), ("chat-commenting", commenting)] {
+                let challenging = self.challenge_form.is_some();
+                for (mode, on) in [("chat-selection", selecting), ("chat-commenting", commenting), ("chat-challenging", challenging)] {
                     let has = m.minor_modes.iter().any(|x| x == mode);
                     if on && !has {
                         m.minor_modes.insert(0, mode.to_string());

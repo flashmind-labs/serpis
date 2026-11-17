@@ -1309,6 +1309,17 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let v = ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.review_json()))?.ok_or_else(|| mlua::Error::runtime("the chat is busy"))?;
         lua_of(lua, &v)
     })?)?;
+    // serpis.chat.challenges(buf?): the challenges of the chat's reports
+    // (chat-report-challenge), oldest first.
+    chat.set("challenges", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let chat = ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.chat_id()))?.ok_or_else(|| mlua::Error::runtime("the chat is busy"))?;
+        let v = ed(|e| {
+            let runs = crate::chat_challenge::runs_of(e, &chat);
+            Value::Array(runs.iter().map(|r| crate::chat_challenge::to_json(e, r)).collect())
+        })?;
+        lua_of(lua, &v)
+    })?)?;
     // serpis.chat.append(buf?, type, data): add a custom entry to the chat's session (pi's
     // `custom` entries); it is restored when the session is resumed.
     chat.set("append", lua.create_function(move |lua, (id, kind, data): (Option<u64>, String, LuaValue)| {
