@@ -15,10 +15,14 @@ sentence. If something must happen before this ships, say it here.
 
 > Done: retries work, but `retry_total` is now counted twice. Fix that before merging.
 
+**Then, if there is a real next step, one line: `**Next:**`** what you'd do next and the
+reason. A reason is the fact the choice rests on, in one line, not "it's cleaner".
+
 **Then these `##` sections, in this order.** Leave out a section with nothing in it.
 
 1. `## Needs you`: what the reader must decide, approve or know. Number the items, each with
-   what you recommend. Anything that would stop a careful reviewer goes here, never lower down.
+   what you recommend, the reason, and the main alternative and why not. Anything that would
+   stop a careful reviewer goes here, never lower down.
 2. `## Changed`: one bullet per change: what, where (`path:line`), why. Group by purpose, not
    by file.
 3. `## Checked`: one bullet per check: the command in bold, then `passes` or `fails` and what
@@ -28,7 +32,7 @@ sentence. If something must happen before this ships, say it here.
 4. `## Not done`: what you left out, or found and didn't fix, and why.
 
 No code changed (an investigation, a question)? Keep the first line, then what you found, how
-sure you are and what you'd do next.
+sure you are, what you recommend and the reason.
 
 ## With other skills
 
