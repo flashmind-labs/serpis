@@ -146,6 +146,8 @@ local steps = {
   end,
   function()
     shot("3-running")
+    T.check("the header shows it running, with a spinner", d.rect("report-challenge-spinner") ~= nil and d.rect("report-challenge-stop") ~= nil, true)
+    T.check("and says so", d.rect("report-challenge-status") ~= nil, true)
     return 5000
   end,
   function()

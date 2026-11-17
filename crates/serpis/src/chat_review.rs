@@ -138,14 +138,80 @@ pub fn opening_of(text: &str) -> String {
     if first.chars().count() > 60 { format!("{}…", first.chars().take(60).collect::<String>().trim_end()) } else { first.to_string() }
 }
 
+/// What a review message says besides the comments (the chat-review-*-instructions settings).
+#[derive(Debug, Clone, Default)]
+pub struct Framing {
+    /// How to reply, said first (empty: nothing).
+    pub reply: String,
+    /// What to do about questions.
+    pub question: String,
+    /// What to do about changes asked for.
+    pub fix: String,
+}
+
+/// What a review message says, from the settings: how to reply only when the agent writes
+/// reports (chat-report-skill).
+pub fn framing(ed: &crate::editor::Editor) -> Framing {
+    let var = |name: &str| ed.var_str(name).unwrap_or_default();
+    Framing {
+        reply: if ed.var_bool("chat-report-skill") { var("chat-review-reply-instructions") } else { String::new() },
+        question: var("chat-review-question-instructions"),
+        fix: var("chat-review-fix-instructions"),
+    }
+}
+
+/// A comment's place in words, so it reads as a place in the message and not as a name to
+/// reuse: `Needs you 2` is "item 2 under "Needs you"", a paragraph's `Summary` "under
+/// "Summary"", `Headline` "its first line".
+fn place_words(label: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        String::new()
+    } else if label.eq_ignore_ascii_case("headline") {
+        "its first line".into()
+    } else if let Some((title, n)) = label.rsplit_once(' ').filter(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+        format!("item {n} under \"{title}\"")
+    } else {
+        format!("under \"{label}\"")
+    }
+}
+
+/// The label `place_words` wrote (as it is, when it is one sent before it did).
+fn label_of(words: &str) -> String {
+    let w = words.trim();
+    let lower = w.to_lowercase();
+    let quoted = |s: &str| s.strip_prefix('"').and_then(|s| s.strip_suffix('"')).map(str::to_string);
+    if lower == "its first line" {
+        return "Headline".into();
+    }
+    if lower.starts_with("item ")
+        && let Some((n, title)) = w[5..].split_once(" under ")
+        && let Some(title) = quoted(title)
+    {
+        return format!("{title} {n}");
+    }
+    if lower.starts_with("under ")
+        && let Some(title) = quoted(&w[6..])
+    {
+        return title;
+    }
+    w.to_string()
+}
+
 /// The message an agent gets for these comments, and what was typed with them (`also`).
-pub fn prompt(comments: &[&Comment], also: &str) -> String {
+pub fn prompt(comments: &[&Comment], also: &str, f: &Framing) -> String {
     let mut out = String::from("Review comments on what you wrote.");
-    let place_of = |c: &Comment| match (c.opening.is_empty(), c.label.is_empty()) {
-        (false, false) => format!("In your message that starts \"{}\", {}:", c.opening, c.label),
-        (false, true) => format!("In your message that starts \"{}\":", c.opening),
-        (true, false) => format!("{}:", c.label),
-        (true, true) => "On this:".to_string(),
+    if !f.reply.trim().is_empty() {
+        out.push_str(&format!("\n\n{}", f.reply.trim()));
+    }
+    let place_of = |c: &Comment| {
+        let at = place_words(&c.label);
+        match (c.opening.is_empty(), at.is_empty()) {
+            (false, false) => format!("In your message that starts \"{}\", {at}:", c.opening),
+            (false, true) => format!("In your message that starts \"{}\":", c.opening),
+            (true, false) => format!("{}{}:", at[..1].to_uppercase(), &at[1..]),
+            (true, true) => "On this:".to_string(),
+        }
     };
     let challenged: Vec<&&Comment> = comments.iter().filter(|c| c.challenge.is_some()).collect();
     if !challenged.is_empty() {
@@ -170,7 +236,10 @@ pub fn prompt(comments: &[&Comment], also: &str) -> String {
         if of.is_empty() {
             return;
         }
-        out.push_str(&format!("\n\n## {title}\n{how}\n"));
+        out.push_str(&format!("\n\n## {title}\n"));
+        if !how.trim().is_empty() {
+            out.push_str(&format!("{}\n", how.trim()));
+        }
         for c in of {
             out.push_str(&format!("\n{}\n", place_of(c)));
             for l in c.quote.lines() {
@@ -180,8 +249,8 @@ pub fn prompt(comments: &[&Comment], also: &str) -> String {
             out.push('\n');
         }
     };
-    section(&mut out, Ask::Question, "Questions", "Answer each, quoting it. Change nothing for these.");
-    section(&mut out, Ask::Fix, "Changes asked for", "Make these changes, then say what you did for each.");
+    section(&mut out, Ask::Question, "Questions", &f.question);
+    section(&mut out, Ask::Fix, "Changes asked for", &f.fix);
     let also = also.trim();
     if !also.is_empty() {
         out.push_str(&format!("\n\n## Also\n\n{also}\n"));
@@ -302,12 +371,17 @@ pub fn parse_sent(text: &str) -> Option<Sent> {
         let place = if diff {
             (line.starts_with('`') && !line.starts_with("``")).then(|| line.to_string()).filter(|l| l[1..].contains('`'))
         } else {
-            (line.ends_with(':') && (line.starts_with("In your message that starts") || line == "On this:" || !line.contains(' ') || line.split(' ').last().is_some_and(|w| w.trim_end_matches(':').chars().all(|c| c.is_ascii_digit())))).then(|| {
+            // Its place in words ("item 2 under "Needs you"") or, sent before, as a label ("Needs you 2").
+            let words = line.strip_suffix(':').is_some_and(|l| {
+                let l = l.to_lowercase();
+                l == "its first line" || (l.starts_with("item ") && l.contains(" under \"")) || l.starts_with("under \"")
+            });
+            (line.ends_with(':') && (words || line.starts_with("In your message that starts") || line == "On this:" || !line.contains(' ') || line.split(' ').next_back().is_some_and(|w| w.trim_end_matches(':').chars().all(|c| c.is_ascii_digit())))).then(|| {
                 let l = line.trim_end_matches(':');
                 match l.strip_prefix("In your message that starts \"").and_then(|r| r.rsplit_once("\", ")) {
-                    Some((_, label)) => label.to_string(),
+                    Some((_, at)) => label_of(at),
                     None if l.starts_with("In your message that starts") || l == "On this" => String::new(),
-                    None => l.to_string(),
+                    None => label_of(l),
                 }
             })
         };
@@ -366,7 +440,15 @@ pub fn save(machine: Option<&str>, session: &str, saved: &Saved) -> anyhow::Resu
 /// comment being written in the composer saves with RET, as the diff page's comments with C-RET.
 pub fn install(ed: &mut crate::editor::Editor) {
     use crate::commands::with_chat;
+    use serde_json::json;
     let o = crate::editor::BUILTIN;
+    ed.defvar(
+        "chat-review-reply-instructions",
+        json!("Reply with a report, as after any task. Each change asked for is a bullet under `## Changed`. Each answer comes after the report's first line, quoting what it answers. A place such as item 2 under \"Needs you\" is in your last report: don't use it as a heading."),
+        "What a review sent to a chat's agent says first, about how to reply (only while chat-report-skill is on). Empty: nothing.",
+    );
+    ed.defvar("chat-review-question-instructions", json!("Answer each, quoting it. Change nothing for these."), "What a review sent to a chat's agent says about questions.");
+    ed.defvar("chat-review-fix-instructions", json!("Make these changes. When one is unclear or wrong, say so instead of guessing."), "What a review sent to a chat's agent says about changes asked for.");
     ed.define_command("chat-ask", "Ask a question about the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Question)));
     ed.define_command("chat-comment", "Ask for a change about the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Fix)));
     ed.define_command("chat-comment-save", "Save the comment being written to the chat's review, sent with your next message (emptied, a saved one is deleted).", o, |ed, _| with_chat(ed, |c, ed| c.save_comment(ed)));
@@ -444,6 +526,10 @@ pub fn to_json(c: &Comment) -> Value {
 mod tests {
     use super::*;
 
+    fn framing() -> Framing {
+        Framing { reply: String::new(), question: "Answer each, quoting it.".into(), fix: "Make these changes.".into() }
+    }
+
     fn writing(quote: &str, text: &str, ask: Ask) -> Writing {
         Writing { quote: quote.into(), label: "Changed 1".into(), opening: "Done: the retry change is sound".into(), text: text.into(), ask, ..Default::default() }
     }
@@ -469,13 +555,26 @@ mod tests {
     fn the_message_quotes_each_comment_under_what_it_asks() {
         let q = Comment { quote: "This is the likely cause\nof the flake.".into(), label: "Changed 1".into(), opening: "Done: the retry change is sound".into(), text: "Did you reproduce it?".into(), ask: Ask::Question, ..Default::default() };
         let f = Comment { quote: "Its Display output changed.".into(), label: "Needs you 2".into(), text: "Update the dashboards' parser too.".into(), ask: Ask::Fix, ..Default::default() };
-        let p = prompt(&[&q, &f], "Then run the tests again.");
+        let p = prompt(&[&q, &f], "Then run the tests again.", &framing());
         assert_eq!(
             p,
-            "Review comments on what you wrote.\n\n## Questions\nAnswer each, quoting it. Change nothing for these.\n\nIn your message that starts \"Done: the retry change is sound\", Changed 1:\n> This is the likely cause\n> of the flake.\nDid you reproduce it?\n\n\n## Changes asked for\nMake these changes, then say what you did for each.\n\nNeeds you 2:\n> Its Display output changed.\nUpdate the dashboards' parser too.\n\n\n## Also\n\nThen run the tests again.\n"
+            "Review comments on what you wrote.\n\n## Questions\nAnswer each, quoting it.\n\nIn your message that starts \"Done: the retry change is sound\", item 1 under \"Changed\":\n> This is the likely cause\n> of the flake.\nDid you reproduce it?\n\n\n## Changes asked for\nMake these changes.\n\nItem 2 under \"Needs you\":\n> Its Display output changed.\nUpdate the dashboards' parser too.\n\n\n## Also\n\nThen run the tests again.\n"
         );
         // Nothing typed: no "Also".
-        assert!(!prompt(&[&q], "  ").contains("## Also"));
+        assert!(!prompt(&[&q], "  ", &framing()).contains("## Also"));
+        // How to reply comes first; no instructions, no line for them.
+        let f = Framing { reply: "Reply with a report.".into(), ..Default::default() };
+        assert!(prompt(&[&q], "", &f).starts_with("Review comments on what you wrote.\n\nReply with a report.\n\n## Questions\n\nIn your message"), "{}", prompt(&[&q], "", &f));
+    }
+
+    #[test]
+    fn places_read_as_places() {
+        for (label, words) in [("Needs you 2", "item 2 under \"Needs you\""), ("Summary", "under \"Summary\""), ("Headline", "its first line"), ("", "")] {
+            assert_eq!(place_words(label), words);
+            assert_eq!(label_of(&words), label);
+        }
+        // Sent before they were words.
+        assert_eq!(label_of("Needs you 2"), "Needs you 2");
     }
 
     #[test]
@@ -483,7 +582,8 @@ mod tests {
         let q = Comment { quote: "This is the likely cause\nof the flake.".into(), label: "Changed 1".into(), opening: "Done: the retry change".into(), text: "Did you reproduce it?\nAnd how?".into(), ask: Ask::Question, ..Default::default() };
         let f = Comment { quote: "Its output changed.".into(), label: "Needs you 2".into(), text: "Update the parser.".into(), ask: Ask::Fix, ..Default::default() };
         let o = Comment { quote: "Something.".into(), text: "Hm?".into(), ask: Ask::Question, ..Default::default() };
-        let sent = parse_sent(&prompt(&[&q, &f, &o], "Then run the tests.")).unwrap();
+        let p = prompt(&[&q, &f, &o], "Then run the tests.", &Framing { reply: "Reply with a report.".into(), ..framing() });
+        let sent = parse_sent(&p).unwrap();
         assert_eq!(sent.compared, None);
         assert_eq!(sent.items.len(), 3);
         assert_eq!((sent.items[0].ask, sent.items[0].place.as_str(), sent.items[0].text.as_str()), (Ask::Question, "Changed 1", "Did you reproduce it?\nAnd how?"));
@@ -491,6 +591,10 @@ mod tests {
         assert_eq!((sent.items[1].place.as_str(), sent.items[2].place.as_str()), ("", "Needs you 2"));
         assert_eq!(sent.items[2].ask, Ask::Fix);
         assert_eq!(sent.also, "Then run the tests.");
+        // One sent before places were words.
+        let old = "Review comments on what you wrote.\n\n## Changes asked for\nMake these changes, then say what you did for each.\n\nIn your message that starts \"Done: x\", Needs you 1:\n> Six clients.\nNo compression.\n\nChanged 2:\n> Jitter.\nWhy?\n";
+        let sent = parse_sent(old).unwrap();
+        assert_eq!(sent.items.iter().map(|i| (i.place.as_str(), i.text.as_str())).collect::<Vec<_>>(), vec![("Needs you 1", "No compression."), ("Changed 2", "Why?")]);
         // A diff page's.
         let diff = "Review comments on main → the worktree in /w. Line numbers are the current file's, except where a comment says it is on the old version.\n\n## Fix\nFix these.\n\n`src/a.rs:12-13`\n```rs\nlet x = 1;\nlet y = 2;\n```\nUse a constant.\n\n## Questions\nAnswer these.\n\n`src/a.rs:30` (on the old version)\nWhy run it here?\n";
         let sent = parse_sent(diff).unwrap();
@@ -508,10 +612,10 @@ mod tests {
         let ch = Comment { quote: "This is the likely cause.".into(), label: "Changed 1".into(), opening: "Done: retries".into(), text: "Agreed. Add the run to the test.".into(), ask: Ask::Fix, challenge: Some(finding.clone()), ..Default::default() };
         let bare = Comment { quote: "passed every time.".into(), label: "Checked 2".into(), ask: Ask::Fix, challenge: Some(Finding { confirmed: false, text: "One thread can't race.".into(), ..Default::default() }), ..Default::default() };
         let q = Comment { quote: "Added jitter.".into(), label: "Changed 2".into(), text: "Same as the old client?".into(), ask: Ask::Question, ..Default::default() };
-        let p = prompt(&[&q, &ch, &bare], "");
+        let p = prompt(&[&q, &ch, &bare], "", &framing());
         assert!(p.starts_with(&format!("Review comments on what you wrote.\n\n## {CHALLENGED}\n")), "{p}");
-        assert!(p.contains("In your message that starts \"Done: retries\", Changed 1:\n> This is the likely cause.\nChallenge (confirmed): The race is still there.\nEvidence: 8 workers: 3 of 500 failed.\nMy note: Agreed. Add the run to the test.\n"), "{p}");
-        assert!(p.contains("Checked 2:\n> passed every time.\nChallenge (plausible): One thread can't race.\n\n"), "{p}");
+        assert!(p.contains("In your message that starts \"Done: retries\", item 1 under \"Changed\":\n> This is the likely cause.\nChallenge (confirmed): The race is still there.\nEvidence: 8 workers: 3 of 500 failed.\nMy note: Agreed. Add the run to the test.\n"), "{p}");
+        assert!(p.contains("Item 2 under \"Checked\":\n> passed every time.\nChallenge (plausible): One thread can't race.\n\n"), "{p}");
         // Not repeated under the changes asked for.
         assert!(!p.contains("## Changes asked for"), "{p}");
         let sent = parse_sent(&p).unwrap();

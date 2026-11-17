@@ -85,10 +85,10 @@ pub fn report_rule(skills: &[Skill], also: &HashSet<String>) -> Option<String> {
     let body = text.as_deref().map(|t| frontmatter(t).map_or(t, |(_, b)| b).trim()).filter(|b| !b.is_empty());
     match body {
         Some(body) => Some(format!(
-            "{lead}, written exactly as the `report` skill below says, every time. Keep it in mind from the start. Another skill may say what to report (a review's findings): it decides what goes in, this decides the shape.\n\n<skill name=\"report\">\n{body}\n</skill>"
+            "{lead}, written exactly as the `report` skill below says, every time, your reply to review comments too. Keep it in mind from the start. Another skill, the person or their review comments may say what to report (a review's findings, \"say what you did for each\"): that decides what goes in, the skill decides the shape.\n\n<skill name=\"report\">\n{body}\n</skill>"
         )),
         None => (skill.is_some() || also.contains("report")).then(|| {
-            format!("{lead}: load the `report` skill when you start a task, not when you finish it, and write the report exactly as it says, every time.")
+            format!("{lead}: load the `report` skill when you start a task, not when you finish it, and write the report exactly as it says, every time, your reply to review comments too.")
         }),
     }
 }

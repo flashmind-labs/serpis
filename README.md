@@ -126,7 +126,11 @@ To review what an agent wrote, select part of it: a bar beside the selection ask
 under what it quotes; RET saves it to the chat's review (Send now sends just that one), shown
 under what it is about (click to change it). The composer keeps its text box, with the review in
 a row above it, and sending sends the review with what you typed, as one message. The review is
-kept between runs, a comment half written included (`serpis.chat.review()` reads it).
+kept between runs, a comment half written included (`serpis.chat.review()` reads it). What the
+message says besides your comments is in `chat-review-reply-instructions` (said first: reply with
+a report, the changes under Changed; only while `chat-report-skill` is on),
+`chat-review-question-instructions` and `chat-review-fix-instructions`. Each comment says where it
+is as a place ("item 2 under "Needs you""), so the agent doesn't take it as a heading to reuse.
 
 A review once sent shows as one in your message (each comment with what it quotes, where it is
 as a link back, and what you wrote; a diff page's review the same, with the code and its

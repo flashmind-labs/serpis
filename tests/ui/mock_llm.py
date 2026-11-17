@@ -12,7 +12,8 @@ models.json). What it says depends on the last user message:
   REPORT:<name>   reply with report-<name>.md: the same review written another way (skill: by
                   skills/report/SKILL.md)
   /skill:challenge, expanded (a report's challenge): reply with challenge.md, what a
-                  challenger found wrong with report-skill.md
+                  challenger found wrong with report-skill.md; with NO REPORT in it, think and
+                  stop out of output tokens, no text; with SLOW in it, call bash `sleep 20`
   Prove this finding ...   (Prove it on a challenge's finding) confirm it, with evidence
   Review comments on what you wrote. ...   (a review serpis sent) answer each comment,
                   quoting it as asked: "> quote" then "Answer N."
@@ -119,6 +120,12 @@ class Handler(BaseHTTPRequestHandler):
             if prompt.startswith('<skill name="challenge"'):
                 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "challenge.md")) as f:
                     delta["content"] = f.read()
+                # Told so in its note: run out of output tokens while thinking, or take a while.
+                if "NO REPORT" in prompt:
+                    delta = {"role": "assistant", "reasoning_content": "Let me think about the race for a long while"}
+                    finish = "length"
+                if "SLOW" in prompt:
+                    call = ("bash", {"command": "sleep 20"})
             if prompt.startswith("Prove this finding"):
                 delta["content"] = "[confirmed] With 8 threads it fails.\nEvidence: 3 of 500 runs failed with 8 threads."
             if prompt.startswith("INLINE"):

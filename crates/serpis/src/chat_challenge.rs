@@ -401,26 +401,16 @@ pub fn tick(ed: &mut Editor) {
         if run.ended.is_some() || run.challenger.is_empty() {
             continue;
         }
-        let Some(buf) = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.challenger) else { continue };
-        let Some(Some(done)) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| c.finished_reply()) else { continue };
-        let r = &mut ed.challenges.runs[i];
-        r.ended = Some(now());
+        // Its chat closed (its worktree removed, say): no report coming.
+        let done = match crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.challenger) {
+            None => Err("its chat was closed before it finished".to_string()),
+            Some(buf) => {
+                let Some(Some(done)) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| c.finished_reply()) else { continue };
+                done
+            }
+        };
+        end(ed, i, done);
         changed = true;
-        match done {
-            Ok(text) => {
-                let (found, held) = parse_findings(&text);
-                r.findings = found.len();
-                r.held = held;
-                let run = r.clone();
-                deliver(ed, &run, found);
-            }
-            Err(why) => {
-                r.error = Some(why.clone());
-                ed.warn(format!("The challenge stopped: {why}"));
-            }
-        }
-        let run = ed.challenges.runs[i].clone();
-        ed.run_hook("chat-challenge-finished", &to_json(ed, &run));
     }
     // A finding a challenger was asked to prove: its answer.
     for i in 0..ed.challenges.runs.len() {
@@ -467,6 +457,27 @@ pub fn tick(ed: &mut Editor) {
     if changed {
         save(ed);
     }
+}
+
+/// Run `i` is over: its findings placed (from the challenger's report), or why it has none.
+fn end(ed: &mut Editor, i: usize, done: Result<String, String>) {
+    let r = &mut ed.challenges.runs[i];
+    r.ended = Some(now());
+    match done {
+        Ok(text) => {
+            let (found, held) = parse_findings(&text);
+            r.findings = found.len();
+            r.held = held;
+            let run = r.clone();
+            deliver(ed, &run, found);
+        }
+        Err(why) => {
+            r.error = Some(why.clone());
+            ed.warn(format!("The challenge stopped: {why}"));
+        }
+    }
+    let run = ed.challenges.runs[i].clone();
+    ed.run_hook("chat-challenge-finished", &to_json(ed, &run));
 }
 
 /// Place the findings on the challenged chat's report, as drafts of its review.
@@ -632,11 +643,18 @@ pub fn open(ed: &mut Editor, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Stop challenge `id`'s challenger.
+/// Stop challenge `id`: its challenger, if its chat is open and working, and the challenge
+/// itself, which then has no findings.
 pub fn stop(ed: &mut Editor, id: &str) {
-    let challenger = ed.challenges.runs.iter().find(|r| r.id == id).map(|r| r.challenger.clone()).unwrap_or_default();
+    load(ed);
+    let Some(i) = ed.challenges.runs.iter().position(|r| r.id == id) else { return };
+    let challenger = ed.challenges.runs[i].challenger.clone();
     if let Some(b) = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &challenger) {
         ed.with_buffer_as::<ChatBuffer, _>(b, |c, _| c.abort());
+    }
+    if ed.challenges.runs[i].ended.is_none() {
+        end(ed, i, Err("stopped".into()));
+        save(ed);
     }
 }
 
