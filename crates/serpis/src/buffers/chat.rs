@@ -3986,7 +3986,7 @@ impl Buffer for ChatBuffer {
         let mut action_rects = Vec::new();
         let report_act = self.draw_report_actions(ui, transcript_rect, &theme, k, &runs, enabled, now, &mut action_rects);
         for (name, r) in action_rects {
-            ed.debug_rects.insert(name, r);
+            ed.debug_rects.insert(name.into(), r);
         }
         match report_act {
             Some(ReportAct::Challenge(entry)) => self.open_challenge_form(ed, Some(entry)),
@@ -4016,7 +4016,7 @@ impl Buffer for ChatBuffer {
         let mut bar_rects = Vec::new();
         let picked = self.draw_selection_bar(ui, &painter, transcript_rect, &theme, k, &mut bar_rects);
         for (name, r) in bar_rects {
-            ed.debug_rects.insert(name, r);
+            ed.debug_rects.insert(name.into(), r);
         }
         if let Some(ask) = picked {
             self.start_comment(ed, ask);
@@ -4080,7 +4080,7 @@ impl Buffer for ChatBuffer {
             self.draw_challenge_form(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects, &facts)
         } else if review_h > 0.0 { self.draw_review_header(ui, &painter, Rect::from_min_max(egui::pos2(card.left() + 12.0 * k, card.top() + att_h + 8.0 * k), egui::pos2(card.right() - 12.0 * k, card.top() + att_h + review_h)), &theme, k, &mut header_rects) } else { None };
         for (key, r) in header_rects {
-            ed.debug_rects.insert(match key { "c-submit" => "challenge-submit", "c-cancel" => "challenge-cancel", "c-model" => "challenge-model", "c-thinking" => "challenge-thinking", "c-remember" => "challenge-remember", "save" => "review-save", "now" => "review-send-now", "cancel" => "review-cancel", "discard" => "review-discard", _ => "review-toggle" }, r);
+            ed.debug_rects.insert(match key { "c-submit" => "challenge-submit", "c-cancel" => "challenge-cancel", "c-model" => "challenge-model", "c-thinking" => "challenge-thinking", "c-remember" => "challenge-remember", "save" => "review-save", "now" => "review-send-now", "cancel" => "review-cancel", "discard" => "review-discard", _ => "review-toggle" }.into(), r);
         }
         match review_act {
             Some(ReviewAct::Save) => self.save_comment(ed),

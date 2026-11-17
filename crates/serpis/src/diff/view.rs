@@ -1642,7 +1642,7 @@ impl Buffer for DiffBuffer {
             (c.next_row(), toggle_split, toggle_wrap, toggle_all, toggle_tree)
         };
         if let Some((_, r)) = hits.iter().find(|(key, _)| key == "upstream-warning") {
-            ed.debug_rects.insert("diff-upstream-warning", *r);
+            ed.debug_rects.insert("diff-upstream-warning".into(), *r);
         } else {
             ed.debug_rects.remove("diff-upstream-warning");
         }

@@ -282,7 +282,7 @@ pub struct Editor {
     /// Frames drawn so far (`serpis.debug.frames`: tests wait for input to be drawn).
     pub frames_drawn: u64,
     /// Where named controls were drawn last frame (`serpis.debug.rect`, for tests).
-    pub debug_rects: HashMap<&'static str, Rect>,
+    pub debug_rects: HashMap<String, Rect>,
     /// In UI tests: rows of controls that overlapped or spilled out of their place this run
     /// (`check_row`), once each.
     pub layout_issues: Vec<String>,

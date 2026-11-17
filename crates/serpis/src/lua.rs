@@ -1724,7 +1724,7 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // Where a named control was drawn last frame: {x, y, w, h} or nil ("sidebar-toggle").
     debug.set("rect", lua.create_function(|lua, name: String| {
-        let v = ed(|e| e.debug_rects.get(name.as_str()).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})))?;
+        let v = ed(|e| e.debug_rects.get(&name).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})))?;
         lua_of(lua, &v.unwrap_or(Value::Null))
     })?)?;
     // The current chat's composer: {text, line, col, anchor = {line, col}?, focus = "prompt"|"transcript"}

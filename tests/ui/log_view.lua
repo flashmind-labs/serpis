@@ -225,10 +225,13 @@ local steps = {
   function(go)
     -- Clear empties it; new records still come.
     serpis.command.run("log-search", "")
-    click("clear")
-    when(function() return not has("careful now") end, function()
-      serpis.log.info("after the clear")
-      when(function() return has("after the clear") end, go)
+    -- Clear's place is known once the page is drawn without the search.
+    serpis.defer(200, function()
+      click("clear")
+      when(function() return not has("careful now") end, function()
+        serpis.log.info("after the clear")
+        when(function() return has("after the clear") end, go)
+      end)
     end)
     return false
   end,

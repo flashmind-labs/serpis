@@ -136,7 +136,7 @@ list = {
   end,
   function()
     T.check("ESC leaves", d.minibuffer(), nil)
-    click(d.rect("header-status-button"))
+    click(d.rect("header-button:chat-checklist"))
   end,
   function()
     T.check("a click on the pill opens it", d.minibuffer(), "Checklist")

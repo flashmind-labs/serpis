@@ -105,7 +105,7 @@ fn draw_busy(ui: &mut egui::Ui, ed: &mut Editor, above: Rect) {
     }
     // Tests find the newest one.
     if let Some(c) = cards.first() {
-        ed.debug_rects.insert("busy", *c);
+        ed.debug_rects.insert("busy".into(), *c);
     }
     ui.ctx().request_repaint_after(Duration::from_millis(50));
 }
@@ -547,7 +547,13 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         if resp.hovered() {
             ui.painter().rect_filled(pr, pr.height() / 2.0, crate::chrome::hover_bg(&theme));
         }
-        ed.debug_rects.insert(if cmd == "chat-select-folder" { "header-folder-button" } else { "header-status-button" }, pr);
+        // Tests find each by its command, and the leftmost of the buffer's own entries (a
+        // chat's model, or its cache) and the folder by name. Segments (a chat's pin) are left
+        // of those, so they have only the first.
+        ed.debug_rects.insert(format!("header-button:{cmd}"), pr);
+        if i >= header_extra.len() {
+            ed.debug_rects.insert(if cmd == "chat-select-folder" { "header-folder-button" } else { "header-status-button" }.into(), pr);
+        }
         if resp.clicked() {
             ed.focus_window(w);
             ed.defer(move |ed| ed.call(&cmd));
@@ -703,7 +709,7 @@ fn draw_echo(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect, palette: bool) {
     let bsz = (rect.height() - 4.0).min(26.0 * k);
     let toggle = Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - bsz / 2.0), Vec2::splat(bsz));
     let shown = ed.var_bool("sidebar-visible");
-    ed.debug_rects.insert("sidebar-toggle", toggle);
+    ed.debug_rects.insert("sidebar-toggle".into(), toggle);
     let keys = crate::commands::all_bindings(ed);
     let tip = crate::chrome::with_key(if shown { "Hide the sidebar" } else { "Show the sidebar" }, &keys, "sidebar-toggle");
     if crate::chrome::ghost_button(ui, toggle, ui.scope_id().with("sidebar-toggle"), &theme, &tip, |p, r, c| crate::chrome::sidebar_icon(p, r.expand(2.0), c, shown)).clicked() {
@@ -835,7 +841,7 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
             let resp = pui.interact(r, egui::Id::unique(("palette-row", i)), Sense::click());
             if i == mb.selected {
                 painter.rect_filled(r, 8.0 * k, chrome::selected_bg(t));
-                ed.debug_rects.insert("palette-selected-row", r);
+                ed.debug_rects.insert("palette-selected-row".into(), r);
             } else if resp.hovered() {
                 painter.rect_filled(r, 8.0 * k, chrome::hover_bg(t));
             }

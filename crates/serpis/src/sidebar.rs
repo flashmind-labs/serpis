@@ -1395,7 +1395,7 @@ pub fn draw(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect) {
         acts.push(Act::Run("worktree-new-chat".into(), Vec::new()));
     }
     let review_r = Rect::from_min_size(egui::pos2(wt_r.right() + 4.0 * k, act_y), Vec2::splat(bh));
-    ed.debug_rects.insert("sidebar-review", review_r);
+    ed.debug_rects.insert("sidebar-review".into(), review_r);
     if chrome::ghost_button(ui, review_r, ui.scope_id().with("sidebar-review"), t, &chrome::with_key("Review changes", &keys, "diff-view"), chrome::diff).clicked() {
         acts.push(Act::Run("diff-view".into(), Vec::new()));
     }
