@@ -8,8 +8,10 @@
 //!   report_eval --score DIR      score a finished run again (no model calls)
 //!
 //! `current` is skills/report/SKILL.md as it is in the working tree; any other variant is
-//! evals/report/variants/<name>.md. Each run gets its own clone of the commit, agent directory
-//! and HOME, so nothing it does reaches this checkout or your serpis. Their cargo builds share
+//! evals/report/variants/<name>.md. Chats run as the app runs them: on a serpis node (one per
+//! variant, in this process), with the app's default settings, its lent tools and serpis's
+//! default config, on a HOME of the run's own. Each run gets its own clone of the commit, so
+//! nothing it does reaches this checkout or your serpis. Their cargo builds share
 //! target/report-eval/cargo-target, so dependencies build once.
 
 use std::collections::BTreeMap;
@@ -21,7 +23,6 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use serpis::buffers::chat::{check_mark, shaped_report, top_items};
 use serpis::chat_review::{self, Ask, Comment, Framing};
-use serpis_agent::{AgentConfig, AgentEvent, builtin_tools, skills, system_prompt};
 use serpis_ai::*;
 
 const SECTIONS: [&str; 4] = ["Needs you", "Changed", "Checked", "Not done"];
@@ -103,12 +104,14 @@ struct Task {
     id: String,
     prompt: String,
     review: Option<Value>,
+    /// A shell command run in the clone before the agent starts (a hook that blocks commits).
+    setup: Option<String>,
 }
 
 fn tasks(only: &Option<Vec<String>>) -> Vec<Task> {
     let all: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(root().join("evals/report/tasks.json")).unwrap()).unwrap();
     all.into_iter()
-        .map(|t| Task { id: t["id"].as_str().unwrap().into(), prompt: t["prompt"].as_str().unwrap().into(), review: t.get("review").cloned() })
+        .map(|t| Task { id: t["id"].as_str().unwrap().into(), prompt: t["prompt"].as_str().unwrap().into(), review: t.get("review").cloned(), setup: t["setup"].as_str().map(Into::into) })
         .filter(|t| only.as_ref().is_none_or(|o| o.contains(&t.id)))
         .collect()
 }
@@ -127,51 +130,147 @@ fn text_of(m: &Message) -> String {
 
 /// What one agent run left: its messages, and how it ended.
 struct Ran {
+    /// The whole conversation so far, as its session file has it.
     messages: Vec<Message>,
     error: Option<String>,
     secs: f64,
 }
 
-async fn run_agent(cfg: AgentConfig, history: Vec<Message>, prompt: String, timeout: Duration) -> Ran {
-    let start = Instant::now();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = serpis_agent::run(history, vec![Message::user_text(prompt)], cfg, Arc::new(move |e| {
-        let _ = tx.send(e);
-    }));
-    let mut messages = Vec::new();
-    let collect = async {
-        while let Some(e) = rx.recv().await {
-            match e {
-                AgentEvent::MessageEnd(m) => messages.push(m),
-                AgentEvent::AgentEnd { error } => return error,
-                _ => {}
-            }
-        }
-        Some("the agent stopped without ending".into())
-    };
-    let error = match tokio::time::timeout(timeout, collect).await {
-        Ok(e) => e,
-        Err(_) => {
-            handle.abort();
-            Some(format!("timed out after {} min", timeout.as_secs() / 60))
-        }
-    };
-    Ran { messages, error, secs: start.elapsed().as_secs_f64() }
+/// One serpis node per variant, in this process, as the app's own node runs chats: its agent
+/// directory has the variant as the user's `report` skill, its config is serpis's default one.
+struct Node {
+    socket: PathBuf,
+    _running: serpis_node::server::Running,
 }
 
-/// The system prompt as a serpis chat builds it (serpis-chat's build_system_prompt): the tools,
-/// the skills it may load, and the report rule with the skill's text. Left out: serpis's own
-/// tools and docs (serpis_lua, serpis_api) and your config's additions.
-fn system_prompt_for(run: &Path, repo: &Path, skill: &str, tools: &[serpis_agent::ToolRef]) -> String {
-    let agent_dir = run.join("agent");
-    let places = skills::Places { agent_dir: agent_dir.clone(), pi_dir: None, cwd: repo.into(), paths: vec![], claude: false, home: run.join("home"), builtin: vec!["report".into(), "diagrams".into(), "challenge".into()] };
-    let found = skills::discover(&places);
-    let report = found.iter().find(|s| s.name == "report").expect("the report skill");
-    std::fs::write(&report.file, skill).unwrap();
-    let mut opts = system_prompt::PromptOptions { context_files: system_prompt::load_context_files(repo, &agent_dir), ..Default::default() };
-    opts.sections.insert("skills".into(), skills::for_prompt(&found, "read"));
-    opts.guidelines.extend(skills::report_rule(&found, &Default::default()));
-    system_prompt::build_system_prompt(tools, repo, &opts)
+/// What the app gives its node (remote.rs, on connecting to this machine's node): every setting
+/// at its default and the tools the window lends (serpis_lua, serpis_api and the default
+/// config's). Read from a headless editor booted on this run's HOME, so the config is the
+/// default one written there, never yours.
+struct App {
+    vars: serde_json::Map<String, Value>,
+    tools: Vec<serpis_proto::wire::ToolSpec>,
+}
+
+fn boot_app(rt: &tokio::runtime::Runtime) -> App {
+    let mut ed = serpis::editor::Editor::new(egui::Context::default(), rt.handle().clone());
+    serpis::bootstrap(&mut ed);
+    let vars = ed.vars.iter().map(|(k, v)| (k.clone(), v.value.clone())).collect();
+    App { vars, tools: serpis::remote::lent_specs(&ed) }
+}
+
+/// The OpenRouter key reaches the nodes as an `auth.json` command (`!cat FILE`): serpis runs it
+/// once and keeps the answer, so the file is gone before any agent starts, the key is in no
+/// agent's environment and in no file of the run.
+fn prime_key(key: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("report-eval-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("key");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file).unwrap();
+        f.write_all(key.as_bytes()).unwrap();
+    }
+    let cmd = format!("!cat '{}'", file.display());
+    assert_eq!(serpis_ai::registry::resolve_config_value(&cmd).as_deref(), Some(key), "the key command");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::remove_dir(&dir).unwrap();
+    cmd
+}
+
+fn start_node(out: &Path, variant: &str, skill: &str, (key_cmd, key_len): (&str, usize), provider: &str, model: &str, rt: &tokio::runtime::Runtime) -> Node {
+    let dir = out.join("nodes").join(variant);
+    let agent = dir.join("agent");
+    std::fs::create_dir_all(agent.join("skills/report")).unwrap();
+    std::fs::write(agent.join("skills/report/SKILL.md"), skill).unwrap();
+    std::fs::write(agent.join("auth.json"), json!({provider: {"type": "api_key", "key": key_cmd}}).to_string()).unwrap();
+    std::fs::write(dir.join("settings.json"), json!({"session-directory": dir.join("sessions")}).to_string()).unwrap();
+    // The model catalog, as serpis fetches it (the public one, not your copy).
+    let reg = Registry::new(Paths { agent_dir: agent.clone() });
+    rt.block_on(reg.refresh_catalogs(false));
+    let (p, id) = model.split_once('/').unwrap();
+    assert!(reg.find(p, id).is_some(), "no model {model} in serpis's catalog");
+    assert_eq!(reg.api_key(provider).as_deref().map(str::len), Some(key_len), "the node's key");
+    // Unix socket paths are limited to about 100 bytes.
+    let socket = std::env::temp_dir().join(format!("re-{}-{variant}", std::process::id())).join("node.sock");
+    let config_dir = Some(out.join("home/.config/serpis"));
+    let running = serpis_node::server::start(serpis_node::server::Config { socket: socket.clone(), dir, agent_dir: Some(agent), config_dir }, rt.handle().clone()).unwrap_or_else(|e| panic!("start a node at {}: {e:#}", socket.display()));
+    Node { socket, _running: running }
+}
+
+/// A chat on a node, driven as the app drives it.
+struct Drive {
+    client: serpis_node::client::Client,
+    events: tokio::sync::mpsc::UnboundedReceiver<serpis_proto::wire::Event>,
+    chat: String,
+    session: Option<String>,
+    /// Calls of the lent tools (which only the app can run): answered with an error.
+    lent_calls: Vec<String>,
+}
+
+impl Drive {
+    async fn open(cx: &Ctx, node: &Node, repo: &Path) -> anyhow::Result<Drive> {
+        use serpis_proto::wire::{Request, Response};
+        let (client, events) = serpis_node::client::Client::connect(&serpis_node::client::Target::Local(node.socket.clone()), "report-eval").await?;
+        client.call(Request::Lend { tools: cx.app.tools.clone() }).await?;
+        client.call(Request::SetVars { vars: cx.app.vars.clone() }).await?;
+        let r = client.call(Request::New { cwd: repo.to_string_lossy().into(), chat: None, model: Some(cx.model.clone()), thinking: Some(cx.thinking.clone()) }).await?;
+        let Response::Chat { chat } = r else { anyhow::bail!("not a chat: {r:?}") };
+        client.call(Request::Attach { chat: chat.clone() }).await?;
+        Ok(Drive { client, events, chat, session: None, lent_calls: Vec::new() })
+    }
+
+    /// Send `text` and wait until the run it starts is over.
+    async fn prompt(&mut self, text: String, timeout: Duration) -> Option<String> {
+        use serpis_proto::wire::{Event, Request};
+        if let Err(e) = self.client.call(Request::Prompt { chat: self.chat.clone(), text, images: vec![], follow_up: false, request_id: None }).await {
+            return Some(format!("prompt: {e}"));
+        }
+        let (mut started, mut error) = (false, None);
+        let wait = async {
+            while let Some(e) = self.events.recv().await {
+                match e {
+                    Event::State { chat, state } if chat == self.chat => {
+                        self.session = state.session.clone().or(self.session.take());
+                        error = state.last_error.clone();
+                        if state.running {
+                            started = true;
+                        } else if started {
+                            return true;
+                        }
+                    }
+                    Event::ToolCall { call, name, .. } => {
+                        self.lent_calls.push(name.clone());
+                        tokio::spawn(self.client.call(Request::ToolDone { call, text: format!("{name} is the serpis app's, and isn't available here."), is_error: true }));
+                    }
+                    _ => {}
+                }
+            }
+            false
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(true) => error,
+            Ok(false) => Some("the node closed the stream".into()),
+            Err(_) => {
+                let _ = self.client.call(Request::Abort { chat: self.chat.clone() }).await;
+                Some(format!("timed out after {} min", timeout.as_secs() / 60))
+            }
+        }
+    }
+
+    fn loaded(&self) -> Option<serpis_chat::session::Loaded> {
+        serpis_chat::session::load(Path::new(self.session.as_ref()?)).ok()
+    }
+}
+
+async fn step(d: &mut Drive, text: String, timeout: Duration) -> Ran {
+    let start = Instant::now();
+    let error = d.prompt(text, timeout).await;
+    // The session file is written as the run goes; give the last write a moment.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let messages = d.loaded().map(|l| l.messages).unwrap_or_default();
+    Ran { messages, error, secs: start.elapsed().as_secs_f64() }
 }
 
 /// The quote and label of the `n`th (from 1) top-level item under `title`, as a comment on it
@@ -340,12 +439,12 @@ struct Job {
 struct Ctx {
     out: PathBuf,
     commit: String,
-    model: Model,
-    key: String,
-    headers: std::collections::HashMap<String, String>,
-    thinking: ThinkingLevel,
+    /// `provider/id`, as a chat names it.
+    model: String,
+    thinking: String,
     timeout: Duration,
-    skills: BTreeMap<String, String>,
+    app: App,
+    nodes: BTreeMap<String, Node>,
 }
 
 fn cost(ms: &[Message]) -> f64 {
@@ -367,27 +466,29 @@ async fn run_job(cx: Arc<Ctx>, job: Job) -> Vec<Value> {
         let (c, r) = (cx.commit.clone(), repo.clone());
         tokio::task::spawn_blocking(move || clone(&c, &r)).await.unwrap();
     }
-    let tools: Vec<_> = builtin_tools().into_iter().filter(|t| t.name() != "web_search").collect();
-    let system = system_prompt_for(&dir, &repo, &cx.skills[&job.variant], &tools);
-    std::fs::write(dir.join("system-prompt.md"), &system).unwrap();
-    let cfg = AgentConfig {
-        model: cx.model.clone(),
-        reasoning: cx.thinking,
-        tools,
-        system_prompt: system,
-        api_key: Some(cx.key.clone()),
-        headers: cx.headers.clone(),
-        session_id: uuid::Uuid::now_v7().to_string(),
-        cwd: repo.clone(),
-        native_web_search: false,
-        max_tokens: None,
-        cache_retention: cx.model.cache_retention(CacheRetention::Long),
-        hooks: None,
-        sequential_tools: false,
-    };
+    if let Some(setup) = &job.task.setup {
+        let o = Command::new("sh").arg("-c").arg(setup).current_dir(&repo).output().expect("sh");
+        assert!(o.status.success(), "setup: {}", String::from_utf8_lossy(&o.stderr));
+    }
     let base = json!({"task": job.task.id, "variant": job.variant, "i": job.i, "dir": dir});
+    let mut d = match Drive::open(&cx, &cx.nodes[&job.variant], &repo).await {
+        Ok(d) => d,
+        Err(e) => {
+            let mut rec = base;
+            rec["step"] = json!(job.task.id);
+            rec["error"] = json!(format!("{e:#}"));
+            rec["score"] = Value::Null;
+            return vec![rec];
+        }
+    };
     let mut out = Vec::new();
-    let first = run_agent(cfg.clone(), vec![], job.task.prompt.clone(), cx.timeout).await;
+    let first = step(&mut d, job.task.prompt.clone(), cx.timeout).await;
+    if let Some(l) = d.loaded()
+        && let Some((_, p)) = l.entries.iter().rev().find(|(t, _)| t == serpis_chat::SYSTEM_PROMPT_ENTRY)
+    {
+        std::fs::write(dir.join("system-prompt.md"), p["prompt"].as_str().unwrap_or_default()).unwrap();
+        std::fs::write(dir.join("tools.json"), serde_json::to_string_pretty(&p["tools"]).unwrap()).unwrap();
+    }
     let report = first.messages.iter().rev().find(|m| matches!(m, Message::Assistant(_))).map(text_of).unwrap_or_default();
     std::fs::write(dir.join("report.md"), &report).unwrap();
     std::fs::write(dir.join("transcript.json"), serde_json::to_string_pretty(&first.messages).unwrap()).unwrap();
@@ -399,13 +500,16 @@ async fn run_job(cx: Arc<Ctx>, job: Job) -> Vec<Value> {
     rec["cost"] = json!(cost(&first.messages));
     rec["turns"] = json!(first.messages.iter().filter(|m| matches!(m, Message::Assistant(_))).count());
     rec["upstreams"] = json!(upstreams(&first.messages));
+    rec["lent_calls"] = json!(d.lent_calls);
     rec["score"] = if ok { score(&report, None) } else { Value::Null };
     out.push(rec);
     if let (true, Some(r)) = (ok, &job.task.review) {
         let review = review_of(&report, r);
         std::fs::write(dir.join("review.md"), &review).unwrap();
         let question = chat_review::parse_sent(&review).and_then(|s| s.items.into_iter().find(|i| i.ask == Ask::Question)).map(|i| i.quote.join("\n"));
-        let second = run_agent(cfg, first.messages.clone(), review, cx.timeout).await;
+        let seen = first.messages.len();
+        let mut second = step(&mut d, review, cx.timeout).await;
+        second.messages.drain(..seen.min(second.messages.len()));
         let reply = second.messages.iter().rev().find(|m| matches!(m, Message::Assistant(_))).map(text_of).unwrap_or_default();
         std::fs::write(dir.join("reply.md"), &reply).unwrap();
         std::fs::write(dir.join("transcript-reply.json"), serde_json::to_string_pretty(&second.messages).unwrap()).unwrap();
@@ -421,6 +525,7 @@ async fn run_job(cx: Arc<Ctx>, job: Job) -> Vec<Value> {
         rec["score"] = if ok { score(&reply, question.as_deref()) } else { Value::Null };
         out.push(rec);
     }
+    let _ = d.client.call(serpis_proto::wire::Request::Detach { chat: d.chat.clone(), close: true }).await;
     for r in &out {
         std::fs::write(dir.join(format!("score-{}.json", r["step"].as_str().unwrap().replace('+', "-"))), serde_json::to_string_pretty(r).unwrap()).unwrap();
     }
@@ -536,18 +641,10 @@ fn main() {
     std::fs::create_dir_all(out.join("variants")).unwrap();
     let out = out.canonicalize().unwrap();
 
-    // The key and model, from serpis's own settings (OPENROUTER_API_KEY wins), before HOME
-    // changes below.
-    let rt0 = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    // The key, from serpis's own settings (OPENROUTER_API_KEY wins), before HOME changes below.
     let reg = Registry::new(Paths::default_paths());
-    let model = reg.find(&a.provider, &a.model).or_else(|| {
-        rt0.block_on(reg.refresh_catalogs(false));
-        reg.find(&a.provider, &a.model)
-    });
-    let model = model.unwrap_or_else(|| panic!("no model {}/{} in serpis's catalog", a.provider, a.model));
     let key = std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.is_empty() && a.provider == "openrouter").or_else(|| reg.api_key(&a.provider)).expect("no API key for the provider in serpis's settings");
-    let headers = reg.provider_headers(&a.provider);
-    drop(rt0);
+    drop(reg);
 
     // What the agent's commands see: a HOME of their own, no keys, one shared cargo target (so
     // dependencies build once), your cargo and rustup.
@@ -597,7 +694,16 @@ fn main() {
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let cx = Arc::new(Ctx { out: out.clone(), commit, model, key, headers, thinking: a.thinking, timeout: a.timeout, skills });
+    // The app's settings and lent tools, from a headless editor on this run's HOME (which writes
+    // the default config there), then a node per variant, as the app's own.
+    let app = boot_app(&rt);
+    std::fs::write(out.join("app.json"), serde_json::to_string_pretty(&json!({"vars": app.vars, "tools": app.tools})).unwrap()).unwrap();
+    let key_cmd = prime_key(&key);
+    let model = format!("{}/{}", a.provider, a.model);
+    let nodes = skills.iter().map(|(v, t)| (v.clone(), start_node(&out, v, t, (&key_cmd, key.len()), &a.provider, &model, &rt))).collect();
+    drop(key);
+    let thinking = serde_json::to_value(a.thinking).unwrap().as_str().unwrap().to_string();
+    let cx = Arc::new(Ctx { out: out.clone(), commit, model, thinking, timeout: a.timeout, app, nodes });
     let records = rt.block_on(async {
         let sem = Arc::new(tokio::sync::Semaphore::new(a.jobs));
         let mut set = tokio::task::JoinSet::new();

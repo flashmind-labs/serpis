@@ -1662,7 +1662,8 @@ pub fn top_items(body: &str) -> usize {
 /// `text` read as a report written to the report skill: it opens with `Done`, `Partly done`
 /// or `Blocked` and a colon. None for anything else (it is shown as plain markdown). `Found` and
 /// `Found it` count as Done: agents open about one investigation report in six with them,
-/// whatever the skill says (evals/report).
+/// whatever the skill says (evals/report). A few words may sit before the colon ("Done in the
+/// lock:").
 pub fn shaped_report(text: &str) -> Option<Shaped> {
     let text = text.trim_start();
     let (head, body) = match text.find("\n## ") {
@@ -1677,7 +1678,17 @@ pub fn shaped_report(text: &str) -> Option<Shaped> {
         .find(|(w, _)| lower.starts_with(w))
         .map(|(w, o)| (o, w.len()))?;
     let after = first[n..].trim_start_matches("**");
-    let after = after.strip_prefix(':').or_else(|| after.strip_prefix(" —")).or_else(|| after.strip_prefix(" -"))?.trim_start();
+    fn marked(s: &str) -> Option<&str> { s.strip_prefix(':').or_else(|| s.strip_prefix(" —")).or_else(|| s.strip_prefix(" -")).map(str::trim_start) }
+    // A few words may come between the word and its colon ("Done in the lock:", "Blocked on
+    // vet:", "Found it, no code changed:"), but not after a bare "Found" ("Found three files in
+    // src: …" is a sentence).
+    let after = marked(after).or_else(|| {
+        let (qualifier, rest) = after.split_once(':')?;
+        let qualifier = qualifier.trim_end_matches("**");
+        let words = qualifier.split_whitespace().count();
+        let starts = qualifier.starts_with(' ') || qualifier.starts_with(',');
+        (&lower[..n] != "found" && starts && (1..=5).contains(&words) && !qualifier.contains(['.', '`', '\n'])).then(|| rest.trim_start_matches("**").trim_start())
+    })?;
     // The headline is the first sentence (a period and a space, outside inline code).
     let mut code = false;
     let mut cut = after.len();
@@ -4862,6 +4873,13 @@ mod tests {
         assert_eq!(shaped_report("Found it: the key ignores the locale.").map(|s| (s.outcome, s.headline)), Some((Outcome::Done, "The key ignores the locale.".to_string())));
         assert_eq!(shaped_report("**Found:** a race.").unwrap().outcome, Outcome::Done);
         assert!(shaped_report("Found three files in src.").is_none());
+        assert!(shaped_report("Found three files in src: a, b and c.").is_none());
+        let sh = shaped_report("Done in the lock: `quinn-udp` 0.5.15 → 0.5.16. Vet blocks on it.").unwrap();
+        assert_eq!((sh.outcome, sh.headline.as_str()), (Outcome::Done, "`quinn-udp` 0.5.15 → 0.5.16."));
+        assert_eq!(shaped_report("**Blocked on vet:** it needs your call.").unwrap().outcome, Outcome::Blocked);
+        assert_eq!(shaped_report("Found it, no code changed: the key ignores the locale.").unwrap().headline, "The key ignores the locale.");
+        assert!(shaped_report("Doneness is relative: it depends.").is_none());
+        assert!(shaped_report("Done with the parser and then a lot more words here: x").is_none());
         // Anything else stays plain markdown.
         assert!(shaped_report("I've finished the review.").is_none());
         assert!(shaped_report("Doneness is relative.").is_none());

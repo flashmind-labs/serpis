@@ -1527,7 +1527,7 @@ pub fn reopen(ed: &mut Editor, list: &Value) {
 
 /// The tools this window runs for the chats it shows, wherever they run: `serpis_lua` and
 /// `serpis_api`, and the ones its Lua defines (a node uses its own of the same name).
-fn lent_specs(ed: &Editor) -> Vec<serpis_proto::wire::ToolSpec> {
+pub fn lent_specs(ed: &Editor) -> Vec<serpis_proto::wire::ToolSpec> {
     ed.agent_tools.iter().map(|(_, t)| serpis_proto::wire::ToolSpec { name: t.name().to_string(), description: t.description(), parameters: t.parameters() }).collect()
 }
 

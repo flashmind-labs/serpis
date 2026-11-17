@@ -16,19 +16,27 @@ default model is `deepseek/deepseek-v4.1-flash-1017` with thinking at max (`--mo
 ## What runs
 
 - **Tasks** (`tasks.json`): real work on this repository at a pinned commit (`--commit`, HEAD by
-  default). Two investigations of real bugs, which ask for no code change, and one code change.
+  default). Two investigations of real bugs, which ask for no code change, a code change, and a code change whose commit needs the owner's sign-off, under a project runbook.
   After the change, serpis's review message (`chat_review::prompt`, its default settings) is
   sent with a change asked for on the report's first Needs you item (else its first Changed
   item) and a question on its first Changed item. The reply is scored as its own step.
 - **Variants:** `current` is `skills/report/SKILL.md` as it is in the working tree. Any other
   name is `variants/<name>.md`.
-- **Each run** gets its own clone, agent directory and `HOME`, with no API keys in its
-  environment. Its system prompt is built as a serpis chat builds it: the built-in tools (no
-  web search), the skills list, and the report rule with the variant's text. serpis's Lua tools
-  and docs and your config's additions are left out. Cargo builds share
-  `target/report-eval/cargo-target`, so dependencies build once. This isn't a sandbox: the
-  agent's commands can still read the rest of the machine (one run read leftover UI-test logs in
-  `/tmp`). The tasks give them no reason to change anything outside the clone.
+- **Each run** is a chat on a serpis node, run as the app runs it: one node per variant, in
+  the eval's own process, with the variant as the user's `report` skill. The node gets what the
+  app gives its own node: every setting at its default and the tools the window lends
+  (`serpis_lua`, `serpis_api`, and the default config's), read from a headless editor booted on
+  the run's `HOME`. So the system prompt, the tools and serpis's default config are the app's.
+  Your config isn't read, and calls to the lent tools get an error (only the app can run them;
+  each record lists them). The key reaches the nodes as an `auth.json` command that serpis runs
+  once, before any agent starts, so it's in no agent's environment and no file of the run.
+  Each run has its own clone, and cargo builds share `target/report-eval/cargo-target`, so
+  dependencies build once. This isn't a sandbox: the agent's commands can still read the rest
+  of the machine. The tasks give them no reason to change anything outside the clone. The nodes
+  listen on Unix sockets, so the eval can't run in a sandbox that blocks them.
+- **Setup:** a task's `setup` runs in its clone first. `gated-commit` uses it for a project
+  runbook (`AGENTS.md`, `agents/changing-limits.md`) that asks for review facts "in one
+  report", and a pre-commit hook that holds the change until the owner signs off.
 
 Everything a run did is kept under `target/report-eval/<run>/runs/<task>/<variant>/<i>/`: the
 system prompt, the transcript, `report.md`, `review.md` and `reply.md`, and the scores.
