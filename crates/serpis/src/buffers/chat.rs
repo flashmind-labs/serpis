@@ -1555,6 +1555,37 @@ fn list_item(raw: &str) -> Option<(usize, String, &str)> {
     None
 }
 
+/// [`ChatBuffer::finished_reply`], on a transcript: after the last prompt, the agent's last
+/// message (notices after it skipped), or why it has none: the error it ended on, else that it
+/// stopped on no text. None while it runs, or before anything came back.
+fn finished_reply(entries: &[Entry], running: bool) -> Option<Result<String, String>> {
+    if running {
+        return None;
+    }
+    let last_user = entries.iter().rposition(|e| matches!(e, Entry::User { .. }))?;
+    let after = &entries[last_user + 1..];
+    // The error it ended on, as noticed (a request that failed before any reply, say).
+    let noticed = after.iter().rev().find_map(|e| match e {
+        Entry::Info { text, tone: Tone::Error | Tone::Warning } => Some(text.clone()),
+        _ => None,
+    });
+    match after.iter().rposition(|e| !matches!(e, Entry::Info { .. })).map(|i| &after[i]) {
+        Some(Entry::Assistant { streaming: true, .. }) => None,
+        Some(Entry::Assistant { error: Some(e), .. }) => Some(Err(e.clone())),
+        Some(Entry::Assistant { blocks, .. }) => {
+            let text = blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n\n");
+            Some(if !text.trim().is_empty() {
+                Ok(text)
+            } else {
+                Err(noticed.unwrap_or_else(|| "it stopped without writing anything (out of output tokens, most likely)".into()))
+            })
+        }
+        // Stopped after a tool call, with no word after it.
+        Some(_) => Some(Err(noticed.unwrap_or_else(|| "it stopped before writing anything".into()))),
+        None => noticed.map(Err),
+    }
+}
+
 /// Markdown to styled lines for a column `avail` points wide.
 /// The reports in a transcript: in each run (from a prompt to the next), the last assistant
 /// message with text, once the run is over and if it has at least `min_words`. Entry index →
@@ -2792,21 +2823,11 @@ impl ChatBuffer {
     }
 
     /// Once the agent has been asked something and has stopped: its last message, or why it
-    /// failed. None while it works, before it starts, or when it ended on no text.
+    /// has none (it failed, or stopped on no text: out of output tokens, say). None while it
+    /// works, or before it starts. Notices after its last message (a cache miss, the error it
+    /// ended on) don't count as the message.
     pub fn finished_reply(&self) -> Option<Result<String, String>> {
-        if self.running() {
-            return None;
-        }
-        let last_user = self.entries.iter().rposition(|e| matches!(e, Entry::User { .. }))?;
-        let last = self.entries.len() - 1;
-        let Entry::Assistant { streaming, error, .. } = &self.entries[last] else { return None };
-        if last <= last_user || *streaming {
-            return None;
-        }
-        if let Some(e) = error {
-            return Some(Err(e.clone()));
-        }
-        self.report_text(last).map(Ok)
+        finished_reply(&self.entries, self.running())
     }
 
     /// A challenger's findings on the report at `entry`: drafts of the review, each under the
@@ -4708,6 +4729,33 @@ pub fn cache_warning_applies(ed: &mut Editor, action: &str, cost: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finished_reply_is_found_past_notices_and_without_text() {
+        let user = Entry::User { text: "go".into(), queued: false, images: vec![] };
+        let said = |blocks: Vec<AssistantContent>, error: Option<&str>| Entry::Assistant {
+            blocks,
+            model: "m".into(),
+            streaming: false,
+            continuation: false,
+            usage: None,
+            error: error.map(str::to_string),
+            cache: None,
+        };
+        let text = |t: &str| AssistantContent::Text { text: t.into(), text_signature: None };
+        let thought = AssistantContent::Thinking { thinking: "hmm".into(), thinking_signature: None, redacted: false };
+        let note = |t: &str, tone| Entry::Info { text: t.into(), tone };
+        // Asked, nothing back yet; still running.
+        assert_eq!(finished_reply(&[user.clone()], false), None);
+        assert_eq!(finished_reply(&[user.clone(), said(vec![text("Done.")], None)], true), None);
+        // Its report, a cache miss noticed after it.
+        assert_eq!(finished_reply(&[user.clone(), said(vec![text("Done.")], None), note("Cache miss", Tone::MetaWarn)], false), Some(Ok("Done.".into())));
+        // Out of output tokens while thinking: done, with no report.
+        assert!(matches!(finished_reply(&[user.clone(), said(vec![thought], None)], false), Some(Err(e)) if e.contains("output tokens")));
+        // Failed, the error noticed after it.
+        assert_eq!(finished_reply(&[user.clone(), said(vec![], Some("429")), note("429", Tone::Error)], false), Some(Err("429".into())));
+        assert_eq!(finished_reply(&[user, note("No API key", Tone::Error)], false), Some(Err("No API key".into())));
+    }
 
     #[test]
     fn usage_shows_a_cost_only_when_one_was_charged() {
