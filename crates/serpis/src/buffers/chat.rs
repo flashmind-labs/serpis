@@ -513,7 +513,7 @@ impl ChatBuffer {
         self.history_index = None;
         // A review waiting: it goes with what was typed, as one message.
         let text = if review {
-            let message = crate::chat_review::prompt(&self.review.drafts(), &text);
+            let message = crate::chat_review::prompt(&self.review.drafts(), &text, &crate::chat_review::framing(ed));
             for c in self.review.comments.iter_mut().filter(|c| c.state == crate::chat_review::State::Draft) {
                 c.state = crate::chat_review::State::Sent;
             }
@@ -3175,7 +3175,7 @@ impl ChatBuffer {
         let Some(id) = self.review.keep(&w) else { return };
         let Some(c) = self.review.comments.iter_mut().find(|c| c.id == id) else { return };
         c.state = crate::chat_review::State::Sent;
-        let message = crate::chat_review::prompt(&[&*c], "");
+        let message = crate::chat_review::prompt(&[&*c], "", &crate::chat_review::framing(ed));
         self.persist_review(ed);
         self.submit(ed, message, false);
     }

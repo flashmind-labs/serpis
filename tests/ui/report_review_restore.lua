@@ -48,7 +48,7 @@ local steps = {
   end,
   function()
     local req = last_request()
-    for _, want in ipairs({ "## Questions", "> This is the likely cause of the flaky retries_respect_limit test in CI.", "Did you reproduce it?", "Needs you 3:", "Why? At 50 rps?", "## Changes asked for", "Show the logs.", "## Also", "Then run the tests again." }) do
+    for _, want in ipairs({ "## Questions", "> This is the likely cause of the flaky retries_respect_limit test in CI.", "Did you reproduce it?", 'item 3 under \\"Needs you\\":', "Reply with a report, as after any task.", "Why? At 50 rps?", "## Changes asked for", "Show the logs.", "## Also", "Then run the tests again." }) do
       T.check("the agent gets: " .. want, req:find(want, 1, true) ~= nil, true)
     end
     T.check("sent, nothing waits", review().drafts, 0)

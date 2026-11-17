@@ -1,6 +1,6 @@
 ---
 name: report
-description: How to write the message that ends a task, the report a person reads to review your work and decide what happens next. Short and plain, outcome first, then what needs them, what changed, how it was checked and what is left. Use whenever you finish or stop a task in which you changed code, ran commands or investigated something.
+description: How to write the message that ends a task, the report a person reads to review your work and decide what happens next. Short and plain, outcome first, then what needs them, what changed, how it was checked and what is left. Use whenever you finish or stop a task in which you changed code, ran commands or investigated something, a reply to review comments included.
 ---
 
 # The report
@@ -18,13 +18,16 @@ sentence. If something must happen before this ships, say it here.
 **Then, if there is a real next step, one line: `**Next:**`** what you'd do next and the
 reason. A reason is the fact the choice rests on, in one line, not "it's cleaner".
 
-**Then these `##` sections, in this order.** Leave out a section with nothing in it.
+**Then these `##` sections, in this order, and no others.** Leave out a section with nothing
+in it. Don't rename one or add your own: serpis and your reader find a report's parts by these
+names.
 
-1. `## Needs you`: what the reader must decide, approve or know. Number the items, each with
-   what you recommend, the reason, and the main alternative and why not. Anything that would
-   stop a careful reviewer goes here, never lower down.
+1. `## Needs you`: what is still open for the reader: a choice to make, something to approve,
+   a risk to know before it ships. Number the items, each with what you recommend, the reason,
+   and the main alternative and why not. Anything that would stop a careful reviewer goes here,
+   never lower down. Work you finished goes under Changed, even when it settles an earlier item.
 2. `## Changed`: one bullet per change: what, where (`path:line`), why. Group by purpose, not
-   by file.
+   by file. Changes someone asked for come in the order they asked.
 3. `## Checked`: one bullet per check: the command in bold, then `passes` or `fails` and what
    it showed: "- **`cargo test`:** passes (214 tests)." Last, a bullet starting
    `**Not checked:**` with what you couldn't verify. Serpis marks each check ✓, ✗ or ○ by
@@ -34,15 +37,47 @@ reason. A reason is the fact the choice rests on, in one line, not "it's cleaner
 No code changed (an investigation, a question)? Keep the first line, then what you found, how
 sure you are, what you recommend and the reason.
 
-## With other skills
+## Told what to report
 
-Another skill may say what to report, such as a code review's findings. That skill decides
-what goes in. This one decides the shape. For a review:
+Another skill, the person or their review comments may say what to report: a code review's
+findings, "say what you did for each". That decides what goes in. This skill still decides the
+shape: the same first line and sections, none added.
+
+For a code review:
 
 - **First line:** the verdict and the count: "Done: 2 must-fix, 3 to consider."
 - **`## Needs you`:** one numbered item per finding, must-fix first. The tag, `path:line`, the
   issue and your suggestion, in two lines at most.
 - **`## Checked`:** the commands and probes you ran, one line each.
+
+## After review comments
+
+Comments on your report come as one message: "Review comments on what you wrote". Your reply is
+a new report on what you did since the last one.
+
+- **A change asked for:** a bullet under `## Changed`, said as the change. One you didn't make,
+  or made another way, goes under `## Needs you` with the reason.
+- **A question:** answer it after the first line, quoting the words it asks about.
+- **A challenge from another agent:** fix it (a bullet under `## Changed`), or answer it after
+  the first line, quoting it, with what shows it's wrong.
+- **"Item 2 under Needs you"** is a place in your last report, not a heading or a name for
+  this one. An item you settled leaves `## Needs you`.
+
+```markdown
+Done: retries back off now, and the race you asked about is fixed.
+
+> This is the likely cause of the flake.
+
+Yes, I reproduced it: 3 of 500 runs failed with 8 threads, none after the fix.
+
+## Changed
+- **Backoff between retries** (`queue.rs:88`): 1 s, 2 s, then 4 s, as you asked.
+- **Attempt count taken under the lock** (`queue.rs:61`): two retries shared one before.
+
+## Checked
+- **`cargo test`:** passes (216 tests).
+- **`retries_respect_limit` 500 times, 8 threads:** passes (0 failures).
+```
 
 ## Short
 
