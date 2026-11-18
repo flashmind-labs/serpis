@@ -782,6 +782,9 @@ impl Chat {
             return;
         }
         if self.is_codex() {
+            // Codex::compact spawns on the current runtime; the node calls this from a plain thread.
+            let runtime = host.runtime();
+            let _guard = runtime.enter();
             if reason == CompactReason::Manual && !self.codex.compact() {
                 host.notify(Level::Info, "Wait for Codex to finish before compacting".into());
             }
