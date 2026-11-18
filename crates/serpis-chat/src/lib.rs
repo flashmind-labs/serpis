@@ -485,9 +485,11 @@ impl Chat {
         };
         let model_spec = self.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id));
         let payload = json!({"buffer": host.chat_ref(), "text": text, "model": model_spec, "running": self.running()});
-        if let Some(reason) = host.hook(self, "before-prompt", &payload).iter().find_map(|r| r.get("block").map(|b| b.as_str().unwrap_or("blocked").to_string())) {
+        let answers = host.hook(self, "before-prompt", &payload);
+        if let Some(reason) = answers.iter().find_map(|r| r.get("block").map(|b| b.as_str().unwrap_or("blocked").to_string())) {
             return refuse(host, Level::Warn, reason);
         }
+        let context: Vec<&str> = answers.iter().filter_map(|r| r.get("context")?.as_str()).filter(|c| !c.trim().is_empty()).collect();
         if self.compacting.is_some() {
             return refuse(host, Level::Info, "The chat is compacting its history: send again when it's done".into());
         }
@@ -525,6 +527,7 @@ impl Chat {
             }
             None => text.clone(),
         };
+        let sent = with_context(&context, sent);
         let mut content = Vec::new();
         if !sent.is_empty() {
             content.push(UserContent::Text { text: sent });
@@ -1868,7 +1871,25 @@ pub const CLAUDE_LIMIT: &str = "claude-code-limit";
 
 /// A user message as typed: `/skill:name args` for one a skill was sent in.
 fn as_typed(text: String) -> String {
+    let text = without_context(&text).to_string();
     serpis_agent::skills::as_typed(&text).unwrap_or(text)
+}
+
+/// What `before-prompt` hooks' `{context = "..."}` add before a message: the model reads it,
+/// the transcript and the session list show the message as typed.
+const CONTEXT_OPEN: &str = "<serpis-context>\n";
+const CONTEXT_CLOSE: &str = "\n</serpis-context>\n\n";
+
+fn with_context(context: &[&str], text: String) -> String {
+    if context.is_empty() {
+        return text;
+    }
+    format!("{CONTEXT_OPEN}{}{CONTEXT_CLOSE}{text}", context.join("\n\n"))
+}
+
+/// A message as typed, without the context hooks added before it.
+pub fn without_context(text: &str) -> &str {
+    text.strip_prefix(CONTEXT_OPEN).and_then(|rest| rest.split_once(CONTEXT_CLOSE)).map(|(_, t)| t).unwrap_or(text)
 }
 
 /// What a chat stopped at a usage limit says when it goes on after it resets.
