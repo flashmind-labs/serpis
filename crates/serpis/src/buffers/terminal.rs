@@ -127,6 +127,12 @@ pub struct TerminalBuffer {
     busy_title_re: Option<regex::Regex>,
     /// Seconds of quiet after which an agent counts as waiting for input.
     quiet_after: f64,
+    /// Our own edits of the input line as (before, after) snapshots, so `u` undoes them whole:
+    /// line editors undo the backspaces they were replayed as one at a time.
+    undo_log: Vec<(Vec<String>, Vec<String>)>,
+    redo_log: Vec<(Vec<String>, Vec<String>)>,
+    /// Edits since the last undo boundary join the newest `undo_log` entry.
+    undo_open: bool,
 }
 
 /// The editable input on the terminal cursor's logical line (soft-wrapped rows included).
@@ -357,6 +363,9 @@ impl TerminalBuffer {
             fg_checked: None,
             busy_title_re: None,
             quiet_after: 1.5,
+            undo_log: Vec::new(),
+            redo_log: Vec::new(),
+            undo_open: false,
         })
     }
 
@@ -787,6 +796,76 @@ impl TerminalBuffer {
                 return now == target;
             }
         }
+    }
+
+    /// The input's cells from its start, as (position, grapheme); wide characters' spacers left out.
+    fn input_cells(&self, inp: &Input) -> Vec<(Pos, String)> {
+        let mut cells = Vec::new();
+        let mut buf = ['\0'; 16];
+        let mut p = inp.start;
+        while p < inp.end {
+            if let Ok(r) = self.term.grid_ref(Self::point(p)) {
+                let spacer = r.cell().and_then(|c| c.wide()).is_ok_and(|w| matches!(w, CellWide::SpacerTail | CellWide::SpacerHead));
+                if !spacer {
+                    let g = match r.graphemes(&mut buf).unwrap_or(0) {
+                        0 => " ".to_string(),
+                        n => buf[..n].iter().collect(),
+                    };
+                    cells.push((p, g));
+                }
+            }
+            p = if p.col + 1 >= self.cols as usize { Pos::new(p.line + 1, 0) } else { Pos::new(p.line, p.col + 1) };
+        }
+        cells
+    }
+
+    fn input_text(&self) -> Option<Vec<String>> {
+        let inp = self.input()?;
+        Some(self.input_cells(&inp).into_iter().map(|(_, g)| g).collect())
+    }
+
+    /// Note an edit of ours that turned the input from `before` into what it is now.
+    fn record_edit(&mut self, before: Option<Vec<String>>) {
+        let (Some(before), Some(after)) = (before, self.input_text()) else { return };
+        if before == after {
+            return;
+        }
+        self.redo_log.clear();
+        if self.undo_open
+            && let Some(last) = self.undo_log.last_mut()
+            && last.1 == before
+        {
+            last.1 = after;
+            return;
+        }
+        self.undo_log.push((before, after));
+        if self.undo_log.len() > 100 {
+            self.undo_log.remove(0);
+        }
+        self.undo_open = true;
+    }
+
+    /// Turn the input from `from` into `to`, editing only the part between their common prefix
+    /// and suffix, and leave the copy cursor where the change starts. False when the input isn't `from`.
+    fn retype_input(&mut self, from: &[String], to: &[String]) -> bool {
+        let Some(inp) = self.input() else { return false };
+        let cells = self.input_cells(&inp);
+        if cells.iter().map(|(_, g)| g).ne(from.iter()) {
+            return false;
+        }
+        let pre = from.iter().zip(to).take_while(|(a, b)| a == b).count();
+        let suf = from[pre..].iter().rev().zip(to[pre..].iter().rev()).take_while(|(a, b)| a == b).count();
+        let at = |i: usize| cells.get(i).map_or(inp.end, |c| c.0);
+        let (a, b) = (at(pre), at(from.len() - suf));
+        if a < b {
+            self.raw_delete(a, b);
+        }
+        let mid: String = to[pre..to.len() - suf].concat();
+        if !mid.is_empty() {
+            self.raw_insert(a, &mid);
+        }
+        self.cursor = a;
+        true
     }
 
     fn viewport_top(&self) -> usize {
@@ -1402,7 +1481,15 @@ impl TextSurface for TerminalBuffer {
     }
     fn set_cursor(&mut self, p: Pos) {
         self.enter_copy_mode();
-        self.cursor = self.clamp(p);
+        let mut p = self.clamp(p);
+        // On the input line the prompt is not text: `0`, `h` and `b` stop where input starts.
+        if let Some(inp) = self.input()
+            && p.line >= inp.first_line
+            && p < inp.start
+        {
+            p = inp.start;
+        }
+        self.cursor = p;
         self.scroll_cursor_into_view();
     }
     fn anchor(&self) -> Option<Pos> {
@@ -1444,6 +1531,59 @@ impl TextSurface for TerminalBuffer {
         self.input().filter(|i| i.start.line == line).map_or(0, |i| i.start.col)
     }
     fn insert(&mut self, at: Pos, text: &str) -> Pos {
+        let before = self.input_text();
+        let p = self.raw_insert(at, text);
+        self.record_edit(before);
+        p
+    }
+    fn delete(&mut self, from: Pos, to: Pos) -> String {
+        let before = self.input_text();
+        let t = self.raw_delete(from, to);
+        self.record_edit(before);
+        t
+    }
+    fn undo_boundary(&mut self) {
+        self.undo_open = false;
+    }
+    /// Our own edits are undone by retyping the line as it was; anything else (text typed in
+    /// insert state went to the program as keys) with the line editor's undo, C-_ (readline, zle,
+    /// Claude Code).
+    fn undo(&mut self) -> bool {
+        let Some(cur) = self.input_text() else { return false };
+        self.undo_open = false;
+        if let Some((before, after)) = self.undo_log.pop() {
+            if after == cur && self.retype_input(&after, &before) {
+                self.redo_log.push((before, after));
+                return true;
+            }
+            self.undo_log.clear();
+        }
+        self.write(b"\x1f");
+        let seen = self.output_gen;
+        if self.wait_until(ECHO_TIMEOUT, |t| t.output_gen != seen) {
+            self.wait_until(Duration::from_millis(30), |_| false);
+        }
+        self.cursor = self.term_cursor();
+        true
+    }
+    fn redo(&mut self) -> bool {
+        let Some(cur) = self.input_text() else { return false };
+        self.undo_open = false;
+        match self.redo_log.pop() {
+            Some((before, after)) if before == cur && self.retype_input(&before, &after) => {
+                self.undo_log.push((before, after));
+                true
+            }
+            _ => {
+                self.redo_log.clear();
+                false
+            }
+        }
+    }
+}
+
+impl TerminalBuffer {
+    fn raw_insert(&mut self, at: Pos, text: &str) -> Pos {
         let Some(inp) = self.input() else { return at };
         let at = at.clamp(inp.start, inp.end);
         if !text.is_empty() && self.drive_to(at) {
@@ -1466,7 +1606,7 @@ impl TextSurface for TerminalBuffer {
         self.cursor = self.term_cursor();
         self.cursor
     }
-    fn delete(&mut self, from: Pos, to: Pos) -> String {
+    fn raw_delete(&mut self, from: Pos, to: Pos) -> String {
         let Some(inp) = self.input() else { return String::new() };
         let (a, b) = ordered(from, to);
         let (a, b) = (a.clamp(inp.start, inp.end), b.clamp(inp.start, inp.end));
@@ -1489,19 +1629,6 @@ impl TextSurface for TerminalBuffer {
         }
         self.cursor = self.term_cursor();
         text
-    }
-    /// Line editors' undo (readline, zle, Claude Code) is C-_.
-    fn undo(&mut self) -> bool {
-        if self.input().is_none() {
-            return false;
-        }
-        self.write(b"\x1f");
-        let seen = self.output_gen;
-        if self.wait_until(ECHO_TIMEOUT, |t| t.output_gen != seen) {
-            self.wait_until(Duration::from_millis(30), |_| false);
-        }
-        self.cursor = self.term_cursor();
-        true
     }
 }
 
