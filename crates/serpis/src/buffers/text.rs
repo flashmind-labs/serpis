@@ -4,16 +4,18 @@ use std::path::PathBuf;
 
 use egui::Rect;
 
-use crate::buffer::{Buffer, Modeline};
+use crate::buffer::{Buffer, Modeline, PreviewArgs};
 use crate::editor::Editor;
 use crate::impl_any;
-use crate::text::{CursorShape, PlainLines, TextArea, TextSurface, ViewOptions};
+use crate::text::{CursorShape, DocView, PlainLines, TextArea, TextSurface, ViewOptions};
 use crate::theme::Face;
 
 pub struct TextBuffer {
     pub area: TextArea,
     pub path: Option<PathBuf>,
     pub major: String,
+    /// The view a picker's preview scrolls (a copy of the window's, taken as it starts).
+    preview_view: DocView,
 }
 
 impl TextBuffer {
@@ -24,6 +26,7 @@ impl TextBuffer {
             area,
             path: None,
             major: "text".into(),
+            preview_view: DocView::default(),
         }
     }
 
@@ -75,6 +78,17 @@ impl Buffer for TextBuffer {
             show_cursor: true,
             selection,
         });
+    }
+
+    fn preview(&mut self, ui: &mut egui::Ui, rect: Rect, args: PreviewArgs, ed: &mut Editor) {
+        // Where it was last seen; scrolling the preview leaves the window's view alone.
+        if args.fresh {
+            self.preview_view = self.area.view.clone();
+        }
+        self.preview_view.scroll_y += args.scroll;
+        let face = if self.area.read_only { Face::Default } else { Face::Code };
+        let src = PlainLines { lines: &self.area.doc.lines, face };
+        self.preview_view.show(ui, rect, &src, &ed.theme, &ViewOptions { focused: false, cursor: CursorShape::Bar, show_cursor: false, selection: Default::default() });
     }
 
     fn handle_text(&mut self, text: &str, _ed: &mut Editor) -> bool {

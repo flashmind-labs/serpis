@@ -46,6 +46,16 @@ pub struct Modeline {
     pub busy: bool,
 }
 
+/// How a preview is to be drawn this frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreviewArgs {
+    /// Scrolling asked for since the last frame, in points (positive: further down).
+    pub scroll: f32,
+    /// The preview has just switched to this buffer: start from its default place (a chat's
+    /// and a terminal's end, a text's view as last seen).
+    pub fresh: bool,
+}
+
 /// A buffer implementation. Every method receives the whole editor: buffers are taken out of
 /// the editor while called, so they can freely use any editor API (Emacs style).
 pub trait Buffer: Any {
@@ -54,6 +64,15 @@ pub trait Buffer: Any {
 
     /// Paint the buffer into `rect`.
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor);
+
+    /// Paint the buffer into a picker's preview (`minibuffer-preview`): read-only, and without
+    /// changing what its windows show (a terminal's size, a chat's scroll position, what is
+    /// unread). By default it is drawn as in an unfocused window; buffers whose drawing changes
+    /// them paint a preview of their own.
+    fn preview(&mut self, ui: &mut egui::Ui, rect: Rect, args: PreviewArgs, ed: &mut Editor) {
+        let _ = args;
+        self.ui(ui, rect, false, ed);
+    }
 
     /// A key chord no keymap or interceptor claimed. Return true if consumed.
     fn handle_key(&mut self, _chord: &KeyChord, _ed: &mut Editor) -> bool {

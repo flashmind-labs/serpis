@@ -173,6 +173,31 @@ pub fn call_with(ed: &mut Editor, lua: &Lua, f: &Function, args: &[Value]) -> Op
     }
 }
 
+/// A Lua picker's `preview(value)`, read: a buffer (`{buffer = id}`), text (`{title?, lines}`,
+/// `{title?, text}`, a list of lines or a string), or nothing (nil).
+fn preview_of(ed: &mut Editor, lua: &Lua, f: &Function, value: &str) -> Option<crate::minibuffer::Preview> {
+    use crate::minibuffer::Preview;
+    let v = call(ed, lua, f, &json!(value))?;
+    let lines_of = |v: &Value| -> Option<Vec<String>> {
+        match v {
+            Value::String(t) => Some(t.lines().map(str::to_string).collect()),
+            Value::Array(a) => Some(a.iter().map(|l| l.as_str().map(str::to_string).unwrap_or_else(|| l.to_string())).collect()),
+            _ => None,
+        }
+    };
+    // Lua's numbers may arrive as floats.
+    if let Some(id) = v.get("buffer").and_then(|b| b.as_u64().or_else(|| b.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))) {
+        let id = crate::editor::buffer_id_from_u64(id);
+        return ed.buffers.contains_key(id).then_some(Preview::Buffer(id));
+    }
+    let title = v.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+    let lines = match &v {
+        Value::Object(o) => o.get("lines").or_else(|| o.get("text")).and_then(lines_of)?,
+        other => lines_of(other)?,
+    };
+    Some(Preview::Text { title, lines })
+}
+
 fn anon_command(ed: &mut Editor, lua: &Lua, f: Function) -> String {
     let n = ANON.with(|c| {
         c.set(c.get() + 1);
@@ -1002,6 +1027,11 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let frecency: Option<String> = spec.get("frecency").ok();
         let on_toggle: Option<Function> = spec.get("on_toggle").ok();
         let searchable = spec.get::<Option<bool>>("search").ok().flatten().unwrap_or(true);
+        let preview: Option<Function> = spec.get("preview").ok();
+        let preview_layout = match spec.get::<Option<String>>("preview_layout").ok().flatten() {
+            Some(l) => Some(crate::minibuffer::PreviewLayout::parse(&l).ok_or_else(|| mlua::Error::runtime(format!("preview_layout: {l:?} is not right, down, window or off")))?),
+            None => None,
+        };
         let l = lua.clone();
         ed(|e| {
             let la = l.clone();
@@ -1034,6 +1064,13 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
                     std::rc::Rc::new(move |e: &mut Editor, c: &crate::minibuffer::Candidate| {
                         call(e, &lt, &f, &json!(c.value));
                     })
+                });
+            }
+            let lp = l.clone();
+            if let Some(m) = e.minibuffer.as_mut() {
+                m.preview.layout = preview_layout;
+                m.previewer = preview.map(|f| -> crate::minibuffer::PreviewFn {
+                    std::rc::Rc::new(move |e: &mut Editor, c: &crate::minibuffer::Candidate| preview_of(e, &lp, &f, &c.value))
                 });
             }
             if let Some(cat) = &frecency {
@@ -1748,6 +1785,17 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
     })?)?;
     // The open prompt's text, or nil.
     debug.set("minibuffer", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.prompt.clone())))?)?;
+    // The open prompt's preview: {layout, buffer = id?, title?, lines = n?} (nil: none shown).
+    debug.set("preview", lua.create_function(|lua, ()| {
+        let v = ed(|e| {
+            let wide = e.minibuffer.as_ref().map(|m| m.preview.wide).unwrap_or(true);
+            e.preview_shown(wide).map(|(p, l)| match p {
+                crate::minibuffer::Preview::Buffer(id) => json!({"layout": l.as_str(), "buffer": buffer_id_to_u64(id)}),
+                crate::minibuffer::Preview::Text { title, lines } => json!({"layout": l.as_str(), "title": title, "lines": lines.len()}),
+            })
+        })?;
+        lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
     debug.set("minibuffer_input", lua.create_function(|_, ()| ed(|e| e.minibuffer.as_ref().map(|m| m.input.text())))?)?;
     debug.set("dragging", lua.create_function(|_, ()| ed(|e| e.drag.is_some()))?)?;
     debug.set("quit", lua.create_function(|_, ()| ed(|e| e.quit_requested = true))?)?;

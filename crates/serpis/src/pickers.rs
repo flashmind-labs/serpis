@@ -35,8 +35,8 @@ impl Editor {
         self.meta(id).map(|m| crate::chrome::pretty_name(&m.name)).unwrap_or_default()
     }
 
-    /// A picker entry for a buffer: its display name, and what tells it apart (kind, project,
-    /// branch, what it is doing).
+    /// A picker entry for a buffer: its display name, what tells it apart (kind, project,
+    /// branch, what it is doing), and the buffer itself as its preview.
     pub fn buffer_candidate(&mut self, id: BufferId) -> Candidate {
         let label = self.buffer_display_name(id);
         let kind = self.meta(id).map(|m| crate::chrome::pretty_name(&format!("*{}*", m.major))).unwrap_or_default();
@@ -62,7 +62,10 @@ impl Editor {
         if a.state != crate::ActivityState::Idle {
             detail.push(a.state.as_str().into());
         }
-        let mut c = Candidate::new(label).detail(detail.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).value(buffer_id_to_u64(id).to_string());
+        let mut c = Candidate::new(label)
+            .detail(detail.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "))
+            .value(buffer_id_to_u64(id).to_string())
+            .preview(crate::minibuffer::Preview::Buffer(id));
         c.search = search;
         c
     }

@@ -27,7 +27,7 @@ use libghostty_vt::screen::{CellSemanticContent, CellWide, Screen};
 use libghostty_vt::style::{RgbColor, StyleColor};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, ScrollViewport, Terminal};
 
-use crate::buffer::{Activity, ActivityState, Buffer, Modeline, ProcessStatus};
+use crate::buffer::{Activity, ActivityState, Buffer, Modeline, PreviewArgs, ProcessStatus};
 use crate::editor::Editor;
 use crate::impl_any;
 use crate::keys::{Key, KeyChord};
@@ -127,6 +127,8 @@ pub struct TerminalBuffer {
     busy_title_re: Option<regex::Regex>,
     /// Seconds of quiet after which an agent counts as waiting for input.
     quiet_after: f64,
+    /// How far a picker's preview has scrolled into the scrollback, in rows (negative: up).
+    preview_scroll: isize,
     /// Our own edits of the input line as (before, after) snapshots, so `u` undoes them whole:
     /// line editors undo the backspaces they were replayed as one at a time.
     undo_log: Vec<(Vec<String>, Vec<String>)>,
@@ -366,6 +368,7 @@ impl TerminalBuffer {
             undo_log: Vec::new(),
             redo_log: Vec::new(),
             undo_open: false,
+            preview_scroll: 0,
         })
     }
 
@@ -1012,6 +1015,277 @@ fn map_key(chord: &KeyChord) -> (GKey, char) {
     }
 }
 
+impl TerminalBuffer {
+    /// Paint the screen into `rect`, its first cell at `origin`, `cell` big in `font` (a
+    /// preview's smaller than the window's).
+    #[allow(clippy::too_many_arguments)]
+    fn paint(&mut self, ui: &mut egui::Ui, rect: Rect, origin: Pos2, cell: Vec2, font: FontId, focused: bool, ed: &mut Editor) {
+        let theme = ed.theme.clone();
+        // Theme colors become the terminal's defaults (apps can still override via OSC).
+        if self.theme_gen != Some(ed.theme_generation) {
+            self.theme_gen = Some(ed.theme_generation);
+            let c = |c: egui::Color32| RgbColor { r: c.r(), g: c.g(), b: c.b() };
+            if let Ok(mut pal) = self.term.default_color_palette() {
+                for (i, a) in theme.ansi.iter().enumerate() {
+                    pal.0[i] = c(*a);
+                }
+                let _ = self.term.set_default_color_palette(Some(pal));
+            }
+            let _ = self.term.set_default_fg_color(Some(c(theme.fg)));
+            let _ = self.term.set_default_bg_color(Some(c(theme.bg_alt)));
+            let _ = self.term.set_default_cursor_color(Some(c(theme.cursor)));
+        }
+        let painter = ui.painter_at(rect);
+        // Vim's state picks the shape (bar in insert); full-screen apps keep the one they ask for.
+        let vim_shape = if focused { ed.cursor_shape(ed.current_buffer()) } else { None };
+        let alt = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
+        let top = self.viewport_top();
+        // A mouse selection, inclusive for painting (whole lines reach the right edge).
+        let mouse_lines = self.mouse_sel.get().is_some_and(|m| m.unit == SelUnit::Line);
+        let mouse_paint = self
+            .mouse_selection()
+            .map(|(a, b)| if mouse_lines { (a, Pos::new(b.line, usize::MAX)) } else { (a, Pos::new(b.line, b.col.saturating_sub(1))) });
+        let Ok(snapshot) = self.render.update(&self.term) else { return };
+        let colors = snapshot.colors().ok();
+        let default_bg = colors.as_ref().map(|c| rgb(c.background)).unwrap_or(theme.bg);
+        let default_fg = colors.as_ref().map(|c| rgb(c.foreground)).unwrap_or(theme.fg);
+        let bg = default_bg;
+        painter.rect_filled(rect, 0.0, bg);
+        let px = self.cell_px.load(Ordering::Relaxed);
+        let image_grid = super::term_images::Grid { origin, cell, cell_px: (px >> 16, px & 0xffff), clip: rect };
+        self.images.begin(&self.term);
+        for layer in [libghostty_vt::kitty::graphics::Layer::BelowBg, libghostty_vt::kitty::graphics::Layer::BelowText] {
+            self.images.paint(&self.term, layer, &painter, &image_grid);
+        }
+        // The copy-mode (vim visual) selection is a cell background, so its text stays readable.
+        let lines = focused && crate::packages::vim::selection_kind(ed, ed.current_buffer()) == crate::text::SelectionKind::Lines;
+        let sel = if self.copy_mode { self.anchor.map(|a| ordered(a, self.cursor)) } else { None };
+        // Visual-line selects whole rows.
+        let sel = sel.map(|(a, b)| if lines { (Pos::new(a.line, 0), Pos::new(b.line, usize::MAX)) } else { (a, b) });
+        let sel = sel.or(mouse_paint);
+        let Ok(mut row_iter) = self.rows_it.update(&snapshot) else { return };
+        let mut y = origin.y;
+        let mut text = String::new();
+        let mut line = top;
+        let mut placeholders = Vec::new();
+        let mut row_cells = Vec::new();
+        // Text is painted after every cell background, so glyphs that overhang their cell
+        // (icons, italics) aren't cut by the next cell's background.
+        let mut glyphs: Vec<egui::Shape> = Vec::new();
+        // Nerd Font icons wait for the end of their row: they may spread into a blank next cell.
+        let mut icons: Vec<(usize, f32, char, Color32)> = Vec::new();
+        let mut blank: Vec<bool> = Vec::new();
+        while let Some(row) = row_iter.next() {
+            row_cells.clear();
+            icons.clear();
+            blank.clear();
+            let Ok(mut cell_iter) = self.cells_it.update(row) else { break };
+            let mut x = origin.x;
+            let mut col = 0;
+            let mut job = LayoutJob::default();
+            let mut run_start_x = x;
+            let flush = |job: &mut LayoutJob, run_x: f32, glyphs: &mut Vec<egui::Shape>| {
+                if !job.text.is_empty() {
+                    let g = painter.layout_job(std::mem::take(job));
+                    glyphs.push(egui::Shape::galley(egui::pos2(run_x, y), g, default_fg));
+                }
+            };
+            while let Some(gc) = cell_iter.next() {
+                let n = gc.graphemes_len().unwrap_or(0);
+                let mut fg = gc.fg_color().ok().flatten().map(rgb).unwrap_or(default_fg);
+                let mut cbg = gc.bg_color().ok().flatten().map(rgb);
+                let mut bold = false;
+                let mut italic = false;
+                let mut underline = false;
+                if gc.has_styling().unwrap_or(false) {
+                    if let Ok(s) = gc.style() {
+                        if s.inverse {
+                            let b = cbg.unwrap_or(bg);
+                            cbg = Some(fg);
+                            fg = b;
+                        }
+                        if s.faint {
+                            fg = fg.gamma_multiply(0.6);
+                        }
+                        bold = s.bold;
+                        italic = s.italic;
+                        underline = !matches!(s.underline, libghostty_vt::style::Underline::None);
+                    }
+                }
+                let p = Pos::new(line, col);
+                if gc.is_selected().unwrap_or(false) || sel.is_some_and(|(a, b)| a <= p && p <= b) {
+                    cbg = Some(theme.selection);
+                }
+                if let Some(b) = cbg {
+                    painter.rect_filled(Rect::from_min_size(egui::pos2(x, y), cell), 0.0, b);
+                }
+                if n > 0 {
+                    let _ = gc.graphemes_utf8(&mut text);
+                }
+                blank.push(n == 0 || text.trim().is_empty());
+                if n > 0 {
+                    // Kitty image placeholders show part of an image instead of a glyph.
+                    if text.starts_with(super::term_images::PLACEHOLDER) {
+                        if let Ok(s) = gc.style()
+                            && let Some(c) = super::term_images::PlaceholderCell::parse(col as u32, (line - top) as i32, &text, &s.fg_color, &s.underline_color)
+                        {
+                            row_cells.push(c);
+                        }
+                        flush(&mut job, run_start_x, &mut glyphs);
+                        x += cell.x;
+                        col += 1;
+                        continue;
+                    }
+                    // Powerline separators are shapes filling the cell; icons are fitted later.
+                    let mut chars = text.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        let cell_rect = Rect::from_min_size(egui::pos2(x, y), cell);
+                        if super::term_glyphs::powerline(ch, cell_rect, fg, &mut glyphs) {
+                            flush(&mut job, run_start_x, &mut glyphs);
+                            x += cell.x;
+                            col += 1;
+                            continue;
+                        }
+                        if super::term_glyphs::is_icon(ch) {
+                            flush(&mut job, run_start_x, &mut glyphs);
+                            icons.push((col, x, ch, fg));
+                            x += cell.x;
+                            col += 1;
+                            continue;
+                        }
+                    }
+                    let fmt = TextFormat {
+                        font_id: font.clone(),
+                        color: if bold { fg.gamma_multiply(1.0) } else { fg },
+                        italics: italic,
+                        underline: if underline { Stroke::new(1.0, fg) } else { Stroke::NONE },
+                        ..Default::default()
+                    };
+                    if text.is_ascii() && text.len() == 1 {
+                        if job.text.is_empty() {
+                            run_start_x = x;
+                        }
+                        job.append(&text, 0.0, fmt);
+                    } else {
+                        // Wide or complex graphemes are placed at their exact cell.
+                        flush(&mut job, run_start_x, &mut glyphs);
+                        let mut single = LayoutJob::default();
+                        single.append(&text, 0.0, fmt);
+                        glyphs.push(egui::Shape::galley(egui::pos2(x, y), painter.layout_job(single), fg));
+                    }
+                    if bold {
+                        // Fake bold: a second pass offset by a fraction of a pixel.
+                    }
+                } else {
+                    flush(&mut job, run_start_x, &mut glyphs);
+                }
+                x += cell.x;
+                col += 1;
+            }
+            flush(&mut job, run_start_x, &mut glyphs);
+            for &(c, ix, ch, color) in &icons {
+                let cells = if blank.get(c + 1).copied().unwrap_or(false) { 2 } else { 1 };
+                if !super::term_glyphs::icon(ui.ctx(), ch, egui::pos2(ix, y), cell, cells, color, &mut glyphs) {
+                    let g = painter.layout_no_wrap(ch.to_string(), font.clone(), color);
+                    glyphs.push(egui::Shape::galley(egui::pos2(ix, y), g, color));
+                }
+            }
+            placeholders.extend(super::term_images::runs(&row_cells));
+            y += cell.y;
+            line += 1;
+        }
+
+        painter.extend(glyphs);
+        self.images.paint_virtual(&self.term, &placeholders, &painter, &image_grid);
+        self.images.paint(&self.term, libghostty_vt::kitty::graphics::Layer::AboveText, &painter, &image_grid);
+
+        // Terminal cursor (hidden in copy mode), painted after the snapshot is released.
+        let mut live = None;
+        if !self.copy_mode {
+            if let Ok(c) = snapshot.cursor() {
+                if c.visible {
+                    if let Some(vp) = c.viewport {
+                        let r = Rect::from_min_size(origin + egui::vec2(vp.x as f32 * cell.x, vp.y as f32 * cell.y), cell);
+                        let color = colors.as_ref().and_then(|c| c.cursor).map(rgb).unwrap_or(theme.cursor);
+                        let program = match c.visual_style {
+                            CursorVisualStyle::Bar => CursorShape::Bar,
+                            CursorVisualStyle::Underline => CursorShape::Underline,
+                            CursorVisualStyle::BlockHollow => CursorShape::Hollow,
+                            _ => CursorShape::Block,
+                        };
+                        let shape = match vim_shape {
+                            _ if !focused => CursorShape::Hollow,
+                            Some(s) if !alt => s,
+                            _ => program,
+                        };
+                        live = Some((r, shape, color, Pos::new(top + vp.y as usize, vp.x as usize)));
+                    }
+                }
+            }
+        }
+        let _ = snapshot.clean();
+        let cursor_char = |p: Pos| self.char_at(p).filter(|c| !c.is_whitespace() && *c != '\n');
+        if let Some((r, shape, color, p)) = live {
+            paint_cursor(&painter, r, shape, color, cursor_char(p), &font, default_bg);
+        }
+
+        // Copy-mode cursor.
+        if self.copy_mode {
+            if self.cursor.line >= top && self.cursor.line < top + self.rows as usize {
+                let r = Rect::from_min_size(
+                    origin + egui::vec2(self.cursor.col as f32 * cell.x, (self.cursor.line - top) as f32 * cell.y),
+                    cell,
+                );
+                let shape = if focused { vim_shape.unwrap_or(CursorShape::Block) } else { CursorShape::Hollow };
+                paint_cursor(&painter, r, shape, theme.cursor, cursor_char(self.cursor), &font, default_bg);
+            }
+            painter.text(rect.right_top() + egui::vec2(-10.0, 6.0), egui::Align2::RIGHT_TOP, "COPY", FontId::monospace(10.0), theme.yellow);
+        }
+        if self.exited {
+            painter.text(rect.center_bottom() - egui::vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, "[process exited]", theme.mono(), theme.fg_dim);
+        }
+    }
+
+    /// Paint the screen as it is, scaled down to fit `rect` if it must be (to a point, then
+    /// its bottom rows), without resizing the terminal. `scroll` moves into the scrollback.
+    fn paint_preview(&mut self, ui: &mut egui::Ui, rect: Rect, args: PreviewArgs, ed: &mut Editor) {
+        let size = ed.theme.mono_size;
+        let measure = |ui: &mut egui::Ui, font: &FontId| ui.fonts_mut(|f| (f.glyph_width(font, 'M'), f.row_height(font)));
+        let (cw, ch) = measure(ui, &FontId::monospace(size));
+        let (cols, rows) = (self.cols.max(2) as f32, self.rows.max(2) as f32);
+        // The rows in use: a full-screen program's all of them, a shell's up to its cursor (a
+        // cleared screen's output is at its top, a busy one's at its bottom).
+        let alt = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
+        let used = if alt { rows } else { (self.term.cursor_y().unwrap_or(0) as f32 + 2.0).min(rows) };
+        let room = rect.size() - Vec2::splat(2.0 * PAD);
+        // A full-screen program keeps its shape (scaled to fit); a shell's lines are cut at the
+        // pane's edge rather than shrunk to nothing.
+        let fit_w = if alt { room.x / (cols * cw.max(1.0)) } else { 1.0 };
+        let scale = fit_w.min(room.y / (used * ch.max(1.0))).clamp(0.6, 1.0);
+        let font = FontId::monospace((size * scale).max(6.0));
+        let (cw, ch) = measure(ui, &font);
+        let cell = Vec2::new(cw.max(1.0), ch.max(1.0));
+        // Too tall even so: the rows above the cursor's go.
+        let over = (used * cell.y - room.y).max(0.0);
+        let origin = rect.min + Vec2::splat(PAD) - Vec2::new(0.0, over);
+        if args.fresh {
+            self.preview_scroll = 0;
+        }
+        self.preview_scroll += (args.scroll / cell.y).round() as isize;
+        // Into the scrollback and back again, so its windows keep their place.
+        let top = self.viewport_top();
+        if self.preview_scroll != 0 {
+            self.term.scroll_viewport(ScrollViewport::Delta(self.preview_scroll));
+            // As far as it went (the scrollback has an end).
+            self.preview_scroll = self.viewport_top() as isize - top as isize;
+        }
+        self.paint(ui, rect, origin, cell, font, false, ed);
+        if self.viewport_top() != top {
+            self.term.scroll_viewport(ScrollViewport::Row(top));
+        }
+    }
+}
+
 impl Buffer for TerminalBuffer {
     fn kind(&self) -> &str {
         "terminal"
@@ -1045,6 +1319,10 @@ impl Buffer for TerminalBuffer {
         if self.fg_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(400)) {
             self.sample_foreground(ed);
         }
+    }
+
+    fn preview(&mut self, ui: &mut egui::Ui, rect: Rect, args: PreviewArgs, ed: &mut Editor) {
+        self.paint_preview(ui, rect, args, ed);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
@@ -1102,231 +1380,9 @@ impl Buffer for TerminalBuffer {
             }
         }
 
-        // Theme colors become the terminal's defaults (apps can still override via OSC).
-        if self.theme_gen != Some(ed.theme_generation) {
-            self.theme_gen = Some(ed.theme_generation);
-            let c = |c: egui::Color32| RgbColor { r: c.r(), g: c.g(), b: c.b() };
-            if let Ok(mut pal) = self.term.default_color_palette() {
-                for (i, a) in theme.ansi.iter().enumerate() {
-                    pal.0[i] = c(*a);
-                }
-                let _ = self.term.set_default_color_palette(Some(pal));
-            }
-            let _ = self.term.set_default_fg_color(Some(c(theme.fg)));
-            let _ = self.term.set_default_bg_color(Some(c(theme.bg_alt)));
-            let _ = self.term.set_default_cursor_color(Some(c(theme.cursor)));
-        }
-        let painter = ui.painter_at(rect);
         let origin = rect.min + Vec2::splat(PAD);
         self.origin = origin;
-        // Vim's state picks the shape (bar in insert); full-screen apps keep the one they ask for.
-        let vim_shape = if focused { ed.cursor_shape(ed.current_buffer()) } else { None };
-        let alt = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
-        let top = self.viewport_top();
-        // A mouse selection, inclusive for painting (whole lines reach the right edge).
-        let mouse_lines = self.mouse_sel.get().is_some_and(|m| m.unit == SelUnit::Line);
-        let mouse_paint = self
-            .mouse_selection()
-            .map(|(a, b)| if mouse_lines { (a, Pos::new(b.line, usize::MAX)) } else { (a, Pos::new(b.line, b.col.saturating_sub(1))) });
-        let Ok(snapshot) = self.render.update(&self.term) else { return };
-        let colors = snapshot.colors().ok();
-        let default_bg = colors.as_ref().map(|c| rgb(c.background)).unwrap_or(theme.bg);
-        let default_fg = colors.as_ref().map(|c| rgb(c.foreground)).unwrap_or(theme.fg);
-        let bg = default_bg;
-        painter.rect_filled(rect, 0.0, bg);
-        let px = self.cell_px.load(Ordering::Relaxed);
-        let image_grid = super::term_images::Grid { origin, cell: self.cell, cell_px: (px >> 16, px & 0xffff), clip: rect };
-        self.images.begin(&self.term);
-        for layer in [libghostty_vt::kitty::graphics::Layer::BelowBg, libghostty_vt::kitty::graphics::Layer::BelowText] {
-            self.images.paint(&self.term, layer, &painter, &image_grid);
-        }
-        // The copy-mode (vim visual) selection is a cell background, so its text stays readable.
-        let lines = focused && crate::packages::vim::selection_kind(ed, ed.current_buffer()) == crate::text::SelectionKind::Lines;
-        let sel = if self.copy_mode { self.anchor.map(|a| ordered(a, self.cursor)) } else { None };
-        // Visual-line selects whole rows.
-        let sel = sel.map(|(a, b)| if lines { (Pos::new(a.line, 0), Pos::new(b.line, usize::MAX)) } else { (a, b) });
-        let sel = sel.or(mouse_paint);
-        let Ok(mut row_iter) = self.rows_it.update(&snapshot) else { return };
-        let mut y = origin.y;
-        let mut text = String::new();
-        let mut line = top;
-        let mut placeholders = Vec::new();
-        let mut row_cells = Vec::new();
-        // Text is painted after every cell background, so glyphs that overhang their cell
-        // (icons, italics) aren't cut by the next cell's background.
-        let mut glyphs: Vec<egui::Shape> = Vec::new();
-        // Nerd Font icons wait for the end of their row: they may spread into a blank next cell.
-        let mut icons: Vec<(usize, f32, char, Color32)> = Vec::new();
-        let mut blank: Vec<bool> = Vec::new();
-        while let Some(row) = row_iter.next() {
-            row_cells.clear();
-            icons.clear();
-            blank.clear();
-            let Ok(mut cell_iter) = self.cells_it.update(row) else { break };
-            let mut x = origin.x;
-            let mut col = 0;
-            let mut job = LayoutJob::default();
-            let mut run_start_x = x;
-            let flush = |job: &mut LayoutJob, run_x: f32, glyphs: &mut Vec<egui::Shape>| {
-                if !job.text.is_empty() {
-                    let g = painter.layout_job(std::mem::take(job));
-                    glyphs.push(egui::Shape::galley(egui::pos2(run_x, y), g, default_fg));
-                }
-            };
-            while let Some(cell) = cell_iter.next() {
-                let n = cell.graphemes_len().unwrap_or(0);
-                let mut fg = cell.fg_color().ok().flatten().map(rgb).unwrap_or(default_fg);
-                let mut cbg = cell.bg_color().ok().flatten().map(rgb);
-                let mut bold = false;
-                let mut italic = false;
-                let mut underline = false;
-                if cell.has_styling().unwrap_or(false) {
-                    if let Ok(s) = cell.style() {
-                        if s.inverse {
-                            let b = cbg.unwrap_or(bg);
-                            cbg = Some(fg);
-                            fg = b;
-                        }
-                        if s.faint {
-                            fg = fg.gamma_multiply(0.6);
-                        }
-                        bold = s.bold;
-                        italic = s.italic;
-                        underline = !matches!(s.underline, libghostty_vt::style::Underline::None);
-                    }
-                }
-                let p = Pos::new(line, col);
-                if cell.is_selected().unwrap_or(false) || sel.is_some_and(|(a, b)| a <= p && p <= b) {
-                    cbg = Some(theme.selection);
-                }
-                if let Some(b) = cbg {
-                    painter.rect_filled(Rect::from_min_size(egui::pos2(x, y), self.cell), 0.0, b);
-                }
-                if n > 0 {
-                    let _ = cell.graphemes_utf8(&mut text);
-                }
-                blank.push(n == 0 || text.trim().is_empty());
-                if n > 0 {
-                    // Kitty image placeholders show part of an image instead of a glyph.
-                    if text.starts_with(super::term_images::PLACEHOLDER) {
-                        if let Ok(s) = cell.style()
-                            && let Some(c) = super::term_images::PlaceholderCell::parse(col as u32, (line - top) as i32, &text, &s.fg_color, &s.underline_color)
-                        {
-                            row_cells.push(c);
-                        }
-                        flush(&mut job, run_start_x, &mut glyphs);
-                        x += self.cell.x;
-                        col += 1;
-                        continue;
-                    }
-                    // Powerline separators are shapes filling the cell; icons are fitted later.
-                    let mut chars = text.chars();
-                    if let (Some(ch), None) = (chars.next(), chars.next()) {
-                        let cell_rect = Rect::from_min_size(egui::pos2(x, y), self.cell);
-                        if super::term_glyphs::powerline(ch, cell_rect, fg, &mut glyphs) {
-                            flush(&mut job, run_start_x, &mut glyphs);
-                            x += self.cell.x;
-                            col += 1;
-                            continue;
-                        }
-                        if super::term_glyphs::is_icon(ch) {
-                            flush(&mut job, run_start_x, &mut glyphs);
-                            icons.push((col, x, ch, fg));
-                            x += self.cell.x;
-                            col += 1;
-                            continue;
-                        }
-                    }
-                    let fmt = TextFormat {
-                        font_id: font.clone(),
-                        color: if bold { fg.gamma_multiply(1.0) } else { fg },
-                        italics: italic,
-                        underline: if underline { Stroke::new(1.0, fg) } else { Stroke::NONE },
-                        ..Default::default()
-                    };
-                    if text.is_ascii() && text.len() == 1 {
-                        if job.text.is_empty() {
-                            run_start_x = x;
-                        }
-                        job.append(&text, 0.0, fmt);
-                    } else {
-                        // Wide or complex graphemes are placed at their exact cell.
-                        flush(&mut job, run_start_x, &mut glyphs);
-                        let mut single = LayoutJob::default();
-                        single.append(&text, 0.0, fmt);
-                        glyphs.push(egui::Shape::galley(egui::pos2(x, y), painter.layout_job(single), fg));
-                    }
-                    if bold {
-                        // Fake bold: a second pass offset by a fraction of a pixel.
-                    }
-                } else {
-                    flush(&mut job, run_start_x, &mut glyphs);
-                }
-                x += self.cell.x;
-                col += 1;
-            }
-            flush(&mut job, run_start_x, &mut glyphs);
-            for &(c, ix, ch, color) in &icons {
-                let cells = if blank.get(c + 1).copied().unwrap_or(false) { 2 } else { 1 };
-                if !super::term_glyphs::icon(ui.ctx(), ch, egui::pos2(ix, y), self.cell, cells, color, &mut glyphs) {
-                    let g = painter.layout_no_wrap(ch.to_string(), font.clone(), color);
-                    glyphs.push(egui::Shape::galley(egui::pos2(ix, y), g, color));
-                }
-            }
-            placeholders.extend(super::term_images::runs(&row_cells));
-            y += self.cell.y;
-            line += 1;
-        }
-
-        painter.extend(glyphs);
-        self.images.paint_virtual(&self.term, &placeholders, &painter, &image_grid);
-        self.images.paint(&self.term, libghostty_vt::kitty::graphics::Layer::AboveText, &painter, &image_grid);
-
-        // Terminal cursor (hidden in copy mode), painted after the snapshot is released.
-        let mut live = None;
-        if !self.copy_mode {
-            if let Ok(c) = snapshot.cursor() {
-                if c.visible {
-                    if let Some(vp) = c.viewport {
-                        let r = Rect::from_min_size(origin + egui::vec2(vp.x as f32 * self.cell.x, vp.y as f32 * self.cell.y), self.cell);
-                        let color = colors.as_ref().and_then(|c| c.cursor).map(rgb).unwrap_or(theme.cursor);
-                        let program = match c.visual_style {
-                            CursorVisualStyle::Bar => CursorShape::Bar,
-                            CursorVisualStyle::Underline => CursorShape::Underline,
-                            CursorVisualStyle::BlockHollow => CursorShape::Hollow,
-                            _ => CursorShape::Block,
-                        };
-                        let shape = match vim_shape {
-                            _ if !focused => CursorShape::Hollow,
-                            Some(s) if !alt => s,
-                            _ => program,
-                        };
-                        live = Some((r, shape, color, Pos::new(top + vp.y as usize, vp.x as usize)));
-                    }
-                }
-            }
-        }
-        let _ = snapshot.clean();
-        let cursor_char = |p: Pos| self.char_at(p).filter(|c| !c.is_whitespace() && *c != '\n');
-        if let Some((r, shape, color, p)) = live {
-            paint_cursor(&painter, r, shape, color, cursor_char(p), &font, default_bg);
-        }
-
-        // Copy-mode cursor.
-        if self.copy_mode {
-            if self.cursor.line >= top && self.cursor.line < top + self.rows as usize {
-                let r = Rect::from_min_size(
-                    origin + egui::vec2(self.cursor.col as f32 * self.cell.x, (self.cursor.line - top) as f32 * self.cell.y),
-                    self.cell,
-                );
-                let shape = if focused { vim_shape.unwrap_or(CursorShape::Block) } else { CursorShape::Hollow };
-                paint_cursor(&painter, r, shape, theme.cursor, cursor_char(self.cursor), &font, default_bg);
-            }
-            painter.text(rect.right_top() + egui::vec2(-10.0, 6.0), egui::Align2::RIGHT_TOP, "COPY", FontId::monospace(10.0), theme.yellow);
-        }
-        if self.exited {
-            painter.text(rect.center_bottom() - egui::vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, "[process exited]", theme.mono(), theme.fg_dim);
-        }
+        self.paint(ui, rect, origin, self.cell, font, focused, ed);
     }
 
     fn handle_key(&mut self, chord: &KeyChord, _ed: &mut Editor) -> bool {

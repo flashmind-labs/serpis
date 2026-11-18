@@ -20,7 +20,7 @@ use serpis_proto::wire::Request;
 use serpis_ai::*;
 use serpis_proto::{CacheHit, Entry, Tone};
 
-use crate::buffer::{Activity, ActivityState, Buffer, Modeline};
+use crate::buffer::{Activity, ActivityState, Buffer, Modeline, PreviewArgs};
 use crate::editor::{Editor, MainSender};
 use crate::impl_any;
 use crate::text::{Block, CursorShape, DocView, LineSource, Pos, StyledLine, TextArea, TextSurface, ViewOptions, char_len};
@@ -144,6 +144,9 @@ pub struct ChatBuffer {
     show_thinking: bool,
     dirty: bool,
     pub view: DocView,
+    /// The transcript's view in a picker's preview: its own scroll, and line heights measured
+    /// at the preview's width, so previewing never moves or re-measures the window's.
+    preview_view: DocView,
     pub focus: Focus,
     /// When the current run started.
     started: Option<Instant>,
@@ -215,6 +218,7 @@ impl ChatBuffer {
             show_thinking: true,
             dirty: true,
             view,
+            preview_view: DocView::default(),
             focus: Focus::Prompt,
             started: None,
             prompt_history: Vec::new(),
@@ -3860,6 +3864,34 @@ impl Buffer for ChatBuffer {
             self.dirty = true;
             ed.ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+
+    fn preview(&mut self, ui: &mut egui::Ui, rect: Rect, args: PreviewArgs, ed: &mut Editor) {
+        self.ensure_review();
+        let k = ed.theme.ui_scale();
+        // Laid out at its window's width (a chat no window has shown yet: the preview's), so
+        // previewing never lays out a long transcript again.
+        if self.text_w <= 0.0 {
+            let max_w = ed.var("chat-max-width").and_then(Value::as_f64).unwrap_or(860.0) as f32 * k;
+            self.text_w = (rect.width() - 2.0 * 24.0 * k).min(max_w).max(40.0);
+            self.dirty = true;
+        }
+        if self.dirty {
+            self.rebuild(ed);
+        }
+        let v = &mut self.preview_view;
+        v.padding = egui::vec2(18.0 * k, 12.0 * k);
+        v.max_width = self.text_w;
+        // It starts at the end, where the chat is now.
+        if args.fresh {
+            v.follow_tail = true;
+        }
+        if args.scroll != 0.0 {
+            v.follow_tail = false;
+            v.scroll_y += args.scroll;
+        }
+        let theme = ed.theme.clone();
+        v.show(ui, rect, &Lines(&self.lines), &theme, &ViewOptions { focused: false, cursor: CursorShape::Bar, show_cursor: false, selection: Default::default() });
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, focused: bool, ed: &mut Editor) {
