@@ -1,9 +1,57 @@
 //! The minibuffer: prompts with fuzzy completion (`M-x`, buffer switching, model picker,
 //! find-file, ...). Keys go through the `minibuffer` keymap; typed text edits the input.
 
+use std::time::{Duration, Instant};
+
+use crate::buffer::BufferId;
 use crate::editor::{Args, Editor};
 use crate::keys::KeyChord;
-use crate::text::{Pos, TextArea, TextSurface, char_len};
+use crate::text::{DocView, Pos, TextArea, TextSurface, char_len};
+
+/// What the preview pane shows for the selected candidate (`minibuffer-preview`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Preview {
+    /// A buffer as it is now, painted read-only: previewing never resizes a terminal, clears a
+    /// chat's attention or touches window history.
+    Buffer(BufferId),
+    /// Lines of text (a Lua picker's: a file, a command's output).
+    Text { title: String, lines: Vec<String> },
+}
+
+/// Where the preview goes (`minibuffer-preview`; `M-/` cycles them while a prompt is open).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewLayout {
+    /// Beside the list, in a wider palette (Telescope, fzf-lua).
+    Right,
+    /// Under the list (fzf's `--preview-window=down`).
+    Down,
+    /// In the focused window, at full size, until the prompt closes (consult).
+    Window,
+    Off,
+}
+
+impl PreviewLayout {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "right" => Self::Right,
+            "down" => Self::Down,
+            "window" => Self::Window,
+            "off" => Self::Off,
+            _ => return None,
+        })
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Down => "down",
+            Self::Window => "window",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// The order `minibuffer-cycle-preview-layout` goes through.
+const LAYOUT_CYCLE: [PreviewLayout; 4] = [PreviewLayout::Right, PreviewLayout::Down, PreviewLayout::Window, PreviewLayout::Off];
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -20,6 +68,8 @@ pub struct Candidate {
     /// project, branch, folder). Each typed word must match within one field (orderless style),
     /// and a match in a field shown in `detail` is highlighted there.
     pub search: String,
+    /// What the preview pane shows while it is selected (else the prompt's `previewer` is asked).
+    pub preview: Option<Preview>,
 }
 
 impl Candidate {
@@ -32,6 +82,7 @@ impl Candidate {
             checked: None,
             section: None,
             search: String::new(),
+            preview: None,
         }
     }
     pub fn detail(mut self, d: impl Into<String>) -> Self {
@@ -41,6 +92,45 @@ impl Candidate {
     pub fn value(mut self, v: impl Into<String>) -> Self {
         self.value = v.into();
         self
+    }
+    pub fn preview(mut self, p: Preview) -> Self {
+        self.preview = Some(p);
+        self
+    }
+}
+
+/// Asked for the preview of a candidate that has none of its own (a Lua picker's `preview`).
+pub type PreviewFn = std::rc::Rc<dyn Fn(&mut Editor, &Candidate) -> Option<Preview>>;
+
+/// The preview pane's state for one prompt.
+pub struct PreviewState {
+    /// The layout chosen for this prompt (`M-/`, a Lua picker's `preview_layout`); None follows
+    /// `minibuffer-preview`.
+    pub layout: Option<PreviewLayout>,
+    /// Hidden with `C-/` (fzf's toggle-preview).
+    pub hidden: bool,
+    /// The selected candidate's value, and when it was selected (`minibuffer-preview-delay`).
+    key: Option<String>,
+    since: Option<Instant>,
+    /// The selection `shown` was asked for (None: not yet, the prompt just opened).
+    resolved: Option<Option<String>>,
+    /// The palette had room for a pane beside its list when last drawn (for "auto").
+    pub wide: bool,
+    /// What is shown, once the selection has settled.
+    pub shown: Option<Preview>,
+    /// Scrolling asked for since the last frame, in pages (positive: further down).
+    pub scroll: f32,
+    /// The preview just changed to another candidate: buffers start it from their default place.
+    pub fresh: bool,
+    /// Scroll state for `Preview::Text`.
+    pub view: DocView,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        let mut view = DocView::default();
+        view.wrap = true;
+        PreviewState { layout: None, hidden: false, key: None, since: None, resolved: None, wide: true, shown: None, scroll: 0.0, fresh: true, view }
     }
 }
 
@@ -94,6 +184,9 @@ pub struct Minibuffer {
     /// No search field: a list to go through. SPC does what RET does, `j` and `k` move, and
     /// other typing is ignored.
     pub searchable: bool,
+    /// Previews for candidates without one of their own.
+    pub previewer: Option<PreviewFn>,
+    pub preview: PreviewState,
 }
 
 /// Replaces the open prompt's candidates for the next (+1) or previous (-1) set.
@@ -271,6 +364,8 @@ impl Editor {
             frecency_empty: false,
             cycle: None,
             loading: false,
+            previewer: None,
+            preview: PreviewState::default(),
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -310,6 +405,8 @@ impl Editor {
             frecency_empty: false,
             cycle: None,
             loading: false,
+            previewer: None,
+            preview: PreviewState::default(),
         };
         mb.refilter();
         self.minibuffer = Some(mb);
@@ -431,8 +528,102 @@ pub fn cancel(ed: &mut Editor) {
     }
 }
 
+impl Editor {
+    /// Where the open prompt's preview goes. `wide`: a palette has room for a pane beside its
+    /// list. `minibuffer-preview` "auto" (or anything it doesn't name) is right in a wide
+    /// palette, down in a narrow one, and in the window with `minibuffer-style` "bottom".
+    pub fn preview_layout(&self, wide: bool) -> PreviewLayout {
+        let Some(mb) = &self.minibuffer else { return PreviewLayout::Off };
+        let auto = self.auto_preview_layout(wide);
+        let chosen = mb.preview.layout.or_else(|| self.var_str("minibuffer-preview").as_deref().and_then(PreviewLayout::parse));
+        match (mb.preview.hidden, chosen) {
+            (true, _) => PreviewLayout::Off,
+            (_, Some(l)) => l,
+            (_, None) => auto,
+        }
+    }
+
+    /// Where "auto" puts the preview.
+    fn auto_preview_layout(&self, wide: bool) -> PreviewLayout {
+        if self.var_str("minibuffer-style").as_deref() == Some("bottom") {
+            PreviewLayout::Window
+        } else if wide {
+            PreviewLayout::Right
+        } else {
+            PreviewLayout::Down
+        }
+    }
+
+    /// What the open prompt's preview shows now, and where (None: nothing to show).
+    pub fn preview_shown(&self, wide: bool) -> Option<(Preview, PreviewLayout)> {
+        let mb = self.minibuffer.as_ref()?;
+        let p = mb.preview.shown.clone()?;
+        let layout = self.preview_layout(wide);
+        (layout != PreviewLayout::Off).then_some((p, layout))
+    }
+
+    /// The buffer the focused window shows instead of its own while a prompt previews it there
+    /// (`minibuffer-preview` "window").
+    pub fn window_preview(&self) -> Option<Preview> {
+        let wide = self.minibuffer.as_ref()?.preview.wide;
+        match self.preview_shown(wide)? {
+            (p, PreviewLayout::Window) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Take the scrolling asked for since the last frame (in pages) and whether the preview just
+    /// changed, for the one drawing it.
+    pub fn take_preview_motion(&mut self) -> (f32, bool) {
+        let Some(mb) = &mut self.minibuffer else { return (0.0, false) };
+        let fresh = std::mem::take(&mut mb.preview.fresh);
+        if fresh {
+            mb.preview.view = PreviewState::default().view;
+        }
+        (std::mem::take(&mut mb.preview.scroll), fresh)
+    }
+}
+
+/// Follow the selection with the preview: at once when the prompt opens, then once the
+/// selection has stayed put for `minibuffer-preview-delay` ms (holding C-n doesn't draw every
+/// buffer on the way).
+fn update_preview(ed: &mut Editor) {
+    let delay = Duration::from_millis(ed.var("minibuffer-preview-delay").and_then(serde_json::Value::as_u64).unwrap_or(50));
+    let Some(mb) = &mut ed.minibuffer else { return };
+    let key = mb.current().map(|c| c.value.clone());
+    if mb.preview.resolved.as_ref() == Some(&key) {
+        return;
+    }
+    if mb.preview.since.is_none() || mb.preview.key != key {
+        mb.preview.key = key.clone();
+        mb.preview.since = Some(Instant::now());
+    }
+    let waited = mb.preview.since.map(|t| t.elapsed()).unwrap_or_default();
+    if mb.preview.resolved.is_some() && waited < delay {
+        ed.ctx.request_repaint_after(delay - waited);
+        return;
+    }
+    mb.preview.resolved = Some(key);
+    let cur = mb.current().cloned();
+    let previewer = mb.previewer.clone();
+    let p = match (cur.as_ref().and_then(|c| c.preview.clone()), cur, previewer) {
+        (Some(p), _, _) => Some(p),
+        (None, Some(c), Some(f)) => f(ed, &c),
+        _ => None,
+    };
+    if let Some(mb) = &mut ed.minibuffer {
+        if mb.preview.shown != p {
+            mb.preview.fresh = true;
+            mb.preview.scroll = 0.0;
+        }
+        mb.preview.shown = p;
+        ed.ctx.request_repaint();
+    }
+}
+
 /// Report selection changes to the prompt's `on_select` (called once per frame).
 pub fn notify_selection(ed: &mut Editor) {
+    update_preview(ed);
     let Some(mb) = &mut ed.minibuffer else { return };
     let Some(f) = mb.on_select.clone() else { return };
     let cur = mb.current().cloned();
@@ -592,7 +783,62 @@ pub fn install(ed: &mut Editor) {
         });
         Ok(())
     });
+    ed.define_command("minibuffer-toggle-preview", "Show or hide the preview of the selected candidate (where minibuffer-preview puts it).", o, |ed, _| {
+        let Some(wide) = ed.minibuffer.as_ref().map(|m| m.preview.wide) else { return Ok(()) };
+        let off = ed.preview_layout(wide) == PreviewLayout::Off;
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.preview.hidden = !off;
+        }
+        // minibuffer-preview is "off": show it where "auto" would.
+        if off && ed.preview_layout(wide) == PreviewLayout::Off {
+            let auto = ed.auto_preview_layout(wide);
+            if let Some(mb) = &mut ed.minibuffer {
+                mb.preview.layout = Some(auto);
+            }
+        }
+        Ok(())
+    });
+    ed.define_command("minibuffer-cycle-preview-layout", "Move the preview to its next place for this prompt: right, down, window, off (param: -1 for the previous). minibuffer-preview sets where it starts.", o, |ed, a| {
+        let back = a.params.first().and_then(serde_json::Value::as_i64).is_some_and(|d| d < 0);
+        let Some(wide) = ed.minibuffer.as_ref().map(|m| m.preview.wide) else { return Ok(()) };
+        let now = ed.preview_layout(wide);
+        let i = LAYOUT_CYCLE.iter().position(|l| *l == now).unwrap_or(0);
+        let next = LAYOUT_CYCLE[(i + if back { LAYOUT_CYCLE.len() - 1 } else { 1 }) % LAYOUT_CYCLE.len()];
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.preview.layout = Some(next);
+            mb.preview.hidden = false;
+            mb.preview.fresh = true;
+        }
+        ed.message(format!("Preview: {}", next.as_str()));
+        Ok(())
+    });
+    ed.define_command("minibuffer-preview-scroll", "Scroll the preview (param: pages, default 0.5; negative scrolls up).", o, |ed, a| {
+        let pages = a.params.first().and_then(serde_json::Value::as_f64).unwrap_or(0.5) as f32;
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.preview.scroll += pages * a.count() as f32;
+            ed.ctx.request_repaint();
+        }
+        Ok(())
+    });
+    ed.define_command("minibuffer-preview-scroll-down", "Scroll the preview down half a page.", o, |ed, a| {
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.preview.scroll += 0.5 * a.count() as f32;
+            ed.ctx.request_repaint();
+        }
+        Ok(())
+    });
+    ed.define_command("minibuffer-preview-scroll-up", "Scroll the preview up half a page.", o, |ed, a| {
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.preview.scroll -= 0.5 * a.count() as f32;
+            ed.ctx.request_repaint();
+        }
+        Ok(())
+    });
     for (k, c) in [
+        ("C-/", "minibuffer-toggle-preview"),
+        ("M-/", "minibuffer-cycle-preview-layout"),
+        ("S-<down>", "minibuffer-preview-scroll-down"),
+        ("S-<up>", "minibuffer-preview-scroll-up"),
         ("RET", "minibuffer-accept"),
         ("C-m", "minibuffer-accept"),
         ("C-s", "minibuffer-accept-alternate"),

@@ -194,6 +194,40 @@ current terminal, `C-c ESC` does whichever ESC doesn't, and the header shows `ES
 while ESC goes to the program.
 Windows can also be split, closed and resized with the mouse (header buttons, draggable dividers).
 
+## Previews in pickers
+
+The buffer switcher (`s-p`), `kill-buffer` and `switch-to-hidden-buffer` preview the selected
+buffer as it is now: a chat's transcript from its end, a terminal's screen, a text buffer where you
+last were. Previewing is read-only. It never resizes a terminal, clears a chat's attention dot,
+or changes a window or its history; ESC leaves everything as it was. `minibuffer-preview` says where it goes:
+
+| Value | Where |
+|---|---|
+| `"auto"` (default) | beside the list when the frame is at least `minibuffer-preview-min-width` (1000) wide, else under it; in the window with `minibuffer-style` `"bottom"` |
+| `"right"` | beside the list, in a wider palette (Telescope, fzf-lua); `minibuffer-preview-width` is its share |
+| `"down"` | under the list (fzf's `--preview-window=down`) |
+| `"window"` | in the focused window, at full size, until the prompt closes (consult) |
+| `"off"` | no preview |
+
+While a prompt is open, `C-/` shows or hides the preview, `M-/` moves it (right, down, window, off)
+for that prompt, and `S-<down>` / `S-<up>` scroll it (a terminal's into its scrollback; a chat's or a text's
+also with the mouse wheel). The preview
+follows the selection once it has stayed put for `minibuffer-preview-delay` ms (50), so holding
+`C-n` doesn't draw every buffer on the way. Lua pickers get one with `preview`:
+
+```lua
+serpis.minibuffer.read({
+  prompt = "Note: ",
+  candidates = notes,
+  preview_layout = "down", -- optional, this picker only
+  preview = function(path)
+    local f = io.open(path); local text = f and f:read("a") or ""; if f then f:close() end
+    return { title = path, text = text } -- or { buffer = id }, or nil
+  end,
+  on_accept = function(c) ... end,
+})
+```
+
 ## Sidebar: projects, worktrees and agents
 
 The sidebar (`s-b`, or the button at the bottom left) lists every chat and terminal grouped by project (a repository's main

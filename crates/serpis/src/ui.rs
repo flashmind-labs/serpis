@@ -9,6 +9,7 @@ use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Str
 
 use crate::buffer::WindowId;
 use crate::editor::{Container, Kind, Level, Node, NodeRef};
+use crate::minibuffer::{Preview, PreviewLayout};
 use crate::packages::vim;
 use crate::text::{CursorShape, PlainLines, ViewOptions};
 use crate::theme::Face;
@@ -393,7 +394,16 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     ed.drop_targets.push(crate::mouse::DropTarget::Window(w, rect));
     let focused = ed.focused == w && ed.minibuffer.is_none() && !ed.sidebar.focused;
     let is_focus_win = ed.focused == w;
-    let id = ed.windows[w].buffer;
+    // A prompt previewing in the window (minibuffer-preview "window"): what it previews, in
+    // its place, until the prompt closes.
+    let preview = if is_focus_win { ed.window_preview() } else { None }.filter(|p| match p {
+        Preview::Buffer(b) => *b != ed.windows[w].buffer && ed.buffers.contains_key(*b),
+        Preview::Text { .. } => true,
+    });
+    let id = match &preview {
+        Some(Preview::Buffer(b)) => *b,
+        _ => ed.windows[w].buffer,
+    };
     let theme = ed.theme.clone();
     let k = theme.ui_scale();
     let r = theme.radius + 4;
@@ -416,7 +426,10 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         .map(|b| (b.modeline(), b.is_modified()))
         .unwrap_or_default();
     // The same name the sidebar and the buffer pickers use.
-    let primary = ed.buffer_display_name(id);
+    let primary = match &preview {
+        Some(Preview::Text { title, .. }) => title.clone(),
+        _ => ed.buffer_display_name(id),
+    };
     let secondary = String::new();
     let place = match ed.local_directory(id) {
         Some(d) => {
@@ -478,7 +491,13 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
         bx = badge.left() - 6.0 * k;
         fullscreen_badge = Some(badge);
     }
-    if let Some(st) = vim::state_of(ed, id).filter(|st| badge_w(st.label()) <= spare) {
+    if preview.is_some() && badge_w("Preview") <= spare {
+        spare -= badge_w("Preview");
+        let badge = crate::chrome::pill(p, bx, cy, "Preview", badge_font.clone(), theme.accent, crate::chrome::tint(theme.accent, 0.16), true);
+        row.push(("preview", badge));
+        bx = badge.left() - 6.0 * k;
+    }
+    if let Some(st) = vim::state_of(ed, id).filter(|st| badge_w(st.label()) <= spare && preview.is_none()) {
         let color = match st {
             vim::State::Normal => theme.accent,
             vim::State::Insert => theme.green,
@@ -620,9 +639,15 @@ fn draw_window(ui: &mut egui::Ui, ed: &mut Editor, w: WindowId, rect: Rect) {
     if ui.input(|i| i.pointer.any_pressed()) && ui.rect_contains_pointer(body) && (ed.focused != w || ed.selected.is_some() || ed.sidebar.focused) {
         ed.focus_window(w);
     }
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));
-    child.set_clip_rect(body);
-    ed.timed(|ed| format!("draw {}", ed.buffer_display_name(id)), |ed| ed.with_buffer(id, |b, ed| b.ui(&mut child, body, focused, ed)));
+    if let Some(p) = &preview {
+        ui.painter().rect_filled(body, 0.0, theme.bg_alt);
+        ed.debug_rects.insert("minibuffer-preview".into(), body);
+        ed.timed(|_| "draw preview".into(), |ed| draw_preview_body(ui, ed, body, p));
+    } else {
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt(("body", format!("{w:?}"))));
+        child.set_clip_rect(body);
+        ed.timed(|ed| format!("draw {}", ed.buffer_display_name(id)), |ed| ed.with_buffer(id, |b, ed| b.ui(&mut child, body, focused, ed)));
+    }
     // The body is clipped square, so content backgrounds (a terminal's, a chat's) fill the
     // window's bottom corners: round them off again with what is behind the windows, and draw
     // the outline over the content.
@@ -754,30 +779,73 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("serpis-palette"));
     let mut pui = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(full));
     let painter = pui.painter().clone();
-    // Dim what is behind, like a modal.
-    painter.rect_filled(full, 0.0, Color32::from_black_alpha(if t.dark { 70 } else { 30 }));
+    // The selected candidate's preview, and where it goes (minibuffer-preview).
+    let wide = full.width() >= ed.var("minibuffer-preview-min-width").and_then(Value::as_f64).unwrap_or(1000.0) as f32 * k;
+    if let Some(mb) = ed.minibuffer.as_mut() {
+        mb.preview.wide = wide;
+    }
+    let shown = ed.preview_shown(wide);
+    let layout = shown.as_ref().map(|(_, l)| *l);
+    let ratio = ed.var("minibuffer-preview-width").and_then(Value::as_f64).unwrap_or(0.58).clamp(0.3, 0.8) as f32;
+    // Dim what is behind, like a modal; barely when the window behind is the preview.
+    let dim = if layout == Some(PreviewLayout::Window) { if t.dark { 24 } else { 10 } } else if t.dark { 70 } else { 30 };
+    painter.rect_filled(full, 0.0, Color32::from_black_alpha(dim));
     let Some(mb) = ed.minibuffer.as_mut() else { return };
-    let w = (680.0 * k).min(full.width() - 40.0);
     let row_h = (34.0 * k).round();
     let input_h = (46.0 * k).round();
-    let max_rows = 10usize;
-    let n = mb.filtered.len().min(max_rows);
-    let start = mb.selected.saturating_sub(max_rows - 1);
-    // Section headings, above the first shown row of each.
-    let section_h = (28.0 * k).round();
-    let mut headings = vec![None; n];
-    let mut last = None;
-    for (slot, (ci, _)) in headings.iter_mut().zip(mb.filtered.iter().skip(start)) {
-        let section = mb.candidates[*ci].section.clone();
-        if section.is_some() && section != last {
-            *slot = section.clone();
+    let mut top = full.top() + (full.height() * 0.12).max(40.0);
+    // Beside the list: a wider card of a steady height (it doesn't jump as the list narrows).
+    // Under it: a few rows, then the preview.
+    let (w, list_w, mut max_rows, side_h) = match layout {
+        Some(PreviewLayout::Right) => {
+            let w = (1120.0 * k).min(full.width() - 40.0);
+            let side_h = (full.bottom() - 40.0 - top - input_h).min(600.0 * k).max(4.0 * row_h);
+            (w, (w * (1.0 - ratio)).round(), 10usize, side_h)
         }
-        last = section;
-    }
-    let headings_h = headings.iter().flatten().count() as f32 * section_h;
+        Some(PreviewLayout::Down) => {
+            let w = (760.0 * k).min(full.width() - 40.0);
+            (w, w, 5usize, 0.0)
+        }
+        _ => {
+            let w = (680.0 * k).min(full.width() - 40.0);
+            (w, w, 10usize, 0.0)
+        }
+    };
+    let section_h = (28.0 * k).round();
     let hint_h = if !mb.searchable || mb.alternate_accept.is_some() { (30.0 * k).round() } else { 0.0 };
-    let list_h = if n > 0 { n as f32 * row_h + headings_h + 12.0 * k } else { 0.0 } + hint_h;
-    let card = Rect::from_min_size(egui::pos2(full.center().x - w / 2.0, full.top() + (full.height() * 0.12).max(40.0)), egui::vec2(w, input_h + list_h));
+    let (n, start, headings, list_h) = loop {
+        let n = mb.filtered.len().min(max_rows);
+        let start = mb.selected.saturating_sub(max_rows - 1);
+        // Section headings, above the first shown row of each.
+        let mut headings = vec![None; n];
+        let mut last = None;
+        for (slot, (ci, _)) in headings.iter_mut().zip(mb.filtered.iter().skip(start)) {
+            let section = mb.candidates[*ci].section.clone();
+            if section.is_some() && section != last {
+                *slot = section.clone();
+            }
+            last = section;
+        }
+        let headings_h = headings.iter().flatten().count() as f32 * section_h;
+        let list_h = if n > 0 { n as f32 * row_h + headings_h + 12.0 * k } else { 0.0 } + hint_h;
+        // The list fits beside the preview.
+        if side_h > 0.0 && list_h > side_h && max_rows > 1 {
+            max_rows -= 1;
+            continue;
+        }
+        break (n, start, headings, list_h);
+    };
+    let card_h = match layout {
+        Some(PreviewLayout::Right) => input_h + side_h,
+        Some(PreviewLayout::Down) => {
+            // The preview takes what is left, within reason; the card moves up if it must.
+            let pane_h = (full.bottom() - 32.0 - top - input_h - list_h).clamp(160.0 * k, 460.0 * k);
+            top = top.min(full.bottom() - 24.0 - input_h - list_h - pane_h).max(full.top() + 8.0);
+            input_h + list_h + pane_h
+        }
+        _ => input_h + list_h,
+    };
+    let card = Rect::from_min_size(egui::pos2(full.center().x - w / 2.0, top), egui::vec2(w, card_h));
     let radius = (12.0 * k).round() as u8;
     let shadow = egui::epaint::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if t.dark { 140 } else { 50 }) };
     painter.add(shadow.as_shape(card, radius));
@@ -824,20 +892,22 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
 
     // Candidates.
     let mut clicked = None;
-    if n > 0 {
+    if n > 0 || shown.is_some() {
         painter.hline(card.left()..=card.right(), input.bottom(), Stroke::new(1.0, t.border));
+    }
+    if n > 0 {
         let font = FontId::proportional(t.font_size - 0.5);
         let mut y = input.bottom() + 6.0 * k;
         for (i, (ci, positions)) in mb.filtered.iter().enumerate().skip(start).take(max_rows) {
             let c = &mb.candidates[*ci];
             if let Some(section) = &headings[i - start] {
-                chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, y + section_h * 0.58), section, small.clone(), t.fg_faint, w - 36.0 * k);
+                chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, y + section_h * 0.58), section, small.clone(), t.fg_faint, list_w - 36.0 * k);
                 y += section_h;
             }
             let row_y = y;
             y += row_h;
             let y = row_y;
-            let r = Rect::from_min_size(egui::pos2(card.left() + 6.0 * k, y), egui::vec2(w - 12.0 * k, row_h));
+            let r = Rect::from_min_size(egui::pos2(card.left() + 6.0 * k, y), egui::vec2(list_w - 12.0 * k, row_h));
             let resp = pui.interact(r, egui::Id::unique(("palette-row", i)), Sense::click());
             if i == mb.selected {
                 painter.rect_filled(r, 8.0 * k, chrome::selected_bg(t));
@@ -891,12 +961,34 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
             }
         }
     }
+    // The list's bottom edge (the preview is beside it, or under it).
+    let list_bottom = if layout == Some(PreviewLayout::Right) { card.bottom() } else { input.bottom() + list_h };
     if hint_h > 0.0 {
         // What the keys do, along the bottom: there's no search field to say it's a prompt.
-        let cy = card.bottom() - hint_h / 2.0;
-        painter.hline(card.left()..=card.right(), card.bottom() - hint_h, Stroke::new(1.0, t.border));
+        let cy = list_bottom - hint_h / 2.0;
+        painter.hline(card.left()..=card.left() + list_w, list_bottom - hint_h, Stroke::new(1.0, t.border));
         let hint = mb.alternate_accept.as_ref().map(|(hint, _)| hint.as_str()).unwrap_or("SPC or RET ticks  ·  j k move  ·  ESC closes");
-        chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, cy), hint, small.clone(), t.fg_faint, w - 36.0 * k);
+        chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, cy), hint, small.clone(), t.fg_faint, list_w - 36.0 * k);
+    }
+    let selected = mb.current().cloned();
+    // The preview, beside or under the list.
+    let pane = match (&shown, layout) {
+        (Some(_), Some(PreviewLayout::Right)) => {
+            let pane = Rect::from_min_max(egui::pos2(card.left() + list_w, input.bottom()), card.max);
+            painter.vline(pane.left(), pane.y_range(), Stroke::new(1.0, t.border));
+            Some((pane, CornerRadius { se: radius, ..Default::default() }))
+        }
+        (Some(_), Some(PreviewLayout::Down)) => {
+            let pane = Rect::from_min_max(egui::pos2(card.left(), list_bottom), card.max);
+            painter.hline(card.left()..=card.right(), pane.top(), Stroke::new(1.0, t.border));
+            Some((pane, CornerRadius { sw: radius, se: radius, ..Default::default() }))
+        }
+        _ => None,
+    };
+    if let (Some((pane, corners)), Some((preview, _))) = (pane, &shown) {
+        let pane = pane.shrink2(egui::vec2(0.0, 0.5));
+        let (label, detail) = selected.map(|c| (c.label, c.detail)).unwrap_or_default();
+        draw_preview_pane(&mut pui, ed, pane, corners, preview, &label, &detail);
     }
     // A click outside the palette dismisses it.
     let outside = pui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !card.contains(p)));
@@ -907,6 +999,77 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
         crate::minibuffer::accept(ed);
     } else if outside {
         crate::minibuffer::cancel(ed);
+    }
+}
+
+/// A picker's preview pane: what is previewed (its icon, name and where it is), then the
+/// buffer or text itself. `corners`: the card's rounded corners the pane takes.
+fn draw_preview_pane(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect, corners: CornerRadius, preview: &Preview, label: &str, detail: &str) {
+    let t = ed.theme.clone();
+    let k = t.ui_scale();
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, corners, t.bg_alt);
+    let head = Rect::from_min_size(rect.min, egui::vec2(rect.width(), (36.0 * k).round()));
+    painter.hline(rect.x_range(), head.bottom(), Stroke::new(1.0, t.border));
+    let cy = head.center().y;
+    let kind = match preview {
+        Preview::Buffer(id) => ed.meta(*id).map(|m| m.major.clone()).unwrap_or_default(),
+        Preview::Text { .. } => "text".into(),
+    };
+    let title = match preview {
+        Preview::Text { title, .. } if !title.is_empty() => title.as_str(),
+        _ => label,
+    };
+    let mut x = head.left() + 14.0 * k;
+    crate::chrome::kind_icon(&painter, egui::pos2(x + 6.0 * k, cy), 12.0 * k, &kind, t.accent);
+    x += 22.0 * k;
+    // The keys for it, on the right while there is room.
+    let keys = crate::commands::all_bindings(ed);
+    let hint = [("minibuffer-toggle-preview", "hide"), ("minibuffer-cycle-preview-layout", "move")]
+        .iter()
+        .filter_map(|(cmd, what)| keys.get(*cmd).map(|k| format!("{} {what}", crate::chrome::pretty_keys(k))))
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    let small = FontId::proportional(t.font_size - 2.5);
+    let hint_w = crate::chrome::text_width(&painter, &hint, small.clone());
+    let mut right = head.right() - 14.0 * k;
+    if !hint.is_empty() && hint_w < head.width() * 0.4 {
+        crate::chrome::text(&painter, egui::pos2(right - hint_w, cy), &hint, small.clone(), t.fg_faint, hint_w + 1.0);
+        right -= hint_w + 16.0 * k;
+    }
+    let name_w = crate::chrome::text(&painter, egui::pos2(x, cy), title, FontId::proportional(t.font_size - 1.0), t.fg, (right - x).max(0.0));
+    let detail_x = x + name_w + 12.0 * k;
+    if !detail.is_empty() && right - detail_x > 40.0 * k {
+        crate::chrome::text(&painter, egui::pos2(detail_x, cy), detail, small, t.fg_faint, right - detail_x);
+    }
+    let body = Rect::from_min_max(egui::pos2(rect.left(), head.bottom() + 1.0), rect.max);
+    ed.debug_rects.insert("minibuffer-preview".into(), body);
+    // The body is clipped square: keep the card's rounded corners clear of it.
+    let r = corners.sw.max(corners.se) as f32;
+    let body = if r > 0.0 { Rect::from_min_max(body.min, egui::pos2(body.right(), body.bottom() - r * 0.4)) } else { body };
+    ed.timed(|_| "draw preview".into(), |ed| draw_preview_body(ui, ed, body, preview));
+}
+
+/// What a preview shows, in `rect`: a buffer painted read-only (`Buffer::preview`), or text.
+fn draw_preview_body(ui: &mut egui::Ui, ed: &mut Editor, rect: Rect, preview: &Preview) {
+    let (pages, fresh) = ed.take_preview_motion();
+    let args = crate::buffer::PreviewArgs { scroll: pages * rect.height(), fresh };
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("minibuffer-preview"));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    match preview {
+        Preview::Buffer(id) => {
+            ed.with_buffer(*id, |b, ed| b.preview(&mut child, rect, args, ed));
+        }
+        Preview::Text { lines, .. } => {
+            let Some(mb) = ed.minibuffer.as_mut() else { return };
+            let mut view = std::mem::take(&mut mb.preview.view);
+            view.scroll_y += args.scroll;
+            let src = PlainLines { lines, face: Face::Code };
+            view.show(&mut child, rect, &src, &ed.theme, &ViewOptions { focused: false, cursor: CursorShape::Bar, show_cursor: false, selection: Default::default() });
+            if let Some(mb) = ed.minibuffer.as_mut() {
+                mb.preview.view = view;
+            }
+        }
     }
 }
 
@@ -924,6 +1087,15 @@ fn detail_job(detail: &str, positions: &[usize], label_len: usize, font: FontId,
 
 fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
     let theme = ed.theme.clone();
+    // A preview beside the list or above it ("down": toward the window, the list stays by the
+    // echo area); in the window by default (draw_window).
+    let screen = ui.max_rect();
+    let wide = screen.width() >= ed.var("minibuffer-preview-min-width").and_then(Value::as_f64).unwrap_or(1000.0) as f32 * theme.ui_scale();
+    if let Some(mb) = ed.minibuffer.as_mut() {
+        mb.preview.wide = wide;
+    }
+    let shown = ed.preview_shown(wide).filter(|(_, l)| matches!(l, PreviewLayout::Right | PreviewLayout::Down));
+    let ratio = ed.var("minibuffer-preview-width").and_then(Value::as_f64).unwrap_or(0.58).clamp(0.3, 0.8) as f32;
     let Some(mb) = &ed.minibuffer else { return };
     // More candidates on their way: a moving bar along the top of the echo area.
     if mb.loading {
@@ -931,7 +1103,7 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
         crate::chrome::loading_bar(ui.painter(), bar, ui.input(|i| i.time), &[theme.accent, theme.purple, theme.cyan, theme.green]);
         ui.ctx().request_repaint();
     }
-    if mb.filtered.is_empty() {
+    if mb.filtered.is_empty() && shown.is_none() {
         return;
     }
     let row = theme.font_size + 10.0;
@@ -939,9 +1111,28 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
     let n = mb.filtered.len().min(max_rows);
     let start = mb.selected.saturating_sub(max_rows - 1);
     let hint_h = if mb.alternate_accept.is_some() { row } else { 0.0 };
-    let h = n as f32 * row + 12.0 + hint_h;
+    let list_h = n as f32 * row + 12.0 + hint_h;
+    let room = echo.top() - 6.0 - screen.top() - 12.0;
+    let (h, list_w, pane) = match &shown {
+        Some((_, PreviewLayout::Right)) => {
+            let h = list_h.max((screen.height() * 0.36).min(room));
+            let list_w = (echo.width() * (1.0 - ratio)).round();
+            let top = echo.top() - 6.0 - h;
+            (h, list_w, Some((Rect::from_min_max(egui::pos2(echo.left() + list_w, top), egui::pos2(echo.right(), echo.top() - 6.0)), CornerRadius { ne: theme.radius + 2, se: theme.radius + 2, ..Default::default() })))
+        }
+        Some((_, _)) => {
+            let pane_h = (screen.height() * 0.4).min(room - list_h).max(120.0);
+            let h = list_h + pane_h;
+            let top = echo.top() - 6.0 - h;
+            (h, echo.width(), Some((Rect::from_min_size(egui::pos2(echo.left(), top), egui::vec2(echo.width(), pane_h)), CornerRadius { nw: theme.radius + 2, ne: theme.radius + 2, ..Default::default() })))
+        }
+        None => (list_h, echo.width(), None),
+    };
     let rect = Rect::from_min_max(egui::pos2(echo.left(), echo.top() - h - 6.0), egui::pos2(echo.right(), echo.top() - 6.0));
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("minibuffer-popup")));
+    // The list, at the bottom of the popup.
+    let list = Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - list_h.min(h)), egui::pos2(rect.left() + list_w, rect.bottom()));
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("minibuffer-popup"));
+    let painter = ui.ctx().layer_painter(layer);
     painter.rect_filled(rect.expand(1.0), theme.radius + 2, theme.border);
     painter.rect_filled(rect, theme.radius + 2, theme.bg_elevated);
     let font = FontId::proportional(theme.font_size);
@@ -949,8 +1140,8 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
     let mut clicked = None;
     for (k, (ci, positions)) in mb.filtered.iter().enumerate().skip(start).take(max_rows) {
         let c = &mb.candidates[*ci];
-        let y = rect.top() + 6.0 + (k - start) as f32 * row;
-        let rrect = Rect::from_min_size(egui::pos2(rect.left() + 6.0, y), egui::vec2(rect.width() - 12.0, row));
+        let y = list.top() + 6.0 + (k - start) as f32 * row;
+        let rrect = Rect::from_min_size(egui::pos2(list.left() + 6.0, y), egui::vec2(list.width() - 12.0, row));
         let resp = ui.interact(rrect, egui::Id::unique(("mb-row", k)), Sense::click());
         if k == mb.selected {
             painter.rect_filled(rrect, theme.radius, theme.selection);
@@ -997,6 +1188,12 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
     }
     if let Some((hint, _)) = &mb.alternate_accept {
         painter.text(egui::pos2(rect.left() + 16.0, rect.bottom() - hint_h / 2.0), Align2::LEFT_CENTER, hint, small, theme.fg_faint);
+    }
+    let selected = mb.current().cloned();
+    if let (Some((pane, corners)), Some((preview, _))) = (pane, &shown) {
+        let mut pui = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(pane));
+        let (label, detail) = selected.map(|c| (c.label, c.detail)).unwrap_or_default();
+        draw_preview_pane(&mut pui, ed, pane, corners, preview, &label, &detail);
     }
     if let Some(k) = clicked {
         if let Some(mb) = &mut ed.minibuffer {

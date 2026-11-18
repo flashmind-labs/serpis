@@ -118,6 +118,10 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("config-auto-reload", json!(false), "Reload init.lua, the Lua extensions and Rust plugins when their files change (watching the config folder). Off: they reload on reload-config or reload-extensions only.");
     ed.defvar("perf-slow-frame-ms", json!(100.0), "Frames slower than this many milliseconds are logged with where their time went (serpis.debug.slow_frames()).");
     ed.defvar("busy-indicator", json!(true), "Show work in progress (connecting to a machine, scripts' serpis.busy.start) as a card with a spinner above the echo area.");
+    ed.defvar("minibuffer-preview", json!("auto"), "Where pickers preview the selected candidate (a buffer in the buffer switcher): \"right\" (beside the list, in a wider palette), \"down\" (under the list), \"window\" (in the focused window, at full size, until the prompt closes), \"off\", or \"auto\" (right when the palette has room, else down; window with minibuffer-style \"bottom\"). C-/ shows or hides it and M-/ moves it while a prompt is open.");
+    ed.defvar("minibuffer-preview-delay", json!(50), "Milliseconds the selection must stay put before the preview follows it (moving through the list doesn't draw every buffer on the way). The first preview shows at once.");
+    ed.defvar("minibuffer-preview-width", json!(0.58), "Share of the palette the preview takes in the \"right\" layout (0.3 to 0.8).");
+    ed.defvar("minibuffer-preview-min-width", json!(1000), "Narrowest frame (in points at the default font size) where \"auto\" puts the preview beside the list; narrower frames get it under the list.");
     ed.defvar("minibuffer-style", json!("palette"), "Where prompts appear: \"palette\" (a floating card near the top, like a command palette) or \"bottom\" (the echo area, Emacs style).");
     ed.defvar("chat-show-thinking", json!(true), "Show the model's thinking in chats; when false only its header (\"Thought · 12 lines\") is shown. chat-toggle-thinking flips it.");
     ed.defvar("chat-show-usage", json!(true), "Show the session's usage in the chat's composer, like pi's footer: ↑input ↓output Rcache-read Wcache-write $cost context%/window.");
