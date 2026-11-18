@@ -349,8 +349,8 @@ impl Info {
 
 fn user_text(m: &Value) -> String {
     match m.get("content") {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(a)) => a.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join(" "),
+        Some(Value::String(s)) => crate::without_context(s).to_string(),
+        Some(Value::Array(a)) => a.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).map(crate::without_context).collect::<Vec<_>>().join(" "),
         _ => String::new(),
     }
 }
