@@ -112,12 +112,12 @@ recommendation), what changed, how it was checked and what wasn't, what's left; 
 how it is known, short and plain, with no padding. A skill of yours named `report` is
 used instead; `chat-report-skill` off, neither.
 
-When an agent finishes a run, its last message is its report (`chat-report`; 80 words or more,
-`chat-report-min-words`): it sits on its own surface, a size up (`chat-report-scale`), under a
-header with its length and reading time, so it doesn't read like the steps before it. Each theme
-has a color for it (`bg_report` in a palette; derived from its colors otherwise: lifted in dark
-themes, outlined paper in light ones); `chat-report-background` overrides it, or `"none"` puts a
-rule above the report instead.
+When an agent finishes a run, its last message is its report if it has the report shape or
+80 words or more (`chat-report`, `chat-report-min-words`): it sits on its own surface, a size up
+(`chat-report-scale`), under a header with its length and reading time, so it doesn't read like
+the steps before it. Each theme has a color for it (`bg_report` in a palette; derived from its
+colors otherwise: lifted in dark themes, outlined paper in light ones);
+`chat-report-background` overrides it, or `"none"` puts a rule above the report instead.
 
 A place in the code named anywhere in a chat (`src/queue.rs:142`, also `path:12-20` and
 `path:12:5`: in the agent's text, your messages, thinking, or what a tool printed, such as grep's

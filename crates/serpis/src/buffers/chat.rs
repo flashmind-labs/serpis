@@ -1596,8 +1596,9 @@ fn finished_reply(entries: &[Entry], running: bool) -> Option<Result<String, Str
 
 /// Markdown to styled lines for a column `avail` points wide.
 /// The reports in a transcript: in each run (from a prompt to the next), the last assistant
-/// message with text, once the run is over and if it has at least `min_words`. Entry index →
-/// its words. Prompts sent while a run goes on (queued) steer it rather than end it.
+/// message with text, once the run is over and if it has the report shape or at least
+/// `min_words`. Entry index → its words. Prompts sent while a run goes on (queued) steer it
+/// rather than end it.
 fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap<usize, usize> {
     let words = |e: &Entry| match e {
         Entry::Assistant { blocks, .. } => blocks.iter().map(|b| if let AssistantContent::Text { text, .. } = b { text.split_whitespace().count() } else { 0 }).sum(),
@@ -1608,7 +1609,9 @@ fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap
     let mut finish = |last: &mut Option<usize>| {
         if let Some(i) = last.take() {
             let n = words(&entries[i]);
-            if n >= min_words {
+            if n >= min_words || matches!(&entries[i], Entry::Assistant { blocks, .. } if blocks.iter().any(|b| {
+                matches!(b, AssistantContent::Text { text, .. } if shaped_report(text).is_some())
+            })) {
                 out.insert(i, n);
             }
         }
@@ -4868,6 +4871,36 @@ mod tests {
         // A prompt queued while it runs steers the run; it does not end it.
         let entries = vec![user("go", false), said(&long), user("also this", true), said(&long)];
         assert_eq!(report_entries(&entries, false, 80).into_keys().collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[test]
+    fn short_shaped_reports_do_not_need_the_word_count_threshold() {
+        use super::{report_entries, shaped_report};
+        let said = |text: &str| Entry::Assistant { blocks: vec![AssistantContent::Text { text: text.into(), text_signature: None }], model: "m".into(), streaming: false, continuation: false, usage: None, error: None, cache: None, elapsed_ms: None };
+        let screenshot = "Done: committed as `6941c189`, on top of the two earlier doctest fixes.\n\n## Changed\n\n- `docs: make every doctest compile` (`6941c189`): all 40 `ignore` examples across 8 files are now compiling `no_run` doctests, with the pseudo-API replaced by the real one. Three stay `text` (two derive examples needing new dev-deps, one behind the `simulation` feature).\n\n## Checked\n\n- `just test --doc -- --include-ignored`: passes, before committing.\n- `git log`: three commits in place, working tree clean.";
+        for text in [screenshot, "Done: fixed it.\n\n## Checked\n\n- Tests: passes.", "Blocked: no access.", "Partly done: the parser is fixed.", "Found it: a race."] {
+            let words = text.split_whitespace().count();
+            assert!(words < 80);
+            assert!(shaped_report(text).is_some());
+            let entries = vec![said(text)];
+            assert_eq!(report_entries(&entries, false, 80).get(&0), Some(&words), "{text}");
+            assert_eq!(report_entries(&entries, false, usize::MAX).get(&0), Some(&words));
+            assert!(report_entries(&entries, true, 80).is_empty());
+        }
+        // Shape does not promote an earlier message when the final reply is unshaped.
+        assert!(report_entries(&[said(screenshot), said("done")], false, 80).is_empty());
+        // An ordinary reply still qualifies by length alone.
+        assert!(report_entries(&[said(&"word ".repeat(79))], false, 80).is_empty());
+        assert_eq!(report_entries(&[said(&"word ".repeat(80))], false, 80).get(&0), Some(&80));
+        // A new prompt closes the previous run even while the next one is running.
+        let entries = vec![said(screenshot), Entry::User { text: "next".into(), queued: false, images: Vec::new() }, said("Done: next task.")];
+        assert_eq!(report_entries(&entries, true, 80).into_iter().collect::<Vec<_>>(), vec![(0, screenshot.split_whitespace().count())]);
+        // Report shape is recognized in any text block, with all words counted.
+        let mut reply = said("A short introduction.");
+        if let Entry::Assistant { blocks, .. } = &mut reply {
+            blocks.push(AssistantContent::Text { text: screenshot.into(), text_signature: None });
+        }
+        assert_eq!(report_entries(&[reply], false, usize::MAX).get(&0), Some(&(3 + screenshot.split_whitespace().count())));
     }
 
     #[test]

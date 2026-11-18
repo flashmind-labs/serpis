@@ -141,8 +141,8 @@ pub fn bootstrap(ed: &mut Editor) {
         None
     });
     ed.defvar("chat-report-skill", json!(true), "Chats' agents (serpis's, Claude Code, Codex) have the report skill serpis comes with (unless you have one named report), and are told to end every task with a report written as it says: the outcome first, then what needs you, what changed, how it was checked, what's left. serpis draws such a report as its parts (chat-report). Off: neither.");
-    ed.defvar("chat-report", json!(true), "Set an agent's report apart: the last message of a finished run, when it has chat-report-min-words or more, gets a rule above it and a header saying it is the report, with its length and reading time.");
-    ed.defvar("chat-report-min-words", json!(80), "Words a run's last message needs to count as a report (chat-report); shorter endings such as \"done\" stay as they are.");
+    ed.defvar("chat-report", json!(true), "Set an agent's report apart: the last message of a finished run, when it has the report shape or meets chat-report-min-words, gets a rule above it and a header saying it is the report, with its length and reading time.");
+    ed.defvar("chat-report-min-words", json!(80), "Words a run's last message needs to count as a report (chat-report) without the report shape; shaped reports qualify at any length. Shorter unshaped endings such as \"done\" stay as they are.");
     ed.defvar("chat-report-background", Value::Null, "The surface a report sits on (chat-report): a color (\"#22242e\"), or \"none\" for a rule above it instead. Unset: the theme's own (its palette's bg_report, else a faint accent tint of its background).");
     ed.defvar("chat-diagrams", json!(true), "Draw Mermaid diagrams (```mermaid blocks) in chats as part of the page: in serpis's font and the theme's colors, a node and its lines lit under the mouse. A flowchart too wide for the column is drawn top to bottom. Off, or one that can't be drawn: its source, as code.");
     ed.defvar("chat-report-scale", json!(1.1), "Size of a report's prose relative to the rest of the chat (1.1, the default: a tenth larger; 1: the same). Code and tables in it keep their size.");
