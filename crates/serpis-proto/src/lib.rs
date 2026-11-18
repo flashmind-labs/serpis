@@ -40,6 +40,10 @@ pub enum Entry {
         error: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache: Option<CacheHit>,
+        /// How long the response took: from the run starting (the message being sent) to this
+        /// reply's end.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
     },
     Tool {
         id: String,
@@ -388,6 +392,7 @@ mod tests {
                 usage: Some(Usage::default()),
                 error: None,
                 cache: Some(CacheHit::Hit(0.94)),
+                elapsed_ms: Some(12_400),
             },
             Entry::Tool { id: "1".into(), name: "bash".into(), args: serde_json::json!({"command": "ls"}), partial: Some("a\n".into()), result: None, running_ms: Some(1200), elapsed_ms: None, ask: None, task: None, steps: vec![] },
             Entry::Info { text: "Compacted".into(), tone: Tone::MetaWarn },

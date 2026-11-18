@@ -159,6 +159,8 @@ pub struct ChatBuffer {
     pub attachments: Vec<Attachment>,
     /// chat-cache-indicator and chat-cache-status, as last read.
     show_cache: (bool, bool),
+    /// `chat-response-time`: answers' usage lines start with how long they took.
+    show_time: bool,
 }
 
 /// How a report's challenge is set up, in the composer: the challenger's model and thinking
@@ -231,6 +233,7 @@ impl ChatBuffer {
             composer_hits: Vec::new(),
             attachments: Vec::new(),
             show_cache: (true, true),
+            show_time: true,
         };
         match (session, given) {
             (Some(path), _) => crate::remote::resume_into(ed, &machine, &path, &chat),
@@ -755,7 +758,7 @@ impl ChatBuffer {
                         push(&mut out, &mut owner, l, Some(ei));
                     }
                 }
-                Entry::Assistant { blocks, model, streaming, continuation, usage, error, cache } => {
+                Entry::Assistant { blocks, model, streaming, continuation, usage, error, cache, elapsed_ms } => {
                     let fold = &v.thinking;
                     // Turns that only call tools get no label of their own.
                     let has_content = blocks.iter().any(|b| !matches!(b, AssistantContent::ToolCall(_)));
@@ -882,7 +885,8 @@ impl ChatBuffer {
                     let calls_tools = blocks.iter().any(|b| matches!(b, AssistantContent::ToolCall(_))) || (tool_compact && matches!(self.entries.get(ei + 1), Some(Entry::Tool { .. })));
                     if let Some(u) = usage.as_ref().filter(|_| !calls_tools || error.is_some()) {
                         if u.total_tokens > 0 {
-                            let mut line = StyledLine::new(format_usage(u), Face::Meta).gap(8.0 * k);
+                            let took = elapsed_ms.filter(|_| self.show_time).map(Duration::from_millis);
+                            let mut line = StyledLine::new(format_usage(u, took), Face::Meta).gap(8.0 * k);
                             if let Some(h) = cache.filter(|_| self.show_cache.0) {
                                 let label = crate::cache_watch::Hit::from(h).label();
                                 line.text.push_str(" · ");
@@ -1078,8 +1082,12 @@ fn usage_label(u: &Usage) -> String {
     parts.join(" ")
 }
 
-fn format_usage(u: &Usage) -> String {
-    let mut s = format!("↳ {} in · {} out", fmt_tokens(u.input), fmt_tokens(u.output));
+fn format_usage(u: &Usage, took: Option<Duration>) -> String {
+    let mut s = "↳ ".to_string();
+    if let Some(d) = took {
+        s.push_str(&format!("{} · ", fmt_duration(d, true)));
+    }
+    s.push_str(&format!("{} in · {} out", fmt_tokens(u.input), fmt_tokens(u.output)));
     if u.cache_read > 0 {
         s.push_str(&format!(" · {} cached", fmt_tokens(u.cache_read)));
     }
@@ -3865,6 +3873,11 @@ impl Buffer for ChatBuffer {
             self.show_cache = show;
             self.dirty = true;
         }
+        let time = ed.var("chat-response-time").and_then(Value::as_bool).unwrap_or(true);
+        if time != self.show_time {
+            self.show_time = time;
+            self.dirty = true;
+        }
         if show.1 && self.cache_json()["state"] == "warm" {
             ui.ctx().request_repaint_after(Duration::from_secs(30));
         }
@@ -4755,6 +4768,7 @@ mod tests {
             usage: None,
             error: error.map(str::to_string),
             cache: None,
+            elapsed_ms: None,
         };
         let text = |t: &str| AssistantContent::Text { text: t.into(), text_signature: None };
         let thought = AssistantContent::Thinking { thinking: "hmm".into(), thinking_signature: None, redacted: false };
@@ -4839,7 +4853,7 @@ mod tests {
     fn a_finished_run_ends_with_its_report() {
         use super::report_entries;
         let user = |t: &str, queued: bool| Entry::User { text: t.into(), queued, images: Vec::new() };
-        let said = |t: &str| Entry::Assistant { blocks: vec![AssistantContent::Text { text: t.into(), text_signature: None }], model: "m".into(), streaming: false, continuation: false, usage: None, error: None, cache: None };
+        let said = |t: &str| Entry::Assistant { blocks: vec![AssistantContent::Text { text: t.into(), text_signature: None }], model: "m".into(), streaming: false, continuation: false, usage: None, error: None, cache: None, elapsed_ms: None };
         let long = "word ".repeat(100);
         let entries = vec![user("go", false), said("Looking."), said(&long), user("again", false), said("done"), user("more", false), said(&long)];
         // The first run's last message is long: its report. "done" is too short. The last run
