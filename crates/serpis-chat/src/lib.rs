@@ -276,6 +276,8 @@ pub struct Chat {
     /// What the running agent's requests are sent with.
     sent: Option<cache_watch::Sent>,
     request_started: Option<Instant>,
+    /// When the running agent started its run (the message was sent), for responses' times.
+    run_started: Option<Instant>,
     /// Each history message's entry id in the session file (None: not saved, or a summary).
     entry_ids: Vec<Option<String>>,
     /// A compaction in progress (cancelled by abort).
@@ -337,6 +339,7 @@ impl Chat {
             cache: Default::default(),
             sent: None,
             request_started: None,
+            run_started: None,
             entry_ids: Vec::new(),
             keep_going_default: true,
             compacting: None,
@@ -1309,7 +1312,7 @@ impl Chat {
     fn ensure_text_segment(&mut self) {
         if !matches!(self.entries.last(), Some(Entry::Assistant { .. })) {
             let model = self.model.as_ref().map(|m| m.id.clone()).unwrap_or_default();
-            self.entries.push(Entry::Assistant { blocks: Vec::new(), model, streaming: true, continuation: true, usage: None, error: None, cache: None });
+            self.entries.push(Entry::Assistant { blocks: Vec::new(), model, streaming: true, continuation: true, usage: None, error: None, cache: None, elapsed_ms: None });
         }
     }
 
@@ -1342,7 +1345,7 @@ impl Chat {
             AgentEvent::MessageStart(Message::Assistant(m)) => {
                 // The agent sends a request right before the response starts.
                 self.request_started = Some(Instant::now());
-                self.entries.push(Entry::Assistant { blocks: Vec::new(), model: m.model, streaming: true, continuation: false, usage: None, error: None, cache: None });
+                self.entries.push(Entry::Assistant { blocks: Vec::new(), model: m.model, streaming: true, continuation: false, usage: None, error: None, cache: None, elapsed_ms: None });
             }
             AgentEvent::MessageStart(Message::ToolResult(_)) => {}
             AgentEvent::MessageDelta(d) => match d {
@@ -1390,14 +1393,17 @@ impl Chat {
                     add_usage(&mut self.totals, &a.usage);
                     let observed = self.observe_cache(host, a).map(CacheHit::from);
                     let failed = matches!(a.stop_reason, StopReason::Error | StopReason::Aborted);
+                    // Answers' times only: replies that go on to tools don't show one.
+                    let took = self.run_started.filter(|_| a.tool_calls().next().is_none()).map(|t| t.elapsed().as_millis() as u64);
                     // Every segment of the response stops streaming; the first one gets its usage.
                     let first = self.entries.iter().rposition(|e| matches!(e, Entry::Assistant { continuation: false, .. }));
                     for i in (first.unwrap_or(0)..self.entries.len()).rev() {
-                        if let Some(Entry::Assistant { streaming, usage, error, continuation, cache, .. }) = self.entries.get_mut(i) {
+                        if let Some(Entry::Assistant { streaming, usage, error, continuation, cache, elapsed_ms, .. }) = self.entries.get_mut(i) {
                             *streaming = false;
                             if !*continuation {
                                 *usage = Some(a.usage.clone());
                                 *cache = observed;
+                                *elapsed_ms = took;
                                 if failed {
                                     let msg = a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason));
                                     if a.stop_reason == StopReason::Error {
@@ -1425,6 +1431,15 @@ impl Chat {
                     entry = Some(w.message(&m)?);
                     Ok(())
                 });
+                // An answer's time is kept for resume (replies that call tools don't show one).
+                let answer = matches!(&m, Message::Assistant(a) if a.tool_calls().next().is_none());
+                let shown = self.entries.iter().rev().find_map(|e| match e {
+                    Entry::Assistant { continuation: false, elapsed_ms, .. } => Some(*elapsed_ms),
+                    _ => None,
+                });
+                if let (true, Some(id), Some(Some(ms))) = (answer, entry.clone(), shown) {
+                    self.append_entry(host, RESPONSE_TIME, json!({"message": id, "ms": ms}));
+                }
                 self.history.push(m);
                 self.entry_ids.push(entry);
             }
@@ -1502,7 +1517,8 @@ impl Chat {
                 self.stopped_at_limit(host);
                 self.compact_if_needed(host);
             }
-            AgentEvent::AgentStart | AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
+            AgentEvent::AgentStart => self.run_started = Some(Instant::now()),
+            AgentEvent::TurnStart | AgentEvent::TurnEnd => {}
             AgentEvent::Task { tool, mut task } => {
                 let mut ended = None;
                 if let Some(Entry::Tool { name, task: t, steps, .. }) = self.tool_entry(&tool) {
@@ -1605,7 +1621,7 @@ impl Chat {
                 if blocks.is_empty() && m.error_message.is_none() {
                     return;
                 }
-                let step = Entry::Assistant { blocks, model: m.model, streaming: false, continuation: false, usage: None, error: m.error_message, cache: None };
+                let step = Entry::Assistant { blocks, model: m.model, streaming: false, continuation: false, usage: None, error: m.error_message, cache: None, elapsed_ms: None };
                 if let Some(Entry::Tool { steps, .. }) = self.tool_entry(parent) {
                     steps.push(step);
                 }
@@ -1714,6 +1730,12 @@ impl Chat {
             .filter(|(k, _)| k == CLAUDE_NOTE)
             .filter_map(|(_, d)| Some((d["at"].as_u64()? as usize, d["text"].as_str()?.to_string())))
             .collect();
+        let times: HashMap<&str, u64> = l
+            .entries
+            .iter()
+            .filter(|(k, _)| k == RESPONSE_TIME)
+            .filter_map(|(_, d)| Some((d["message"].as_str()?, d["ms"].as_u64()?)))
+            .collect();
         for (i, m) in l.messages.iter().enumerate() {
             // Why Claude Code went on by itself, where it did.
             for (_, text) in notes.iter().filter(|(at, _)| *at == i) {
@@ -1737,6 +1759,7 @@ impl Chat {
                         usage: Some(a.usage.clone()),
                         error: failed.then(|| a.error_message.clone().unwrap_or_else(|| format!("{:?}", a.stop_reason))),
                         cache: None,
+                        elapsed_ms: l.message_ids.get(i).cloned().flatten().and_then(|id| times.get(id.as_str()).copied()),
                     });
                     for tc in a.tool_calls() {
                         self.entries.push(Entry::Tool { id: tc.id.clone(), name: tc.name.clone(), args: tc.arguments.clone(), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] });
@@ -1914,6 +1937,8 @@ pub const KEEP_GOING: &str = "keep-going";
 pub const CLAUDE_MODE: &str = "claude-code-mode";
 pub const CLAUDE_TOOL: &str = "claude-code-tool";
 pub const CLAUDE_NOTE: &str = "claude-code-note";
+/// How long an answer took: `{message = entry id, ms}`.
+pub const RESPONSE_TIME: &str = "response-time";
 
 /// What a tool call cut off by its node stopping gets as its result.
 pub const CUT_OFF_TOOL: &str = "Not run to the end: the machine's serpis-node stopped while this tool ran (a crash, a restart or a reboot), and it was not run again. It may have done some or all of its work: check before running it again.";

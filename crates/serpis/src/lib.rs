@@ -154,6 +154,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-disabled-tools", json!([]), "Tool names hidden from the agent.");
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");
     ed.defvar("agent-cache-retention", json!("long"), "How long providers keep a chat's prompt cached: \"long\" (1 hour on Anthropic-style caches, 24 hours where OpenAI-style caches allow it), \"short\" (5 minutes) or \"none\". Or per provider: {\"default\": \"long\", \"openrouter\": \"short\"}. 1-hour writes cost 2x input instead of 1.25x, but only for new tokens; a short cache expires during pauses and the next message rewrites the whole conversation.");
+    ed.defvar("chat-response-time", json!(true), "Start each answer's usage line with how long it took, from sending the message to the answer's end (\"↳ 14s · 993 in · …\").");
     ed.defvar("chat-cache-indicator", json!(true), "Show how each response used the prompt cache (\"cache 96%\", \"cache miss\", \"cache new\") after its token counts.");
     ed.defvar("chat-cache-status", json!(true), "Show the chat's cache hit rate and whether its cache is warm or cold in its window header; clicking it runs chat-cache-report.");
     ed.defvar("chat-cache-miss-notice", json!("inline"), "Announce a prompt cache miss and its cause: \"inline\" (a line in the chat), \"message\" (the echo area) or \"off\". The cache-miss hook runs either way.");
