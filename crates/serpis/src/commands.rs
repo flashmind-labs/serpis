@@ -155,6 +155,24 @@ pub fn with_terminal<R>(ed: &mut Editor, f: impl FnOnce(&mut TerminalBuffer, &mu
 
 pub const CACHE_WARN_ACTIONS: [&str; 5] = ["model", "thinking", "tools", "refresh", "expired"];
 
+fn accept_chat_model(id: BufferId, make_default: bool) -> crate::minibuffer::AcceptFn {
+    Box::new(move |ed, candidate, _| {
+        let Some(c) = candidate else { return };
+        let same = ed.with_buffer_as::<ChatBuffer, _>(id, |chat, _| chat.state_now().model.as_deref() == Some(c.value.as_str())).unwrap_or(false);
+        let change = move |ed: &mut Editor| {
+            if let Err(e) = ed.set_chat_model(id, &c.value) {
+                ed.error(format!("{e:#}"));
+                return;
+            }
+            if make_default {
+                ed.set_var("agent-model", Value::String(c.value.clone()));
+            }
+            ed.message(format!("{}: {}", if make_default { "Model and default" } else { "Model" }, c.value));
+        };
+        if same { change(ed) } else { guard_cache(ed, "model", "Switching the model", change) }
+    })
+}
+
 /// Run `act` on the current chat, warning first if it throws a warm prompt cache away (above
 /// cache-warn-threshold, for actions in cache-warn-actions). cache-warn "confirm" asks before,
 /// "notice" says so after; a before-cache-invalidate handler can veto (false) or reword it.
@@ -1335,7 +1353,7 @@ pub fn install(ed: &mut Editor) {
     });
     ed.define_command("chat-history-previous", "Recall the previous prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_prev()));
     ed.define_command("chat-history-next", "Recall the next prompt.", o, |ed, _| with_chat(ed, |c, _| c.history_next()));
-    ed.define_command("chat-select-model", "Choose the model for this chat (param: provider/model-id).", o, |ed, a| {
+    ed.define_command("chat-select-model", "Choose the model for this chat (param: provider/model-id). In the local picker, C-s also sets agent-model, the default for new chats.", o, |ed, a| {
         if let Some(spec) = a.str(0).map(str::to_string) {
             let id = ed.chat_id(None)?;
             guard_cache(ed, "model", "Switching the model", move |ed| {
@@ -1364,6 +1382,8 @@ pub fn install(ed: &mut Editor) {
             });
             return Ok(());
         }
+        let id = ed.chat_id(None)?;
+        let default = crate::buffers::chat::default_model(ed).map(|m| format!("{}/{}", m.provider, m.id));
         let configured = ed.registry.configured_providers();
         let mut models: Vec<serpis_ai::Model> = ed
             .registry
@@ -1378,20 +1398,15 @@ pub fn install(ed: &mut Editor) {
             .map(|m| {
                 let ctx = crate::buffers::chat::fmt_tokens(m.context_window);
                 let cost = if m.cost.input > 0.0 { format!("  ${}/{}", m.cost.input, m.cost.output) } else { String::new() };
-                Candidate::new(format!("{}/{}", m.provider, m.id)).detail(format!("{}  {ctx}{cost}{}", m.display_name(), if m.reasoning { "  ◆" } else { "" }))
+                let spec = format!("{}/{}", m.provider, m.id);
+                let marker = if default.as_deref() == Some(spec.as_str()) { "  · default" } else { "" };
+                Candidate::new(spec).detail(format!("{}  {ctx}{cost}{}{marker}", m.display_name(), if m.reasoning { "  ◆" } else { "" }))
             })
             .collect();
-        ed.completing_read("Model: ", cands, true, move |ed, c, _| {
-            let Some(c) = c else { return };
-            let Some(m) = models.into_iter().find(|m| format!("{}/{}", m.provider, m.id) == c.value) else { return };
-            let same = with_chat(ed, |chat, _| chat.state_now().model.as_deref() == Some(c.value.as_str())).unwrap_or(false);
-            let change = move |ed: &mut Editor| {
-                ed.set_var("agent-model", Value::String(c.value.clone()));
-                let _ = with_chat(ed, |chat, _| chat.set_model(m));
-                ed.message(format!("Model: {}", c.value));
-            };
-            if same { change(ed) } else { guard_cache(ed, "model", "Switching the model", change) }
-        });
+        ed.completing_read("Model: ", cands, true, accept_chat_model(id, false));
+        if let Some(mb) = &mut ed.minibuffer {
+            mb.alternate_accept = Some(("Enter selects  ·  Ctrl+S selects and sets default".into(), accept_chat_model(id, true)));
+        }
         Ok(())
     });
     ed.define_command("chat-refresh-models", "Refetch model catalogs.", o, |ed, _| {

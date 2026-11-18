@@ -68,7 +68,10 @@ cargo run -p serpis-bin            # needs zig 0.16 on PATH (libghostty-vt is bu
 
 Models, keys and defaults come from the same files as pi: `~/.serpis/agent/{models.json,auth.json}`,
 falling back to `~/.pi/agent/`, plus the usual `*_API_KEY` variables. Your pi default model and
-thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) switches models.
+thinking level are picked up automatically. `chat-select-model` (`C-c C-m`) switches the current
+chat's model. In the local model picker, Enter selects for this chat; Ctrl+S selects and also
+sets `agent-model`, the default for new chats. Set `serpis.var.set("agent-model", "provider/model-id")`
+in your config to keep a default across restarts.
 
 ## Keys (regular scheme, macOS)
 

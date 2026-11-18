@@ -775,8 +775,8 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
         last = section;
     }
     let headings_h = headings.iter().flatten().count() as f32 * section_h;
-    let hint_h = if mb.searchable { 0.0 } else { (30.0 * k).round() };
-    let list_h = if n > 0 { n as f32 * row_h + headings_h + 12.0 * k + hint_h } else { 0.0 };
+    let hint_h = if !mb.searchable || mb.alternate_accept.is_some() { (30.0 * k).round() } else { 0.0 };
+    let list_h = if n > 0 { n as f32 * row_h + headings_h + 12.0 * k } else { 0.0 } + hint_h;
     let card = Rect::from_min_size(egui::pos2(full.center().x - w / 2.0, full.top() + (full.height() * 0.12).max(40.0)), egui::vec2(w, input_h + list_h));
     let radius = (12.0 * k).round() as u8;
     let shadow = egui::epaint::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if t.dark { 140 } else { 50 }) };
@@ -891,11 +891,12 @@ fn draw_palette(ui: &mut egui::Ui, ed: &mut Editor, full: Rect) {
             }
         }
     }
-    if n > 0 && !mb.searchable {
+    if hint_h > 0.0 {
         // What the keys do, along the bottom: there's no search field to say it's a prompt.
         let cy = card.bottom() - hint_h / 2.0;
         painter.hline(card.left()..=card.right(), card.bottom() - hint_h, Stroke::new(1.0, t.border));
-        chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, cy), "SPC or RET ticks  ·  j k move  ·  ESC closes", small.clone(), t.fg_faint, w - 36.0 * k);
+        let hint = mb.alternate_accept.as_ref().map(|(hint, _)| hint.as_str()).unwrap_or("SPC or RET ticks  ·  j k move  ·  ESC closes");
+        chrome::text(&painter, egui::pos2(card.left() + 18.0 * k, cy), hint, small.clone(), t.fg_faint, w - 36.0 * k);
     }
     // A click outside the palette dismisses it.
     let outside = pui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !card.contains(p)));
@@ -937,7 +938,8 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
     let max_rows = 14usize;
     let n = mb.filtered.len().min(max_rows);
     let start = mb.selected.saturating_sub(max_rows - 1);
-    let h = n as f32 * row + 12.0;
+    let hint_h = if mb.alternate_accept.is_some() { row } else { 0.0 };
+    let h = n as f32 * row + 12.0 + hint_h;
     let rect = Rect::from_min_max(egui::pos2(echo.left(), echo.top() - h - 6.0), egui::pos2(echo.right(), echo.top() - 6.0));
     let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("minibuffer-popup")));
     painter.rect_filled(rect.expand(1.0), theme.radius + 2, theme.border);
@@ -992,6 +994,9 @@ fn draw_minibuffer_popup(ui: &mut egui::Ui, ed: &mut Editor, echo: Rect) {
                 painter.text(rrect.right_center() - egui::vec2(10.0, 0.0), Align2::RIGHT_CENTER, d, small.clone(), theme.fg_faint);
             }
         }
+    }
+    if let Some((hint, _)) = &mb.alternate_accept {
+        painter.text(egui::pos2(rect.left() + 16.0, rect.bottom() - hint_h / 2.0), Align2::LEFT_CENTER, hint, small, theme.fg_faint);
     }
     if let Some(k) = clicked {
         if let Some(mb) = &mut ed.minibuffer {

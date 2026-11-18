@@ -64,6 +64,8 @@ pub struct Minibuffer {
     pub selected: usize,
     pub require_match: bool,
     on_accept: Option<AcceptFn>,
+    /// An explicit alternate way to accept, with its displayed key hint.
+    pub alternate_accept: Option<(String, AcceptFn)>,
     last_query: Option<String>,
     pub on_select: Option<SelectFn>,
     pub on_cancel: Option<CancelFn>,
@@ -254,6 +256,7 @@ impl Editor {
             selected: 0,
             require_match,
             on_accept: Some(Box::new(on_accept)),
+            alternate_accept: None,
             last_query: None,
             on_select: None,
             on_cancel: None,
@@ -292,6 +295,7 @@ impl Editor {
             selected: 0,
             require_match: false,
             on_accept: Some(Box::new(on_accept)),
+            alternate_accept: None,
             last_query: None,
             on_select: None,
             on_cancel: None,
@@ -322,6 +326,13 @@ impl Editor {
 }
 
 pub fn accept(ed: &mut Editor) {
+    accept_with(ed, false);
+}
+
+fn accept_with(ed: &mut Editor, alternate: bool) {
+    if alternate && ed.minibuffer.as_ref().is_none_or(|mb| mb.alternate_accept.is_none()) {
+        return;
+    }
     let Some(mut mb) = ed.minibuffer.take() else { return };
     mb.refilter();
     if let Some(f) = mb.on_toggle.clone() {
@@ -348,7 +359,8 @@ pub fn accept(ed: &mut Editor) {
     if let (Some(cat), Some(c)) = (&mb.frecency, &cand) {
         crate::frecency::bump(ed, cat, &c.value);
     }
-    if let Some(f) = mb.on_accept.take() {
+    let on_accept = if alternate { mb.alternate_accept.take().map(|(_, f)| f) } else { mb.on_accept.take() };
+    if let Some(f) = on_accept {
         f(ed, cand, input);
     }
 }
@@ -491,6 +503,10 @@ pub fn install(ed: &mut Editor) {
         accept(ed);
         Ok(())
     });
+    ed.define_command("minibuffer-accept-alternate", "Accept with the prompt's alternate action, when offered.", o, |ed, _| {
+        accept_with(ed, true);
+        Ok(())
+    });
     ed.define_command("minibuffer-next", "Select the next candidate.", o, |ed, a: &Args| {
         move_sel(ed, a.count() as isize);
         Ok(())
@@ -579,6 +595,7 @@ pub fn install(ed: &mut Editor) {
     for (k, c) in [
         ("RET", "minibuffer-accept"),
         ("C-m", "minibuffer-accept"),
+        ("C-s", "minibuffer-accept-alternate"),
         ("C-n", "minibuffer-next"),
         ("<down>", "minibuffer-next"),
         ("C-j", "minibuffer-next"),
