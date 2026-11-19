@@ -4653,7 +4653,7 @@ dependencies = [
 
 [[package]]
 name = "serpis"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4698,7 +4698,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-agent"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4724,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-ai"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4747,14 +4747,14 @@ dependencies = [
 
 [[package]]
 name = "serpis-bin"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serpis",
 ]
 
 [[package]]
 name = "serpis-chat"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "dirs",
@@ -4771,7 +4771,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-mobile"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4791,7 +4791,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-node"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "avt",
@@ -4816,7 +4816,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-proto"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-status"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -4835,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "serpis-testkit"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
