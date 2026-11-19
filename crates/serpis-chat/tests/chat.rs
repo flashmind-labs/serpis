@@ -200,6 +200,23 @@ fn a_chat_runs_without_a_window_and_shows_elsewhere() {
     back.restore(&mut host, &serpis_chat::session::load(&path).unwrap());
     assert!(back.entries().iter().any(|e| matches!(e, Entry::User { text, .. } if text == "/skill:review the last commit")));
 
+    host.vars.insert("agent-max-retries".into(), json!(0));
+    mock.set_script(Box::new(|_, _| serpis_testkit::mock::Reply::Error(429, "Rate limit exceeded".into())));
+    chat.submit(&mut host, "busy hour".into(), vec![], false, None).unwrap();
+    finish(&mut chat, &mut host, &woken, &mut mirror);
+    assert!(matches!(chat.entries().last(), Some(Entry::Assistant { error: Some(e), .. }) if e.contains("429")), "{:#?}", chat.entries().last());
+    mock.set_script(serpis_testkit::commands());
+    let sent_before = mock.log().len();
+    chat.retry_turn(&mut host).unwrap();
+    finish(&mut chat, &mut host, &woken, &mut mirror);
+    assert_eq!(mock.log().len(), sent_before + 1);
+    assert!(matches!(chat.entries().last(), Some(Entry::Assistant { error: None, .. })), "{:#?}", chat.entries().last());
+    let messages = mock.log().last().unwrap().body["messages"].as_array().unwrap().clone();
+    assert_eq!(messages.iter().filter(|m| m["content"].to_string().contains("busy hour")).count(), 1, "{messages:#?}");
+    assert!(chat.retry_turn(&mut host).is_err(), "nothing failed: nothing to retry");
+    host.vars.remove("agent-max-retries");
+    host.notices.clear();
+
     // SYSTEM.md takes the place of serpis's own prompt; APPEND_SYSTEM.md and the project's
     // instructions still follow it.
     std::fs::write(config.join("SYSTEM.md"), "You are Reviewer, a careful code reviewer.\n").unwrap();

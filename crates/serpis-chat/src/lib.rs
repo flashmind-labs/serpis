@@ -606,6 +606,7 @@ impl Chat {
             cwd: self.cwd.clone(),
             native_web_search: native,
             max_tokens: None,
+            max_retries: Some(host.var_u64("agent-max-retries", serpis_ai::DEFAULT_MAX_RETRIES.into()) as u32),
             cache_retention,
             hooks: host.tool_hooks(),
             sequential_tools: false,
@@ -1172,6 +1173,21 @@ impl Chat {
         let Some(cfg) = self.agent_config(host) else { return false };
         self.start_agent(host, cfg, Vec::new());
         true
+    }
+
+    pub fn retry_turn(&mut self, host: &mut dyn Host) -> Result<(), String> {
+        if self.running() {
+            return Err("The agent is still running".into());
+        }
+        if self.is_claude_code() || self.is_codex() {
+            return Err("This chat's agent retries on its own: send a message to go on".into());
+        }
+        if !matches!(self.history.last(), Some(Message::Assistant(a)) if matches!(a.stop_reason, StopReason::Error | StopReason::Aborted)) {
+            return if self.continue_turn(host) { Ok(()) } else { Err("There is no failed turn to retry".into()) };
+        }
+        let cfg = self.agent_config(host).ok_or("This chat has no model")?;
+        self.start_agent(host, cfg, Vec::new());
+        Ok(())
     }
 
     /// Give the last response's tool calls that have no result (their node stopped while they

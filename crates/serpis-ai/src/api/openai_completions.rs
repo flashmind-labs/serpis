@@ -702,7 +702,12 @@ pub async fn stream_inner(resp: reqwest::Response, model: Model, opts: StreamOpt
         }
         let Ok(chunk) = serde_json::from_str::<Value>(&ev.data) else { return Ok(true) };
         if let Some(err) = chunk.get("error") {
-            anyhow::bail!("{}", err.get("message").and_then(Value::as_str).unwrap_or(&err.to_string()).to_string());
+            let message = err.get("message").and_then(Value::as_str).unwrap_or(&err.to_string()).to_string();
+            let status = err.get("code").and_then(|c| c.as_u64().or_else(|| c.as_str()?.parse().ok()));
+            return Err(match status.and_then(|s| u16::try_from(s).ok()) {
+                Some(status) => ProviderError { status, message: format!("{status} {message}"), retry_after: None }.into(),
+                None => anyhow::anyhow!(message),
+            });
         }
         if em.output.response_id.is_none() {
             em.output.response_id = chunk.get("id").and_then(Value::as_str).map(str::to_string);

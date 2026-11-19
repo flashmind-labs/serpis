@@ -101,6 +101,7 @@ pub fn start(config: Config, rt: tokio::runtime::Handle) -> Result<Running> {
     let (tx, rx) = mpsc::channel();
     let paths = config.agent_dir.clone().map(|agent_dir| serpis_ai::Paths { agent_dir }).unwrap_or_else(serpis_ai::Paths::default_paths);
     let registry = serpis_ai::Registry::new(paths);
+    serpis_agent::tools::web_search::use_registry(registry.clone());
     for e in registry.load_errors() {
         tracing::warn!("{e}");
     }
@@ -1073,6 +1074,10 @@ impl Node {
                 if !self.with_chat(&chat, |c, _| c.stop_task(&task))? {
                     return Err("Nothing runs that task: the chat's Claude Code has stopped".into());
                 }
+                Response::Ok
+            }
+            Request::Retry { chat } => {
+                self.with_chat(&chat, |c, h| c.retry_turn(h))??;
                 Response::Ok
             }
             Request::Compact { chat, instructions } => {

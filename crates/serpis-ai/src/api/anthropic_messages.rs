@@ -542,7 +542,13 @@ impl EventReader {
             }
             "error" => {
                 let msg = data.pointer("/error/message").and_then(Value::as_str).unwrap_or("Unknown error");
-                anyhow::bail!("{msg}");
+                let status = match data.pointer("/error/type").and_then(Value::as_str) {
+                    Some("rate_limit_error") => 429,
+                    Some("overloaded_error") => 529,
+                    Some("api_error") => 500,
+                    _ => anyhow::bail!("{msg}"),
+                };
+                return Err(ProviderError { status, message: msg.to_string(), retry_after: None }.into());
             }
             _ => {}
         }

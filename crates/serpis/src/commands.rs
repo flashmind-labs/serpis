@@ -842,7 +842,7 @@ pub fn install(ed: &mut Editor) {
     });
 
     // ---------------------------------------------------------------- chat
-    ed.define_command("chat-send", "Send the prompt (or steer the running agent).", o, |ed, _| {
+    ed.define_command("chat-send", "Send the prompt (or steer the running agent). With nothing typed after a turn failed, send that turn again (chat-retry).", o, |ed, _| {
         with_chat(ed, |c, ed| {
             if c.focus == Focus::Transcript {
                 if !c.toggle_fold_at_cursor() {
@@ -851,6 +851,19 @@ pub fn install(ed: &mut Editor) {
                 return;
             }
             c.send(ed, false)
+        })
+    });
+    ed.define_command("chat-close-image", "Close the image shown enlarged over the chat.", o, |ed, _| with_chat(ed, |c, _| c.close_image()));
+    for k in ["ESC", "C-g"] {
+        ed.bind("chat-image", k, "chat-close-image", o);
+    }
+    ed.define_command("chat-retry", "Send the chat's failed turn again, as it was (a provider error its retries didn't outlast, a stop).", o, |ed, _| {
+        with_chat(ed, |c, ed| {
+            if c.can_retry() {
+                c.retry(ed);
+            } else {
+                ed.message("There is no failed turn to retry");
+            }
         })
     });
     ed.define_command("chat-send-follow-up", "Queue the prompt to run after the agent finishes.", o, |ed, _| with_chat(ed, |c, ed| c.send(ed, true)));

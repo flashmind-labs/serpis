@@ -136,6 +136,8 @@ pub struct ChatBuffer {
     comment_lines: Vec<(usize, u64)>,
     /// Where `find:<i>` links go: (text to find, entry, after it rather than before it).
     find_targets: Vec<(String, usize, bool)>,
+    zoomed: Option<u64>,
+    hovered_link: Option<String>,
     /// The comment text last saved while writing, and when.
     writing_saved: (String, Option<Instant>),
     /// Transcript lines that belong to thinking blocks (click or TAB folds them).
@@ -232,6 +234,8 @@ impl ChatBuffer {
             report_heads: Vec::new(),
             comment_lines: Vec::new(),
             find_targets: Vec::new(),
+            zoomed: None,
+            hovered_link: None,
             writing_saved: (String::new(), None),
             style_key: 0,
             composer_hits: Vec::new(),
@@ -511,6 +515,9 @@ impl ChatBuffer {
         let text = self.prompt.text().trim().to_string();
         let review = !self.review.drafts().is_empty();
         if text.is_empty() && self.attachments.is_empty() && !review {
+            if !follow_up && self.can_retry() {
+                self.retry(ed);
+            }
             return;
         }
         self.prompt.clear();
@@ -562,6 +569,24 @@ impl ChatBuffer {
             }
         });
         // Sent now, after what was asked before it.
+        self.node.flush(ed);
+    }
+
+    pub fn can_retry(&self) -> bool {
+        let harness = self.node.state.model.as_deref().is_some_and(|m| {
+            [serpis_ai::claude_code::PROVIDER, serpis_ai::codex::PROVIDER].iter().any(|p| m.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+        });
+        !harness && failed_turn(&self.entries, self.running())
+    }
+
+    pub fn retry(&mut self, ed: &mut Editor) {
+        self.view.follow_tail = true;
+        let (machine, local) = (self.node.machine.clone(), self.node.local());
+        self.node.post_then(Request::Retry { chat: self.node.chat.clone() }, move |ed, r| {
+            if let Err(why) = r {
+                ed.warn(if local { why } else { format!("{machine}: {why}") });
+            }
+        });
         self.node.flush(ed);
     }
 
@@ -958,7 +983,12 @@ impl ChatBuffer {
         // Places in the code are links, wherever they are in the chat.
         for l in &mut out {
             if l.image.is_none() {
-                l.links.extend(code_links(&l.text));
+                let found: Vec<_> = code_links(&l.text).into_iter().chain(web_links(&l.text)).collect();
+                for (r, to) in found {
+                    if !l.links.iter().any(|(o, _)| o.start < r.end && r.start < o.end) {
+                        l.links.push((r, to));
+                    }
+                }
             }
         }
         // Each report's header: its first line.
@@ -1107,10 +1137,41 @@ fn format_usage(u: &Usage, took: Option<Duration>) -> String {
 /// removed. `_` never emphasizes inside a word (snake_case names stay whole), and a marker
 /// with nothing to close it stays as written.
 fn inline_spans(text: &str) -> (String, Vec<(Range<usize>, Face)>) {
-    let mut out = String::with_capacity(text.len());
-    let mut spans = Vec::new();
-    inline_into(text, Emphasis::default(), &mut out, &mut spans);
+    let (out, spans, _) = inline_parts(text);
     (out, spans)
+}
+
+fn inline_parts(text: &str) -> (String, Vec<(Range<usize>, Face)>, Vec<(Range<usize>, String)>) {
+    let mut out = String::with_capacity(text.len());
+    let (mut spans, mut links) = (Vec::new(), Vec::new());
+    inline_into(text, Emphasis::default(), &mut out, &mut spans, &mut links);
+    let col = |b: usize| out[..b].chars().count();
+    let links = links.into_iter().map(|(r, url): (Range<usize>, String)| (col(r.start)..col(r.end), url)).collect();
+    (out, spans, links)
+}
+
+fn is_web_link(l: &str) -> bool {
+    l.starts_with("https://") || l.starts_with("http://")
+}
+
+fn web_links(text: &str) -> Vec<(Range<usize>, String)> {
+    static URL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = URL.get_or_init(|| regex::Regex::new(r#"https?://[^\s<>"'`\[\]{}|\\^]+"#).unwrap());
+    re.find_iter(text)
+        .filter_map(|m| {
+            let mut url = m.as_str();
+            loop {
+                let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']);
+                let trimmed = if trimmed.ends_with(')') && trimmed.matches('(').count() < trimmed.matches(')').count() { &trimmed[..trimmed.len() - 1] } else { trimmed };
+                if trimmed == url {
+                    break;
+                }
+                url = trimmed;
+            }
+            let start = text[..m.start()].chars().count();
+            (url.len() > "https://".len()).then(|| (start..start + url.chars().count(), url.to_string()))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1209,7 +1270,7 @@ fn emphasis_close(s: &str, c: char, n: usize) -> Option<usize> {
     None
 }
 
-fn inline_into(text: &str, em: Emphasis, out: &mut String, spans: &mut Vec<(Range<usize>, Face)>) {
+fn inline_into(text: &str, em: Emphasis, out: &mut String, spans: &mut Vec<(Range<usize>, Face)>, links: &mut Vec<(Range<usize>, String)>) {
     let mut i = 0;
     let mut prev: Option<char> = None;
     while i < text.len() {
@@ -1242,7 +1303,12 @@ fn inline_into(text: &str, em: Emphasis, out: &mut String, spans: &mut Vec<(Rang
             if let Some(close) = rest.find("](") {
                 if let Some(end) = rest[close + 2..].find(')') {
                     if !rest[1..close].contains('[') {
-                        inline_into(&rest[1..close], Emphasis { link: true, ..em }, out, spans);
+                        let start = out.len();
+                        inline_into(&rest[1..close], Emphasis { link: true, ..em }, out, spans, links);
+                        let url = rest[close + 2..close + 2 + end].trim();
+                        if out.len() > start && !url.is_empty() {
+                            links.push((start..out.len(), url.to_string()));
+                        }
                         i += close + 2 + end + 1;
                         prev = Some(')');
                         continue;
@@ -1252,7 +1318,7 @@ fn inline_into(text: &str, em: Emphasis, out: &mut String, spans: &mut Vec<(Rang
         }
         if rest.starts_with("~~") {
             if let Some(end) = rest[2..].find("~~").filter(|e| *e > 0) {
-                inline_into(&rest[2..2 + end], Emphasis { strike: true, ..em }, out, spans);
+                inline_into(&rest[2..2 + end], Emphasis { strike: true, ..em }, out, spans, links);
                 i += 2 + end + 2;
                 prev = Some('~');
                 continue;
@@ -1268,7 +1334,7 @@ fn inline_into(text: &str, em: Emphasis, out: &mut String, spans: &mut Vec<(Rang
             match found {
                 Some((k, end)) => {
                     let inner = Emphasis { bold: em.bold || k >= 2, italic: em.italic || k != 2, ..em };
-                    inline_into(&rest[k..k + end], inner, out, spans);
+                    inline_into(&rest[k..k + end], inner, out, spans, links);
                     i += k + end + k;
                 }
                 // Not emphasis: the run as written.
@@ -1567,6 +1633,19 @@ fn list_item(raw: &str) -> Option<(usize, String, &str)> {
     None
 }
 
+fn failed_turn(entries: &[Entry], running: bool) -> bool {
+    if running {
+        return false;
+    }
+    let Some(last_user) = entries.iter().rposition(|e| matches!(e, Entry::User { .. })) else { return false };
+    let after = &entries[last_user + 1..];
+    match after.iter().rposition(|e| !matches!(e, Entry::Info { .. })).map(|i| &after[i]) {
+        Some(Entry::Assistant { streaming: false, error: Some(_), .. }) => true,
+        None => after.iter().any(|e| matches!(e, Entry::Info { tone: Tone::Error, .. })),
+        _ => false,
+    }
+}
+
 /// [`ChatBuffer::finished_reply`], on a transcript: after the last prompt, the agent's last
 /// message (notices after it skipped), or why it has none: the error it ended on, else that it
 /// stopped on no text. None while it runs, or before anything came back.
@@ -1765,9 +1844,9 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
         }
     };
     let mut out = Vec::new();
-    let (text, spans) = inline_spans(&sh.headline);
+    let (text, spans, links) = inline_parts(&sh.headline);
     // A size up from the text, a little under the section headings, with a heading's leading.
-    let mut headline = StyledLine::new(text, Face::Heading).spans(spans).gap(6.0 * k).pad(0.0, 6.0 * k);
+    let mut headline = StyledLine::new(text, Face::Heading).spans(spans).links(links).gap(6.0 * k).pad(0.0, 6.0 * k);
     prose(&mut headline, scale * 0.9);
     out.push(headline);
     for mut l in markdown_lines(&sh.intro, t, m, avail, diagrams) {
@@ -1934,32 +2013,32 @@ fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32, 
         }
         if let Some(h) = trimmed.strip_prefix('#') {
             let level = 1 + h.chars().take_while(|c| *c == '#').count();
-            let (s, spans) = inline_spans(h.trim_start_matches('#').trim());
+            let (s, spans, links) = inline_parts(h.trim_start_matches('#').trim());
             let face = if level <= 2 { Face::Heading } else { Face::Bold };
             // More room above than below, so a heading reads as the start of its section.
-            out.push(StyledLine::new(s, face).spans(spans).gap(gap.max(if level <= 2 { 30.0 } else { 22.0 } * k)).pad(0.0, 2.0 * k));
+            out.push(StyledLine::new(s, face).spans(spans).links(links).gap(gap.max(if level <= 2 { 30.0 } else { 22.0 } * k)).pad(0.0, 2.0 * k));
             gap = 0.0;
             prev_list = false;
             continue;
         }
         if let Some((level, marker, body)) = list_item(raw) {
-            let (s, spans) = inline_spans(body);
+            let (s, spans, links) = inline_parts(body);
             let indent = 22.0 * k + level as f32 * 20.0 * k;
             let g = if prev_list { 3.0 * k } else { gap.max(4.0 * k) };
-            out.push(StyledLine::new(s, Face::AssistantText).spans(spans).indent(indent).gap(g).marker(marker, Face::Dim));
+            out.push(StyledLine::new(s, Face::AssistantText).spans(spans).links(links).indent(indent).gap(g).marker(marker, Face::Dim));
             gap = 0.0;
             prev_list = true;
             continue;
         }
         if let Some(q) = trimmed.strip_prefix('>') {
-            let (s, spans) = inline_spans(q.trim_start());
+            let (s, spans, links) = inline_parts(q.trim_start());
             let blk = Block::new(Color32::TRANSPARENT).bar(t.border).nth(0, 1);
-            out.push(StyledLine::new(s, Face::Dim).spans(spans).block(blk).indent(14.0 * k).gap(gap).pad(2.0 * k, 2.0 * k));
+            out.push(StyledLine::new(s, Face::Dim).spans(spans).links(links).block(blk).indent(14.0 * k).gap(gap).pad(2.0 * k, 2.0 * k));
             gap = 0.0;
             continue;
         }
-        let (s, spans) = inline_spans(raw.trim_end());
-        out.push(StyledLine::new(s, Face::AssistantText).spans(spans).gap(gap));
+        let (s, spans, links) = inline_parts(raw.trim_end());
+        out.push(StyledLine::new(s, Face::AssistantText).spans(spans).links(links).gap(gap));
         gap = 0.0;
         prev_list = false;
     }
@@ -3026,6 +3105,50 @@ impl ChatBuffer {
         self.writing_saved = (text, Some(Instant::now()));
     }
 
+    fn image_at(&self, line: usize, pt: egui::Pos2) -> Option<u64> {
+        let (id, size) = self.lines.get(line)?.image?;
+        Rect::from_min_size(self.view.line_origin(line)?, size).contains(pt).then_some(id)
+    }
+
+    pub fn hovered_link(&self) -> Option<String> {
+        self.hovered_link.clone()
+    }
+
+    pub fn zoomed_image(&self) -> Option<u64> {
+        self.zoomed
+    }
+
+    pub fn close_image(&mut self) {
+        self.zoomed = None;
+    }
+
+    fn draw_zoomed(&mut self, ctx: &egui::Context, rect: Rect, theme: &crate::theme::Theme, k: f32) {
+        let Some(id) = self.zoomed else { return };
+        let Some((w, h)) = crate::images::size(id) else {
+            self.zoomed = None;
+            return;
+        };
+        let natural = egui::vec2(w.max(1) as f32, h.max(1) as f32) / ctx.pixels_per_point();
+        let room = rect.shrink(32.0 * k);
+        let s = (room.width() / natural.x).min((room.height() - 28.0 * k) / natural.y).min(2.0).max(0.01);
+        let image = Rect::from_center_size(room.center() - egui::vec2(0.0, 14.0 * k), natural * s);
+        let close = egui::Area::new(egui::Id::unique("chat-image"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .sizing_pass(false)
+            .show(ctx, |ui| ui.allocate_rect(rect, egui::Sense::click()).clicked())
+            .inner;
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("chat-image-shown"))).with_clip_rect(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(200));
+        crate::images::paint(&painter, id, image, 6.0 * k, theme.bg_alt);
+        let caption = format!("{w}×{h} · click or Esc to close");
+        painter.text(egui::pos2(image.center().x, image.bottom() + 10.0 * k), egui::Align2::CENTER_TOP, caption, egui::FontId::proportional(12.0 * k), theme.fg_dim);
+        if close {
+            self.zoomed = None;
+        }
+        ctx.request_repaint();
+    }
+
     /// The transcript's lines as drawn, for tests: text, marker, whether on a surface (a
     /// report's), in a card (and its color), scale, links and marks.
     pub fn lines_json(&mut self, ed: &Editor) -> Value {
@@ -3035,7 +3158,8 @@ impl ChatBuffer {
         Value::Array(
             self.lines
                 .iter()
-                .map(|l| {
+                .enumerate()
+                .map(|(i, l)| {
                     serde_json::json!({
                         "text": l.text,
                         "marker": l.marker.as_ref().map(|(m, _)| m.clone()),
@@ -3056,6 +3180,8 @@ impl ChatBuffer {
                         })),
                         "column": self.text_w,
                         "indent": l.indent,
+                        "origin": self.view.line_origin(i).map(|o| serde_json::json!({"x": o.x, "y": o.y})),
+                        "image": l.image.and_then(|(_, size)| self.view.line_origin(i).map(|o| serde_json::json!({"x": o.x, "y": o.y, "w": size.x, "h": size.y}))),
                     })
                 })
                 .collect(),
@@ -3990,7 +4116,11 @@ impl Buffer for ChatBuffer {
             show_cursor: t_focus,
             selection,
         });
-        if resp.clicked {
+        self.hovered_link = resp.hovered_link.clone();
+        let clicked_image = resp.clicked_line.filter(|_| resp.clicked && resp.link.is_none()).and_then(|l| self.image_at(l, ui.ctx().input(|i| i.pointer.interact_pos())?));
+        if let Some(image) = clicked_image {
+            self.zoomed = Some(image);
+        } else if resp.clicked {
             self.focus = Focus::Transcript;
             if let Some(l) = resp.clicked_line.filter(|_| resp.link.is_none()) {
                 // A comment's card: change it.
@@ -4052,7 +4182,10 @@ impl Buffer for ChatBuffer {
         }
         // A code reference: that line, in the diff page of the chat's folder (or the file).
         // (Its folder is asked for from the main loop: while drawn, the chat is out of its slot.)
-        if let Some((path, line)) = resp.link.as_deref().filter(|l| !l.starts_with("find:") && !l.starts_with("challenge-")).and_then(code_ref) {
+        if let Some(url) = resp.link.clone().filter(|l| is_web_link(l)) {
+            ed.main_sender().send(move |ed| crate::browse_url(ed, &url));
+        }
+        if let Some((path, line)) = resp.link.as_deref().filter(|l| !l.starts_with("find:") && !l.starts_with("challenge-") && !is_web_link(l)).and_then(code_ref) {
             ed.main_sender().send(move |ed| match ed.buffer_directory(id) {
                 Some(dir) => crate::diff::show_line(ed, ed.buffer_machine(id), dir.to_string_lossy().into_owned(), &path, line),
                 None => ed.message("This chat has no folder to look in"),
@@ -4418,7 +4551,9 @@ impl Buffer for ChatBuffer {
         let send = Rect::from_center_size(egui::pos2(bar.right() - d / 2.0, cy), Vec2::splat(d));
         // Something to send: text, images, or a review waiting (as `send` has it).
         let has_text = !self.prompt.doc.is_empty() || !self.attachments.is_empty() || !self.review.drafts().is_empty();
-        let sresp = ui.interact(send, id.with("send"), egui::Sense::click()).on_hover_text(if self.running() { "Stop (C-c C-c)" } else { "Send (RET)" });
+        let retry = !has_text && self.can_retry();
+        let hint = if self.running() { "Stop (C-c C-c)" } else if retry { "Send the failed turn again (RET)" } else { "Send (RET)" };
+        let sresp = ui.interact(send, id.with("send"), egui::Sense::click()).on_hover_text(hint);
         if self.running() {
             painter.circle_filled(send.center(), d / 2.0, if sresp.hovered() { theme.fg } else { theme.fg_dim });
             painter.rect_filled(Rect::from_center_size(send.center(), Vec2::splat(9.0 * k)), 2.0, theme.bg_elevated);
@@ -4426,12 +4561,18 @@ impl Buffer for ChatBuffer {
                 run = Some("chat-abort");
             }
         } else {
-            let bg = if has_text { if sresp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent } } else { theme.chip() };
+            let lit = has_text || retry;
+            let bg = if lit { if sresp.hovered() { theme.accent.gamma_multiply(1.15) } else { theme.accent } } else { theme.chip() };
             painter.circle_filled(send.center(), d / 2.0, bg);
-            let fg = if has_text { crate::chrome::on(theme.accent, &theme) } else { theme.fg_faint };
-            crate::chrome::arrow_up(&painter, Rect::from_center_size(send.center(), Vec2::splat(11.0 * k)), fg);
-            if sresp.clicked() && has_text {
-                run = Some("chat-send");
+            let fg = if lit { crate::chrome::on(theme.accent, &theme) } else { theme.fg_faint };
+            let icon = Rect::from_center_size(send.center(), Vec2::splat(11.0 * k));
+            if retry {
+                crate::chrome::replay(&painter, icon, fg);
+            } else {
+                crate::chrome::arrow_up(&painter, icon, fg);
+            }
+            if sresp.clicked() && lit {
+                run = Some(if retry { "chat-retry" } else { "chat-send" });
             }
         }
 
@@ -4518,13 +4659,15 @@ impl Buffer for ChatBuffer {
             self.focus = Focus::Prompt;
             ed.main_sender().send(move |ed| ed.call(cmd));
         }
+        self.draw_zoomed(ui.ctx(), rect, &theme, k);
         // Keys for a selection (comment on it) and for a comment being written.
         if let Some(me) = ed.this_buffer() {
             let selecting = self.focus == Focus::Transcript && self.commenting.is_none() && self.view.anchor.is_some_and(|a| a != self.view.cursor);
             let commenting = self.commenting.is_some();
             if let Some(m) = ed.meta_mut(me) {
                 let challenging = self.challenge_form.is_some();
-                for (mode, on) in [("chat-selection", selecting), ("chat-commenting", commenting), ("chat-challenging", challenging)] {
+                let zoomed = self.zoomed.is_some();
+                for (mode, on) in [("chat-image", zoomed), ("chat-selection", selecting), ("chat-commenting", commenting), ("chat-challenging", challenging)] {
                     let has = m.minor_modes.iter().any(|x| x == mode);
                     if on && !has {
                         m.minor_modes.insert(0, mode.to_string());
@@ -4817,7 +4960,12 @@ mod tests {
         assert!(matches!(finished_reply(&[user.clone(), said(vec![thought], None)], false), Some(Err(e)) if e.contains("output tokens")));
         // Failed, the error noticed after it.
         assert_eq!(finished_reply(&[user.clone(), said(vec![], Some("429")), note("429", Tone::Error)], false), Some(Err("429".into())));
-        assert_eq!(finished_reply(&[user, note("No API key", Tone::Error)], false), Some(Err("No API key".into())));
+        assert_eq!(finished_reply(&[user.clone(), note("No API key", Tone::Error)], false), Some(Err("No API key".into())));
+        assert!(failed_turn(&[user.clone(), said(vec![], Some("429")), note("429", Tone::Error)], false));
+        assert!(failed_turn(&[user.clone(), note("No API key", Tone::Error)], false));
+        assert!(!failed_turn(&[user.clone(), said(vec![], Some("429"))], true));
+        assert!(!failed_turn(&[user.clone(), said(vec![text("Done.")], None)], false));
+        assert!(!failed_turn(&[user], false));
     }
 
     #[test]
@@ -4834,6 +4982,24 @@ mod tests {
         let (text, spans) = inline_spans(s);
         let parts = spans.iter().map(|(r, f)| (text[r.clone()].to_string(), *f)).collect();
         (text, parts)
+    }
+
+    #[test]
+    fn markdown_links_keep_where_they_go() {
+        let (text, _, links) = inline_parts("See the **[docs](https://openrouter.ai/docs/a.md)** and [é x](http://e.com/) now");
+        assert_eq!(text, "See the docs and é x now");
+        assert_eq!(links, vec![(8..12, "https://openrouter.ai/docs/a.md".to_string()), (17..20, "http://e.com/".to_string())]);
+        assert!(inline_parts("[empty]() and [x](  )").2.is_empty());
+    }
+
+    #[test]
+    fn bare_urls_are_links_without_their_punctuation() {
+        let at = |text: &str| web_links(text).into_iter().map(|(r, u)| (r.start, r.end, u)).collect::<Vec<_>>();
+        assert_eq!(at("Docs: https://openrouter.ai/docs/x.md."), vec![(6, 37, "https://openrouter.ai/docs/x.md".into())]);
+        assert_eq!(at("(see https://en.wikipedia.org/wiki/Rust_(language))"), vec![(5, 50, "https://en.wikipedia.org/wiki/Rust_(language)".into())]);
+        assert_eq!(at("é https://a.io/b?c=1, then"), vec![(2, 20, "https://a.io/b?c=1".into())]);
+        assert!(at("https:// and http://").is_empty());
+        assert!(at("src/a.rs:12 and plain text").is_empty());
     }
 
     #[test]

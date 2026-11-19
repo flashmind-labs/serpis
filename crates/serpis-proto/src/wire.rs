@@ -229,6 +229,7 @@ pub enum Request {
     /// Move what a running tool call does (a command, a subagent) to the background, by the
     /// tool entry's id: the call returns and the turn goes on.
     BackgroundTask { chat: String, tool: String },
+    Retry { chat: String },
     Compact {
         chat: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

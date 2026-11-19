@@ -103,6 +103,7 @@ impl Chat {
             cache_retention: CacheRetention::Short,
             hooks: None,
             sequential_tools: false,
+            max_retries: None,
         };
         Chat { cfg, history: Vec::new() }
     }

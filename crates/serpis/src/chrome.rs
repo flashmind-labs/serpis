@@ -474,6 +474,17 @@ pub fn arrow_up(p: &egui::Painter, r: Rect, c: Color32) {
     p.add(egui::Shape::line(vec![egui::pos2(r.left(), r.center().y - r.height() * 0.1), r.center_top(), egui::pos2(r.right(), r.center().y - r.height() * 0.1)], s));
 }
 
+pub fn replay(p: &egui::Painter, r: Rect, c: Color32) {
+    let (center, radius) = (r.center(), r.width() / 2.0);
+    let dir = |deg: f32| egui::vec2(deg.to_radians().cos(), deg.to_radians().sin());
+    let (from, to) = (-40.0_f32, 230.0_f32);
+    p.add(egui::Shape::line((0..=24).map(|i| center + radius * dir(from + (to - from) * i as f32 / 24.0)).collect(), Stroke::new(1.8, c)));
+    let tip = center + radius * dir(to) + dir(to + 90.0) * radius * 0.35;
+    let back = -dir(to + 90.0) * radius * 0.75;
+    let side = dir(to) * radius * 0.45;
+    p.add(egui::Shape::convex_polygon(vec![tip, tip + back + side, tip + back - side], c, Stroke::NONE));
+}
+
 pub fn split_right(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(1.2, c);
     p.rect_stroke(r, 2.0, s, StrokeKind::Inside);

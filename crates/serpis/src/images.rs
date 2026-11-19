@@ -139,6 +139,10 @@ pub fn paint(painter: &egui::Painter, id: u64, rect: egui::Rect, radius: f32, pl
     }
 }
 
+pub fn size(id: u64) -> Option<(u32, u32)> {
+    store().lock().unwrap().get(&id).map(|e| (e.w, e.h))
+}
+
 /// The texture for image `id` (uploaded on first use).
 pub fn texture(ctx: &egui::Context, id: u64) -> Option<egui::TextureId> {
     let mut s = store().lock().unwrap();
