@@ -474,6 +474,10 @@ impl StyledLine {
         self.spans = spans;
         self
     }
+    pub fn links(mut self, links: Vec<(Range<usize>, String)>) -> Self {
+        self.links = links;
+        self
+    }
     pub fn measure(mut self, w: f32) -> Self {
         self.measure = Some(w);
         self
@@ -834,6 +838,7 @@ pub struct ViewResponse {
     pub scrolled: bool,
     /// A link was clicked: what it points at.
     pub link: Option<String>,
+    pub hovered_link: Option<String>,
 }
 
 impl DocView {
@@ -930,6 +935,10 @@ impl DocView {
     }
 
     /// Text position under a screen point, if over the text.
+    pub fn line_origin(&self, line: usize) -> Option<Pos2> {
+        self.placed.iter().find(|p| p.line == line).map(|p| p.origin)
+    }
+
     pub fn pos_at(&self, pt: Pos2) -> Option<Pos> {
         let pl = self
             .placed
@@ -1299,6 +1308,10 @@ impl DocView {
                     if over {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         painter.hline(r.x_range(), r.bottom() - 1.0, Stroke::new(1.0, theme.format(Face::InlineCode).color));
+                        if target.starts_with("https://") || target.starts_with("http://") {
+                            egui::Popup::new(ui.scope_id().with("link-url"), ui.ctx().clone(), r, response.layer_id).kind(egui::PopupKind::Tooltip).show(|ui| ui.label(target.as_str()));
+                        }
+                        resp.hovered_link = Some(target.clone());
                     }
                     if response.clicked() && response.interact_pointer_pos().is_some_and(|p| r.expand2(egui::vec2(1.0, 2.0)).contains(p)) {
                         resp.link = Some(target.clone());

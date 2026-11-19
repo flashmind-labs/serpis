@@ -1,3 +1,5 @@
+// TODO-UPDATE-COMMENT: a Firecrawl backend was added; the list below doesn't name it
+// ---
 //! `web_search` tool: client-side search with pluggable backends (Brave, Exa, Tavily, DuckDuckGo).
 //! When the active model can search natively, the agent asks the provider instead and this tool
 //! is not offered (see `Agent::native_web_search`).
@@ -9,7 +11,24 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 
+use serpis_ai::stream::{ProviderError, retry_delay};
+
 use super::*;
+
+const SEARCH_RETRIES: u32 = 2;
+
+async fn search_with_retry(backend: Arc<dyn SearchBackend>, query: String, opts: SearchOptions) -> anyhow::Result<Vec<SearchResult>> {
+    let mut attempt = 0;
+    loop {
+        let result = backend.search(query.clone(), opts.clone()).await;
+        let Err(e) = &result else { return result };
+        match retry_delay(e, attempt).filter(|_| attempt < SEARCH_RETRIES) {
+            Some(delay) => tokio::time::sleep(delay.min(Duration::from_secs(2))).await,
+            None => return result,
+        }
+        attempt += 1;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -29,11 +48,28 @@ pub struct SearchOptions {
 pub trait SearchBackend: Send + Sync {
     fn id(&self) -> &str;
     fn available(&self) -> bool;
+    fn parallel(&self) -> bool {
+        true
+    }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>>;
 }
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.trim().is_empty())
+}
+
+static KEYS: std::sync::OnceLock<serpis_ai::Registry> = std::sync::OnceLock::new();
+
+pub fn use_registry(registry: serpis_ai::Registry) {
+    let _ = KEYS.set(registry);
+}
+
+fn api_key(provider: &str, var: &str) -> Option<String> {
+    KEYS.get().and_then(|r| r.api_key(provider)).filter(|k| !k.trim().is_empty()).or_else(|| env(var))
+}
+
+fn missing(provider: &str, var: &str) -> anyhow::Error {
+    anyhow::anyhow!("No {provider} key: add \"{provider}\" to auth.json or set {var}")
 }
 
 fn client() -> &'static reqwest::Client {
@@ -44,7 +80,8 @@ async fn check(resp: reqwest::Response, who: &str) -> anyhow::Result<Value> {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("{who} search error {}: {}", status.as_u16(), serpis_ai::stream::truncate_chars(&body, 300));
+        let message = format!("{who} search error {}: {}", status.as_u16(), serpis_ai::stream::truncate_chars(&body, 300));
+        return Err(ProviderError { status: status.as_u16(), message, retry_after: None }.into());
     }
     Ok(serde_json::from_str(&body)?)
 }
@@ -55,11 +92,11 @@ impl SearchBackend for Brave {
         "brave"
     }
     fn available(&self) -> bool {
-        env("BRAVE_API_KEY").is_some()
+        api_key("brave", "BRAVE_API_KEY").is_some()
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
-            let key = env("BRAVE_API_KEY").ok_or_else(|| anyhow::anyhow!("BRAVE_API_KEY is not set"))?;
+            let key = api_key("brave", "BRAVE_API_KEY").ok_or_else(|| missing("brave", "BRAVE_API_KEY"))?;
             let base = env("BRAVE_BASE_URL").unwrap_or_else(|| "https://api.search.brave.com/res/v1".into());
             let mut q = query.clone();
             for d in &opts.domain_filter {
@@ -101,11 +138,11 @@ impl SearchBackend for Exa {
         "exa"
     }
     fn available(&self) -> bool {
-        env("EXA_API_KEY").is_some()
+        api_key("exa", "EXA_API_KEY").is_some()
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
-            let key = env("EXA_API_KEY").ok_or_else(|| anyhow::anyhow!("EXA_API_KEY is not set"))?;
+            let key = api_key("exa", "EXA_API_KEY").ok_or_else(|| missing("exa", "EXA_API_KEY"))?;
             let base = env("EXA_BASE_URL").unwrap_or_else(|| "https://api.exa.ai".into());
             let (include, exclude): (Vec<_>, Vec<_>) = opts.domain_filter.iter().partition(|d| !d.starts_with('-'));
             let mut body = json!({"query": query, "numResults": opts.num_results, "contents": {"highlights": true}});
@@ -150,11 +187,11 @@ impl SearchBackend for Tavily {
         "tavily"
     }
     fn available(&self) -> bool {
-        env("TAVILY_API_KEY").is_some()
+        api_key("tavily", "TAVILY_API_KEY").is_some()
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
-            let key = env("TAVILY_API_KEY").ok_or_else(|| anyhow::anyhow!("TAVILY_API_KEY is not set"))?;
+            let key = api_key("tavily", "TAVILY_API_KEY").ok_or_else(|| missing("tavily", "TAVILY_API_KEY"))?;
             let base = env("TAVILY_BASE_URL").unwrap_or_else(|| "https://api.tavily.com".into());
             let (include, exclude): (Vec<_>, Vec<_>) = opts.domain_filter.iter().partition(|d| !d.starts_with('-'));
             let mut body = json!({"query": query, "max_results": opts.num_results});
@@ -192,6 +229,62 @@ impl SearchBackend for Tavily {
     }
 }
 
+pub struct Firecrawl;
+impl SearchBackend for Firecrawl {
+    fn id(&self) -> &str {
+        "firecrawl"
+    }
+    fn available(&self) -> bool {
+        api_key("firecrawl", "FIRECRAWL_API_KEY").is_some()
+    }
+    fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
+        async move {
+            let key = api_key("firecrawl", "FIRECRAWL_API_KEY").ok_or_else(|| missing("firecrawl", "FIRECRAWL_API_KEY"))?;
+            let base = env("FIRECRAWL_BASE_URL").unwrap_or_else(|| "https://api.firecrawl.dev".into());
+            let resp = client()
+                .post(format!("{base}/v2/search"))
+                .bearer_auth(key)
+                .json(&firecrawl_body(&query, &opts))
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await?;
+            Ok(firecrawl_results(&check(resp, "Firecrawl").await?, &opts))
+        }
+        .boxed()
+    }
+}
+
+fn firecrawl_body(query: &str, opts: &SearchOptions) -> Value {
+    let (include, exclude): (Vec<_>, Vec<_>) = opts.domain_filter.iter().partition(|d| !d.starts_with('-'));
+    let mut body = json!({"query": query, "limit": opts.num_results, "sources": [{"type": "web"}]});
+    if !include.is_empty() {
+        body["includeDomains"] = json!(include);
+    } else if !exclude.is_empty() {
+        body["excludeDomains"] = json!(exclude.iter().map(|d| d.trim_start_matches('-')).collect::<Vec<_>>());
+    }
+    if let Some(r) = &opts.recency {
+        body["tbs"] = json!(match r.as_str() { "day" => "qdr:d", "week" => "qdr:w", "month" => "qdr:m", _ => "qdr:y" });
+    }
+    body
+}
+
+fn firecrawl_results(v: &Value, opts: &SearchOptions) -> Vec<SearchResult> {
+    let web = v.pointer("/data/web").or_else(|| v.get("data").filter(|d| d.is_array()));
+    web.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|r| SearchResult {
+                    title: r["title"].as_str().unwrap_or("").into(),
+                    url: r["url"].as_str().unwrap_or("").into(),
+                    snippet: r["description"].as_str().unwrap_or("").into(),
+                })
+                .filter(|r| !r.url.is_empty() && passes_filter(&r.url, &opts.domain_filter))
+                .take(opts.num_results)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Keyless fallback that scrapes DuckDuckGo's HTML endpoint.
 pub struct DuckDuckGo;
 impl SearchBackend for DuckDuckGo {
@@ -200,6 +293,9 @@ impl SearchBackend for DuckDuckGo {
     }
     fn available(&self) -> bool {
         true
+    }
+    fn parallel(&self) -> bool {
+        false
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
@@ -214,7 +310,8 @@ impl SearchBackend for DuckDuckGo {
             let status = resp.status().as_u16();
             let html = resp.text().await?;
             if status == 202 || html.contains("anomaly-modal__box") || html.contains("challenge-form") {
-                anyhow::bail!("DuckDuckGo blocked the request with a bot check (HTTP {status}, rate limited); use another search provider");
+                let message = format!("DuckDuckGo blocked the request with a bot check (HTTP {status}, rate limited); use another search provider");
+                return Err(ProviderError { status: 429, message, retry_after: None }.into());
             }
             if !(200..300).contains(&status) {
                 anyhow::bail!("DuckDuckGo search error {status}");
@@ -283,7 +380,7 @@ pub struct WebSearchTool {
 impl Default for WebSearchTool {
     fn default() -> Self {
         WebSearchTool {
-            backends: vec![Arc::new(Brave), Arc::new(Exa), Arc::new(Tavily), Arc::new(DuckDuckGo)],
+            backends: vec![Arc::new(Brave), Arc::new(Exa), Arc::new(Tavily), Arc::new(Firecrawl), Arc::new(DuckDuckGo)],
         }
     }
 }
@@ -291,13 +388,8 @@ impl Default for WebSearchTool {
 impl WebSearchTool {
     fn pick(&self, requested: Option<&str>) -> anyhow::Result<Arc<dyn SearchBackend>> {
         let requested = requested.map(str::to_string).or_else(|| env("SERPIS_WEB_SEARCH_PROVIDER"));
-        if let Some(id) = requested.filter(|r| r != "auto") {
-            return self
-                .backends
-                .iter()
-                .find(|b| b.id() == id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Unknown search provider: {id}"));
+        if let Some(b) = requested.and_then(|id| self.backends.iter().find(|b| b.id() == id && b.available())) {
+            return Ok(b.clone());
         }
         self.backends
             .iter()
@@ -315,12 +407,12 @@ impl AgentTool for WebSearchTool {
         "Search the web. Returns titles, URLs and snippets for each query. Use several focused queries for broad research. Use domainFilter to restrict (\"example.com\") or exclude (\"-example.com\") sites.".into()
     }
     fn parameters(&self) -> Value {
-        let ids: Vec<&str> = self.backends.iter().map(|b| b.id()).collect();
+        let ids: Vec<&str> = self.backends.iter().filter(|b| b.available()).map(|b| b.id()).collect();
         json!({
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
-                "queries": {"type": "array", "items": {"type": "string"}, "description": "Several queries to run in parallel (instead of query)"},
+                "queries": {"type": "array", "items": {"type": "string"}, "description": "Several queries (instead of query)"},
                 "numResults": {"type": "number", "description": "Results per query (default: 5, max: 20)"},
                 "recencyFilter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Only recent results"},
                 "domainFilter": {"type": "array", "items": {"type": "string"}, "description": "Domains to include, or exclude with a leading '-'"},
@@ -357,10 +449,21 @@ impl AgentTool for WebSearchTool {
                     .unwrap_or_default(),
                 recency: arg_str(&args, "recencyFilter").map(str::to_string),
             };
-            let futs = queries.iter().map(|q| backend.search(q.clone(), opts.clone()));
+            let futs = queries.iter().map(|q| search_with_retry(backend.clone(), q.clone(), opts.clone()));
+            let all = async {
+                if backend.parallel() {
+                    futures::future::join_all(futs).await
+                } else {
+                    let mut out = Vec::new();
+                    for f in futs {
+                        out.push(f.await);
+                    }
+                    out
+                }
+            };
             let results = tokio::select! {
                 _ = ctx.cancel.cancelled() => anyhow::bail!("Operation aborted"),
-                r = futures::future::join_all(futs) => r,
+                r = all => r,
             };
             let mut text = String::new();
             let mut structured = Vec::new();
@@ -392,5 +495,133 @@ impl AgentTool for WebSearchTool {
             Ok(if all_failed { ToolResult { is_error: true, ..result } } else { result })
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Stats {
+        failures: AtomicUsize,
+        calls: AtomicUsize,
+        running: AtomicUsize,
+        most_at_once: AtomicUsize,
+    }
+
+    struct Fake {
+        id: &'static str,
+        available: bool,
+        parallel: bool,
+        stats: Arc<Stats>,
+    }
+
+    impl SearchBackend for Fake {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn available(&self) -> bool {
+            self.available
+        }
+        fn parallel(&self) -> bool {
+            self.parallel
+        }
+        fn search(&self, query: String, _opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
+            let s = self.stats.clone();
+            s.calls.fetch_add(1, Ordering::SeqCst);
+            let fail = s.failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok();
+            let now = s.running.fetch_add(1, Ordering::SeqCst) + 1;
+            s.most_at_once.fetch_max(now, Ordering::SeqCst);
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                s.running.fetch_sub(1, Ordering::SeqCst);
+                if fail {
+                    return Err(ProviderError { status: 429, message: "slow down".into(), retry_after: Some(Duration::from_millis(10)) }.into());
+                }
+                Ok(vec![SearchResult { title: format!("about {query}"), url: "https://example.com/".into(), snippet: String::new() }])
+            }
+            .boxed()
+        }
+    }
+
+    fn fake(id: &'static str, available: bool, parallel: bool, failures: usize) -> (Arc<dyn SearchBackend>, Arc<Stats>) {
+        let stats = Arc::new(Stats { failures: AtomicUsize::new(failures), ..Default::default() });
+        (Arc::new(Fake { id, available, parallel, stats: stats.clone() }), stats)
+    }
+
+    async fn run(backends: Vec<Arc<dyn SearchBackend>>, args: Value) -> ToolResult {
+        WebSearchTool { backends }.execute("1".into(), args, ToolContext::new(".")).await.unwrap()
+    }
+
+    #[test]
+    fn search_keys_come_from_auth_json_before_the_environment() {
+        let dir = std::env::temp_dir().join(format!("serpis-search-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("auth.json"), r#"{"firecrawl": {"type": "api_key", "key": "!printf fc-from-a-command"}, "exa": {"type": "api_key", "key": "exa-literal"}}"#).unwrap();
+        use_registry(serpis_ai::Registry::new(serpis_ai::Paths { agent_dir: dir.clone() }));
+        assert_eq!(api_key("firecrawl", "SERPIS_TEST_UNSET_FIRECRAWL"), Some("fc-from-a-command".into()));
+        assert_eq!(api_key("exa", "SERPIS_TEST_UNSET_EXA"), Some("exa-literal".into()));
+        assert_eq!(api_key("brave", "SERPIS_TEST_UNSET_BRAVE"), None);
+        assert!(Firecrawl.available() && !Brave.available() || env("BRAVE_API_KEY").is_some());
+        assert!(missing("brave", "BRAVE_API_KEY").to_string().contains("auth.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn firecrawl_asks_for_web_results_and_reads_them() {
+        let opts = SearchOptions { num_results: 2, domain_filter: vec!["-pinterest.com".into()], recency: Some("week".into()) };
+        assert_eq!(firecrawl_body("rust", &opts), json!({"query": "rust", "limit": 2, "sources": [{"type": "web"}], "excludeDomains": ["pinterest.com"], "tbs": "qdr:w"}));
+        let only = SearchOptions { num_results: 5, domain_filter: vec!["docs.rs".into(), "-x.com".into()], recency: None };
+        assert_eq!(firecrawl_body("q", &only)["includeDomains"], json!(["docs.rs"]));
+        assert!(firecrawl_body("q", &only).get("excludeDomains").is_none());
+        let reply = json!({"success": true, "data": {"web": [
+            {"url": "https://www.rust-lang.org/", "title": "Rust", "description": "A language"},
+            {"url": "https://pinterest.com/rust", "title": "Pins", "description": ""},
+            {"url": "https://doc.rust-lang.org/book/", "title": "The Book", "description": "Learn Rust"},
+            {"url": "https://crates.io/", "title": "Crates", "description": ""}
+        ]}});
+        let got: Vec<_> = firecrawl_results(&reply, &opts).into_iter().map(|r| (r.title, r.url, r.snippet)).collect();
+        assert_eq!(got, [("Rust".into(), "https://www.rust-lang.org/".into(), "A language".into()), ("The Book".into(), "https://doc.rust-lang.org/book/".into(), "Learn Rust".into())]);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_search_is_tried_again() {
+        let (b, s) = fake("duckduckgo", true, false, 2);
+        let r = run(vec![b], json!({"query": "q"})).await;
+        assert!(!r.is_error, "{}", r.details);
+        assert_eq!(s.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_search_gives_up_after_its_retries() {
+        let (b, s) = fake("duckduckgo", true, false, 5);
+        let r = run(vec![b], json!({"query": "q"})).await;
+        assert!(r.is_error);
+        assert_eq!(s.calls.load(Ordering::SeqCst), 1 + SEARCH_RETRIES as usize);
+    }
+
+    #[tokio::test]
+    async fn a_backend_that_cannot_take_parallel_queries_gets_them_one_at_a_time() {
+        let (b, serial) = fake("duckduckgo", true, false, 0);
+        run(vec![b], json!({"queries": ["a", "b", "c"]})).await;
+        assert_eq!(serial.most_at_once.load(Ordering::SeqCst), 1);
+        let (b, parallel) = fake("exa", true, true, 0);
+        run(vec![b], json!({"queries": ["a", "b", "c"]})).await;
+        assert_eq!(parallel.most_at_once.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn only_configured_providers_are_offered_and_others_fall_back() {
+        let (brave, brave_stats) = fake("brave", false, true, 0);
+        let (ddg, _) = fake("duckduckgo", true, false, 0);
+        let t = WebSearchTool { backends: vec![brave, ddg] };
+        assert_eq!(t.parameters()["properties"]["provider"]["enum"], json!(["duckduckgo"]));
+        let r = t.execute("1".into(), json!({"query": "q", "provider": "brave"}), ToolContext::new(".")).await.unwrap();
+        assert!(!r.is_error);
+        assert_eq!(r.details["provider"], "duckduckgo");
+        assert_eq!(brave_stats.calls.load(Ordering::SeqCst), 0);
     }
 }

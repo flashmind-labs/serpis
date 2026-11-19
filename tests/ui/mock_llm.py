@@ -43,6 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port_file, log_file = sys.argv[1], sys.argv[2]
 count = 0
+busy = set()
 
 
 def text_of(content):
@@ -76,6 +77,17 @@ class Handler(BaseHTTPRequestHandler):
                 "report_text": '<skill name="report">' in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
                 "diagrams_skill": "<name>diagrams</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
             }) + "\n")
+
+        prompt = text_of(last.get("content"))
+        if last.get("role") == "user" and prompt.startswith("BUSY") and prompt not in busy:
+            busy.add(prompt)
+            payload = json.dumps({"error": {"message": "Rate limit exceeded", "code": 429}}).encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
 
         delta, finish = {"role": "assistant", "content": "ok"}, "stop"
         # STEPS: one command after another in the same turn.
@@ -128,6 +140,8 @@ class Handler(BaseHTTPRequestHandler):
                     call = ("bash", {"command": "sleep 20"})
             if prompt.startswith("Prove this finding"):
                 delta["content"] = "[confirmed] With 8 threads it fails.\nEvidence: 3 of 500 runs failed with 8 threads."
+            if prompt.startswith("LINKS"):
+                delta["content"] = "[Docs](https://example.com/docs) are here, or see https://example.org/page."
             if prompt.startswith("INLINE"):
                 delta["content"] = "Run `cargo test` now."
             if prompt.startswith("CODE"):

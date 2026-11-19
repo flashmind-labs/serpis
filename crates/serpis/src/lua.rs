@@ -1333,6 +1333,21 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         })?;
         lua_of(lua, &v.unwrap_or_default())
     })?)?;
+    chat.set("zoomed_image", lua.create_function(move |lua, id: Option<u64>| {
+        let id = chat_id(id)?;
+        let zoomed = ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.zoomed_image()))?.ok_or_else(|| mlua::Error::runtime("the chat is busy"))?;
+        let v = zoomed.and_then(crate::images::size).map(|(w, h)| json!({"w": w, "h": h})).unwrap_or(Value::Null);
+        lua_of(lua, &v)
+    })?)?;
+    chat.set("can_retry", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.can_retry()))?
+            .ok_or_else(|| mlua::Error::runtime("the chat is busy"))
+    })?)?;
+    chat.set("retry", lua.create_function(move |_, id: Option<u64>| {
+        let id = chat_id(id)?;
+        ed(|e| e.with_chat_soon(id, |c, e| c.retry(e)))
+    })?)?;
     // serpis.chat.transcript(buf?): the transcript's text as shown.
     chat.set("transcript", lua.create_function(move |_, id: Option<u64>| {
         let id = chat_id(id)?;
@@ -1729,6 +1744,13 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, ed| c.lines_json(ed))
         })?;
         lua_of(lua, &v.unwrap_or(Value::Null))
+    })?)?;
+    debug.set("chat_hovered_link", lua.create_function(|_, ()| {
+        let v = ed(|e| {
+            let id = e.current_buffer();
+            e.with_buffer_as::<crate::buffers::chat::ChatBuffer, _>(id, |c, _| c.hovered_link())
+        })?;
+        Ok(v.flatten())
     })?)?;
     debug.set("cell_rect", lua.create_function(|lua, (line, col): (usize, usize)| {
         let v = ed(|e| e.with_surface(|s, _| s.screen_rect(crate::text::Pos::new(line.saturating_sub(1), col.saturating_sub(1)))).flatten())?;

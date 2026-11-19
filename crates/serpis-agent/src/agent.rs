@@ -138,6 +138,7 @@ pub struct AgentConfig {
     /// Ask the provider to search instead of offering the client-side `web_search` tool.
     pub native_web_search: bool,
     pub max_tokens: Option<u64>,
+    pub max_retries: Option<u32>,
     /// How long providers should keep this chat's prompt cached.
     pub cache_retention: CacheRetention,
     pub hooks: Option<Arc<dyn ToolHooks>>,
@@ -318,6 +319,7 @@ fn request(cfg: &AgentConfig, native: bool, tools: &[ToolRef], messages: Vec<Mes
         cache_retention: cfg.cache_retention,
         cancel,
         native_web_search: native,
+        max_retries: cfg.max_retries,
         ..Default::default()
     };
     (ctx, opts)

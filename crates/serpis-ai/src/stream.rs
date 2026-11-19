@@ -59,6 +59,7 @@ pub struct StreamOptions {
 /// Emits events and builds the final message in one place so adapters stay small.
 pub struct Emitter {
     tx: mpsc::UnboundedSender<StreamEvent>,
+    started: std::sync::atomic::AtomicBool,
     pub output: AssistantMessage,
 }
 
@@ -68,6 +69,7 @@ impl Emitter {
         (
             Emitter {
                 tx,
+                started: Default::default(),
                 output: AssistantMessage::empty(model),
             },
             rx,
@@ -75,6 +77,9 @@ impl Emitter {
     }
 
     pub fn emit(&self, event: StreamEvent) {
+        if matches!(event, StreamEvent::Start) && self.started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let _ = self.tx.send(event);
     }
 
@@ -401,54 +406,62 @@ pub fn http_client() -> &'static reqwest::Client {
 
 const RETRYABLE: [u16; 7] = [408, 429, 500, 502, 503, 504, 529];
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+pub const DEFAULT_MAX_RETRIES: u32 = 6;
 
-/// Send a request, retrying transient failures with backoff (honours `retry-after`).
-/// Non-success responses become errors carrying the provider's body.
-pub async fn send_with_retry(
-    build: impl Fn() -> reqwest::RequestBuilder,
-    max_retries: Option<u32>,
-    cancel: &CancellationToken,
-) -> anyhow::Result<reqwest::Response> {
-    let max_retries = max_retries.unwrap_or(3);
-    let mut attempt = 0;
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => anyhow::bail!("Request was aborted"),
-            r = build().send() => r,
-        };
-        let retry_after = match result {
-            Ok(resp) if resp.status().is_success() => return Ok(resp),
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .map(Duration::from_secs_f64);
-                let body = resp.text().await.unwrap_or_default();
-                if !RETRYABLE.contains(&status) || attempt >= max_retries {
-                    anyhow::bail!("{}", format_provider_error(status, &body));
-                }
-                if retry_after.is_some_and(|d| d > MAX_RETRY_DELAY) {
-                    anyhow::bail!(
-                        "{} (server asked to retry after {:?})",
-                        format_provider_error(status, &body),
-                        retry_after.unwrap()
-                    );
-                }
-                retry_after
-            }
-            Err(e) if attempt < max_retries && (e.is_connect() || e.is_timeout()) => None,
-            Err(e) => return Err(e.into()),
-        };
-        attempt += 1;
-        let delay = retry_after.unwrap_or_else(|| Duration::from_millis(1000 * 2u64.pow(attempt - 1)));
-        tokio::select! {
-            _ = cancel.cancelled() => anyhow::bail!("Request was aborted"),
-            _ = tokio::time::sleep(delay) => {}
+#[derive(Debug)]
+pub struct ProviderError {
+    pub status: u16,
+    pub message: String,
+    pub retry_after: Option<Duration>,
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.retry_after.filter(|d| *d > MAX_RETRY_DELAY) {
+            Some(d) => write!(f, "{} (server asked to retry after {d:?})", self.message),
+            None => f.write_str(&self.message),
         }
     }
+}
+
+impl std::error::Error for ProviderError {}
+
+impl ProviderError {
+    pub fn new(status: u16, body: &str) -> Self {
+        ProviderError { status, message: format_provider_error(status, body), retry_after: None }
+    }
+}
+
+pub async fn send(build: impl Fn() -> reqwest::RequestBuilder, cancel: &CancellationToken) -> anyhow::Result<reqwest::Response> {
+    let resp = tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("Request was aborted"),
+        r = build().send() => r?,
+    };
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(Duration::from_secs_f64);
+    let body = resp.text().await.unwrap_or_default();
+    Err(ProviderError { retry_after, ..ProviderError::new(status, &body) }.into())
+}
+
+pub fn retry_delay(error: &anyhow::Error, attempt: u32) -> Option<Duration> {
+    let backoff = Duration::from_secs(1 << attempt.min(6)).min(MAX_RETRY_DELAY);
+    for cause in error.chain() {
+        if let Some(e) = cause.downcast_ref::<ProviderError>() {
+            return Some(e.retry_after.unwrap_or(backoff)).filter(|d| RETRYABLE.contains(&e.status) && *d <= MAX_RETRY_DELAY);
+        }
+        if let Some(e) = cause.downcast_ref::<reqwest::Error>() {
+            return (e.is_connect() || e.is_timeout() || e.is_body()).then_some(backoff);
+        }
+    }
+    None
 }
 
 /// Render an HTTP error body the way pi-ai does: status plus the provider's message when present.

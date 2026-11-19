@@ -12,7 +12,7 @@ pub mod types;
 pub use api::stream;
 pub use overflow::is_context_overflow;
 pub use registry::{Paths, Registry};
-pub use stream::{CacheRetention, EventStream, StreamEvent, StreamOptions};
+pub use stream::{CacheRetention, DEFAULT_MAX_RETRIES, EventStream, StreamEvent, StreamOptions};
 pub use tokio_util::sync::CancellationToken;
 pub use types::*;
 

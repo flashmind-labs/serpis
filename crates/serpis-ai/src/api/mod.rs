@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::stream::{Emitter, EventStream, StreamOptions, http_client, send_with_retry};
+use crate::stream::{DEFAULT_MAX_RETRIES, Emitter, EventStream, StreamOptions, http_client, retry_delay, send};
 use crate::types::{Context, Model, ThinkingLevel};
 
 pub const SUPPORTED_APIS: &[&str] = &[
@@ -60,7 +60,7 @@ impl Request {
 
     async fn send(&self, opts: &StreamOptions) -> anyhow::Result<reqwest::Response> {
         let client = http_client();
-        send_with_retry(
+        send(
             || {
                 let mut rb = client.post(&self.url).json(&self.body);
                 for (k, v) in &self.headers {
@@ -68,10 +68,20 @@ impl Request {
                 }
                 rb
             },
-            opts.max_retries,
             &opts.cancel,
         )
         .await
+    }
+}
+
+async fn attempt_once(model: &Model, ctx: &Context, opts: &StreamOptions, em: &mut Emitter) -> anyhow::Result<()> {
+    let resp = build_request(model, ctx, opts)?.send(opts).await?;
+    let (model, ctx, opts) = (model.clone(), ctx.clone(), opts.clone());
+    match model.api.as_str() {
+        "openai-completions" => openai_completions::stream_inner(resp, model, opts, em).await,
+        "anthropic-messages" => anthropic_messages::stream_inner(resp, model, ctx, opts, em).await,
+        "google-generative-ai" => google::stream_inner(resp, model, opts, em).await,
+        _ => openai_responses::stream_inner(resp, model, opts, em).await,
     }
 }
 
@@ -96,17 +106,22 @@ pub fn stream(model: &Model, ctx: &Context, opts: StreamOptions) -> EventStream 
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let cancel = opts.cancel.clone();
-        let result = match build_request(&model, &ctx, &opts) {
-            Err(e) => Err(e),
-            Ok(req) => match req.send(&opts).await {
-                Err(e) => Err(e),
-                Ok(resp) => match model.api.as_str() {
-                    "openai-completions" => openai_completions::stream_inner(resp, model, opts, &mut em).await,
-                    "anthropic-messages" => anthropic_messages::stream_inner(resp, model, ctx, opts, &mut em).await,
-                    "google-generative-ai" => google::stream_inner(resp, model, opts, &mut em).await,
-                    _ => openai_responses::stream_inner(resp, model, opts, &mut em).await,
-                },
-            },
+        let max_retries = opts.max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
+        let mut attempt = 0;
+        let result = loop {
+            let result = attempt_once(&model, &ctx, &opts, &mut em).await;
+            let Err(e) = &result else { break result };
+            let delay = Some(attempt).filter(|a| *a < max_retries && em.output.content.is_empty() && !cancel.is_cancelled()).and_then(|a| retry_delay(e, a));
+            let Some(delay) = delay else {
+                break result.map_err(|e| if attempt > 0 { e.context(format!("gave up after {attempt} retries")) } else { e });
+            };
+            tracing::warn!("{} request failed, retrying in {delay:?}: {e:#}", model.provider);
+            tokio::select! {
+                _ = cancel.cancelled() => break result,
+                _ = tokio::time::sleep(delay) => {}
+            }
+            em.output = crate::types::AssistantMessage::empty(&model);
+            attempt += 1;
         };
         match result {
             Ok(()) => em.done(),

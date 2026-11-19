@@ -85,6 +85,17 @@ pub fn shell_quote(s: &str) -> String {
     }
 }
 
+pub fn browse_url(ed: &mut Editor, url: &str) {
+    let default = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let program = ed.var_str("browse-url-program").filter(|p| !p.trim().is_empty()).unwrap_or_else(|| default.into());
+    match std::process::Command::new(expand_home(&program)).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(e) => ed.warn(format!("Couldn't open {url} with {program}: {e}")),
+    }
+}
+
 pub fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
         Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
@@ -152,9 +163,11 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("chat-report-scale", json!(1.1), "Size of a report's prose relative to the rest of the chat (1.1, the default: a tenth larger; 1: the same). Code and tables in it keep their size.");
     ed.defvar("chat-measure", json!(70), "Longest line of an agent's prose in a chat, in characters of the reading font (45 to 75 read best; 66 is the classic ideal). Code, tables and cards still use the whole column (chat-max-width). 0 or null: the whole column.");
     ed.defvar("chat-max-width", json!(860.0), "Width of a chat's reading column in points at the default font size; wider windows center it.");
+    ed.defvar("browse-url-program", Value::Null, "The program a clicked web link in a chat opens with, given the URL. Unset: open on macOS, xdg-open elsewhere.");
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
     ed.defvar("agent-native-web-search", json!(true), "Use the provider's own web search when the model supports it.");
+    ed.defvar("agent-max-retries", json!(6), "How many times a model request is sent again when the provider rate-limits it, is overloaded or fails on its side, or the connection drops before anything streams. Waits 1, 2, 4, 8, 16, then 32 seconds, or what the provider asks for up to a minute. 0: never.");
     ed.defvar("agent-disabled-tools", json!([]), "Tool names hidden from the agent.");
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");
     ed.defvar("agent-cache-retention", json!("long"), "How long providers keep a chat's prompt cached: \"long\" (1 hour on Anthropic-style caches, 24 hours where OpenAI-style caches allow it), \"short\" (5 minutes) or \"none\". Or per provider: {\"default\": \"long\", \"openrouter\": \"short\"}. 1-hour writes cost 2x input instead of 1.25x, but only for new tokens; a short cache expires during pauses and the next message rewrites the whole conversation.");
