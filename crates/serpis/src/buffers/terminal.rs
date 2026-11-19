@@ -1075,6 +1075,7 @@ impl TerminalBuffer {
         // Nerd Font icons wait for the end of their row: they may spread into a blank next cell.
         let mut icons: Vec<(usize, f32, char, Color32)> = Vec::new();
         let mut blank: Vec<bool> = Vec::new();
+        let ppp = ui.ctx().pixels_per_point();
         while let Some(row) = row_iter.next() {
             row_cells.clear();
             icons.clear();
@@ -1136,11 +1137,14 @@ impl TerminalBuffer {
                         col += 1;
                         continue;
                     }
-                    // Powerline separators are shapes filling the cell; icons are fitted later.
+                    // Powerline separators, blocks and box lines are shapes filling the cell; icons
+                    // are fitted later.
                     let mut chars = text.chars();
                     if let (Some(ch), None) = (chars.next(), chars.next()) {
                         let cell_rect = Rect::from_min_size(egui::pos2(x, y), cell);
-                        if super::term_glyphs::powerline(ch, cell_rect, fg, &mut glyphs) {
+                        if super::term_glyphs::powerline(ch, cell_rect, fg, &mut glyphs)
+                            || super::term_glyphs::block_or_box(ch, cell_rect, ppp, fg, &mut glyphs)
+                        {
                             flush(&mut job, run_start_x, &mut glyphs);
                             x += cell.x;
                             col += 1;
