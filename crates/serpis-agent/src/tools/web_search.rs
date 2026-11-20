@@ -1,8 +1,8 @@
-// TODO-UPDATE-COMMENT: a Firecrawl backend was added; the list below doesn't name it
-// ---
-//! `web_search` tool: client-side search with pluggable backends (Brave, Exa, Tavily, DuckDuckGo).
-//! When the active model can search natively, the agent asks the provider instead and this tool
-//! is not offered (see `Agent::native_web_search`).
+//! `web_search` tool: client-side search with pluggable backends (Brave, Exa, Tavily, Firecrawl,
+//! DuckDuckGo). A provider that fails every query hands them to the next one configured; when all
+//! of them fail, the result says so (`details.unavailable`), and the agent loop can stop the run
+//! there (`AgentConfig::web_search_required`). When the active model can search natively, the
+//! agent asks the provider instead and this tool is not offered (see `Agent::native_web_search`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -299,8 +299,9 @@ impl SearchBackend for DuckDuckGo {
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
+            let base = env("DUCKDUCKGO_BASE_URL").unwrap_or_else(|| "https://html.duckduckgo.com".into());
             let resp = client()
-                .get("https://html.duckduckgo.com/html/")
+                .get(format!("{base}/html/"))
                 .query(&[("q", &query)])
                 .header("Accept", "text/html")
                 .header("User-Agent", "Mozilla/5.0 (compatible; serpis/0.1)")
@@ -386,17 +387,30 @@ impl Default for WebSearchTool {
 }
 
 impl WebSearchTool {
-    fn pick(&self, requested: Option<&str>) -> anyhow::Result<Arc<dyn SearchBackend>> {
+    /// The providers to try, in order: the one asked for (else `SERPIS_WEB_SEARCH_PROVIDER`)
+    /// first, then the other configured ones.
+    fn candidates(&self, requested: Option<&str>) -> Vec<Arc<dyn SearchBackend>> {
         let requested = requested.map(str::to_string).or_else(|| env("SERPIS_WEB_SEARCH_PROVIDER"));
-        if let Some(b) = requested.and_then(|id| self.backends.iter().find(|b| b.id() == id && b.available())) {
-            return Ok(b.clone());
+        let mut out: Vec<_> = self.backends.iter().filter(|b| b.available()).cloned().collect();
+        if let Some(i) = requested.and_then(|id| out.iter().position(|b| b.id() == id)) {
+            let b = out.remove(i);
+            out.insert(0, b);
         }
-        self.backends
-            .iter()
-            .find(|b| b.available())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("No web search provider is available"))
+        out
     }
+}
+
+/// Every query, on one provider (one at a time when it can't take them at once).
+async fn search_all(backend: &Arc<dyn SearchBackend>, queries: &[String], opts: &SearchOptions) -> Vec<anyhow::Result<Vec<SearchResult>>> {
+    let futs = queries.iter().map(|q| search_with_retry(backend.clone(), q.clone(), opts.clone()));
+    if backend.parallel() {
+        return futures::future::join_all(futs).await;
+    }
+    let mut out = Vec::new();
+    for f in futs {
+        out.push(f.await);
+    }
+    out
 }
 
 impl AgentTool for WebSearchTool {
@@ -416,7 +430,7 @@ impl AgentTool for WebSearchTool {
                 "numResults": {"type": "number", "description": "Results per query (default: 5, max: 20)"},
                 "recencyFilter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Only recent results"},
                 "domainFilter": {"type": "array", "items": {"type": "string"}, "description": "Domains to include, or exclude with a leading '-'"},
-                "provider": {"type": "string", "enum": ids, "description": "Search backend (default: first configured)"}
+                "provider": {"type": "string", "enum": ids, "description": "Search backend to try first (default: first configured; the others are tried if it fails)"}
             }
         })
     }
@@ -425,9 +439,8 @@ impl AgentTool for WebSearchTool {
     }
 
     fn execute(&self, _id: String, args: Value, ctx: ToolContext) -> BoxFuture<'static, anyhow::Result<ToolResult>> {
-        let backend = self.pick(arg_str(&args, "provider"));
+        let backends = self.candidates(arg_str(&args, "provider"));
         async move {
-            let backend = backend?;
             let mut queries: Vec<String> = args
                 .get("queries")
                 .and_then(Value::as_array)
@@ -449,53 +462,67 @@ impl AgentTool for WebSearchTool {
                     .unwrap_or_default(),
                 recency: arg_str(&args, "recencyFilter").map(str::to_string),
             };
-            let futs = queries.iter().map(|q| search_with_retry(backend.clone(), q.clone(), opts.clone()));
-            let all = async {
-                if backend.parallel() {
-                    futures::future::join_all(futs).await
-                } else {
-                    let mut out = Vec::new();
-                    for f in futs {
-                        out.push(f.await);
-                    }
-                    out
+            // Each provider's first error, for the ones that failed every query.
+            let mut failed: Vec<(String, String)> = Vec::new();
+            for backend in backends {
+                let results = tokio::select! {
+                    _ = ctx.cancel.cancelled() => anyhow::bail!("Operation aborted"),
+                    r = search_all(&backend, &queries, &opts) => r,
+                };
+                if let Some(Err(e)) = results.iter().find(|r| r.is_err())
+                    && results.iter().all(Result::is_err)
+                {
+                    failed.push((backend.id().to_string(), format!("{e:#}")));
+                    continue;
                 }
-            };
-            let results = tokio::select! {
-                _ = ctx.cancel.cancelled() => anyhow::bail!("Operation aborted"),
-                r = all => r,
-            };
-            let mut text = String::new();
-            let mut structured = Vec::new();
-            let mut all_failed = true;
-            for (q, r) in queries.iter().zip(results) {
-                text.push_str(&format!("## {q}\n"));
-                match r {
-                    Ok(list) => {
-                        all_failed = false;
-                        if list.is_empty() {
-                            text.push_str("(no results)\n");
-                        }
-                        for (i, r) in list.iter().enumerate() {
-                            text.push_str(&format!("{}. {}\n   {}\n", i + 1, r.title, r.url));
-                            if !r.snippet.is_empty() {
-                                text.push_str(&format!("   {}\n", r.snippet.replace('\n', " ")));
-                            }
-                        }
-                        structured.push(json!({"query": q, "provider": backend.id(), "results": list.iter().map(|r| json!({"title": r.title, "url": r.url, "snippet": r.snippet})).collect::<Vec<_>>()}));
-                    }
-                    Err(e) => {
-                        text.push_str(&format!("Error: {e:#}\n"));
-                        structured.push(json!({"query": q, "provider": backend.id(), "error": format!("{e:#}")}));
-                    }
-                }
-                text.push('\n');
+                return Ok(render(&backend, &queries, results, &failed));
             }
-            let result = ToolResult::text(text.trim_end().to_string()).with_details(json!({"queries": structured, "provider": backend.id()}));
-            Ok(if all_failed { ToolResult { is_error: true, ..result } } else { result })
+            let mut text = String::from("Web search is unavailable: every provider failed.\n");
+            if failed.is_empty() {
+                text.push_str("No web search provider is configured.\n");
+            }
+            for (id, e) in &failed {
+                text.push_str(&format!("- {id}: {e}\n"));
+            }
+            let failures: Vec<Value> = failed.iter().map(|(id, e)| json!({"provider": id, "error": e})).collect();
+            Ok(ToolResult::error(text.trim_end().to_string()).with_details(json!({"unavailable": true, "failures": failures})))
         }
         .boxed()
     }
+}
+
+/// The results from the provider that answered, noting the ones that failed before it.
+fn render(backend: &Arc<dyn SearchBackend>, queries: &[String], results: Vec<anyhow::Result<Vec<SearchResult>>>, failed: &[(String, String)]) -> ToolResult {
+    let mut text = String::new();
+    if !failed.is_empty() {
+        let ids: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
+        text.push_str(&format!("({} failed; results from {})\n\n", ids.join(", "), backend.id()));
+    }
+    let mut structured = Vec::new();
+    for (q, r) in queries.iter().zip(results) {
+        text.push_str(&format!("## {q}\n"));
+        match r {
+            Ok(list) => {
+                if list.is_empty() {
+                    text.push_str("(no results)\n");
+                }
+                for (i, r) in list.iter().enumerate() {
+                    text.push_str(&format!("{}. {}\n   {}\n", i + 1, r.title, r.url));
+                    if !r.snippet.is_empty() {
+                        text.push_str(&format!("   {}\n", r.snippet.replace('\n', " ")));
+                    }
+                }
+                structured.push(json!({"query": q, "provider": backend.id(), "results": list.iter().map(|r| json!({"title": r.title, "url": r.url, "snippet": r.snippet})).collect::<Vec<_>>()}));
+            }
+            Err(e) => {
+                text.push_str(&format!("Error: {e:#}\n"));
+                structured.push(json!({"query": q, "provider": backend.id(), "error": format!("{e:#}")}));
+            }
+        }
+        text.push('\n');
+    }
+    let failures: Vec<Value> = failed.iter().map(|(id, e)| json!({"provider": id, "error": e})).collect();
+    ToolResult::text(text.trim_end().to_string()).with_details(json!({"queries": structured, "provider": backend.id(), "failures": failures}))
 }
 
 #[cfg(test)]
@@ -600,7 +627,30 @@ mod tests {
         let (b, s) = fake("duckduckgo", true, false, 5);
         let r = run(vec![b], json!({"query": "q"})).await;
         assert!(r.is_error);
+        assert_eq!(r.details["unavailable"], true);
         assert_eq!(s.calls.load(Ordering::SeqCst), 1 + SEARCH_RETRIES as usize);
+    }
+
+    #[tokio::test]
+    async fn a_failing_provider_hands_the_search_to_the_next() {
+        let (brave, _) = fake("brave", true, true, 9);
+        let (exa, _) = fake("exa", true, true, 0);
+        let r = run(vec![brave, exa], json!({"query": "q"})).await;
+        assert!(!r.is_error, "{}", r.details);
+        assert_eq!(r.details["provider"], "exa");
+        assert_eq!(r.details["failures"][0]["provider"], "brave");
+    }
+
+    #[tokio::test]
+    async fn every_provider_failing_says_search_is_unavailable() {
+        let (brave, _) = fake("brave", true, true, 9);
+        let (ddg, _) = fake("duckduckgo", true, false, 9);
+        let r = run(vec![brave, ddg], json!({"query": "q"})).await;
+        assert!(r.is_error);
+        assert_eq!(r.details["unavailable"], true);
+        assert_eq!(r.details["failures"].as_array().unwrap().len(), 2);
+        let r = run(vec![], json!({"query": "q"})).await;
+        assert_eq!(r.details["unavailable"], true);
     }
 
     #[tokio::test]

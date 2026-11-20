@@ -99,6 +99,7 @@ impl Chat {
             session_id: "chat-0001".into(),
             cwd,
             native_web_search: false,
+            web_search_required: true,
             max_tokens: None,
             cache_retention: CacheRetention::Short,
             hooks: None,
