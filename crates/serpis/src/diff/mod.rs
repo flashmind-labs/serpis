@@ -122,7 +122,8 @@ fn select_source(ed: &mut Editor) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Chats and agents' terminals a review could go to: those of this machine and worktree first.
+/// Chats and agents' terminals a review could go to, on this machine: the ones used most
+/// recently first, then (never focused yet) this worktree's before others.
 fn targets(ed: &mut Editor, root: &str, machine: &Option<String>) -> Vec<(BufferId, String, String)> {
     let mut out: Vec<(bool, BufferId, String, String)> = Vec::new();
     for id in ed.listed_buffers() {
@@ -141,7 +142,7 @@ fn targets(ed: &mut Editor, root: &str, machine: &Option<String>) -> Vec<(Buffer
         let here = dir == root || dir.starts_with(&format!("{root}/"));
         out.push((here, id, if title.is_empty() { major.clone() } else { title }, format!("{major} · {dir}")));
     }
-    out.sort_by_key(|x| !x.0);
+    out.sort_by_key(|x| (ed.used.iter().position(|b| *b == x.1).unwrap_or(usize::MAX), !x.0));
     out.into_iter().map(|(_, id, t, d)| (id, t, d)).collect()
 }
 
