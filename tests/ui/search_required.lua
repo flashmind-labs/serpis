@@ -1,6 +1,6 @@
 -- Every web search provider failing stops the run (agent-web-search-required), and the turn
 -- can be sent again from the composer, as a rate-limited one can. DuckDuckGo is the mock here
--- (ui-test.sh), which fails every search: nothing leaves the machine.
+-- (ui-test.sh), which fails a search for "unreachable": nothing leaves the machine.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 T.room()
 local d = serpis.debug
@@ -34,7 +34,7 @@ end
 
 serpis.command.run("new-chat")
 serpis.defer(600, function()
-  T.press("S E A R C H : n e w s RET")
+  T.press("S E A R C H : u n r e a c h a b l e RET")
   when(function() return idle() and has("Web search failed") end, function()
     T.check("every provider failing stops the run", has("Web search failed with every provider"), true)
     T.check("the model wasn't asked to go on without search", has("done"), false)
