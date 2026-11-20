@@ -294,6 +294,9 @@ pub struct Editor {
     /// What each chat is doing (model, usage, session entries), readable even while the chat
     /// is busy (`serpis.chat`).
     pub chats: HashMap<BufferId, crate::chat_api::ChatInfo>,
+    /// Buffers by when they were last the focused one, most recent first (in any window or
+    /// workspace): what pickers of buffers list first.
+    pub used: Vec<BufferId>,
     /// Buffers whose code is running (innermost last): `this_buffer`.
     buffer_stack: Vec<BufferId>,
     /// Work for the next tick that needs a busy buffer (`defer`).
@@ -392,6 +395,7 @@ impl Editor {
             }),
             jump: Default::default(),
             chats: HashMap::new(),
+            used: Vec::new(),
             buffer_stack: Vec::new(),
             deferred: Vec::new(),
             loaded_extensions: Vec::new(),
@@ -1450,6 +1454,11 @@ impl Editor {
 
     /// Per-frame work outside painting: queued tasks and buffer polling.
     pub fn tick(&mut self) {
+        let cur = self.current_buffer();
+        if self.used.first() != Some(&cur) && self.buffers.contains_key(cur) && !self.is_empty_view(cur) {
+            self.used.retain(|b| *b != cur && self.buffers.contains_key(*b));
+            self.used.insert(0, cur);
+        }
         self.timed(|_| "queued work".into(), |ed| {
             while let Ok(task) = ed.main_rx.try_recv() {
                 task(ed);
