@@ -137,6 +137,9 @@ pub struct AgentConfig {
     pub cwd: PathBuf,
     /// Ask the provider to search instead of offering the client-side `web_search` tool.
     pub native_web_search: bool,
+    /// Stop the run when a `web_search` finds every provider failing, rather than let the
+    /// model go on without current information.
+    pub web_search_required: bool,
     pub max_tokens: Option<u64>,
     pub max_retries: Option<u32>,
     /// How long providers should keep this chat's prompt cached.
@@ -274,11 +277,18 @@ async fn run_loop(
                 } else {
                     execute_tool_calls(&calls, &tools, cfg, h, emit).await
                 };
+                let search_failed = cfg.web_search_required && results.iter().any(web_search_unavailable);
                 for r in results {
                     let m = Message::ToolResult(r);
                     emit(AgentEvent::MessageStart(m.clone()));
                     emit(AgentEvent::MessageEnd(m.clone()));
                     messages.push(m);
+                }
+                if search_failed {
+                    emit(AgentEvent::TurnEnd);
+                    anyhow::bail!(
+                        "Web search failed with every provider, so the agent stopped rather than go on without current information. Retry (↻) to go on from here, searching again; turning agent-web-search-required off lets it carry on without search."
+                    );
                 }
             }
             emit(AgentEvent::TurnEnd);
@@ -293,6 +303,11 @@ async fn run_loop(
         }
         pending = follow;
     }
+}
+
+/// A `web_search` result saying no provider could search.
+fn web_search_unavailable(r: &ToolResultMessage) -> bool {
+    r.tool_name == "web_search" && r.is_error && r.details["unavailable"] == true
 }
 
 /// Whether the provider searches the web itself, and the tools offered to the model.

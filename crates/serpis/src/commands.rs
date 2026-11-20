@@ -1257,7 +1257,7 @@ pub fn install(ed: &mut Editor) {
     // Toggling tools throws the cache away (tools come first in every request): say what it costs.
     ed.add_hook("variable-changed", o, |ed, p| {
         let name = p.get("name").and_then(Value::as_str).unwrap_or_default();
-        if name != "agent-disabled-tools" && name != "agent-native-web-search" {
+        if !matches!(name, "agent-disabled-tools" | "agent-native-web-search" | "agent-web-search-disabled-providers") {
             return None;
         }
         let id = current_chat(ed)?;

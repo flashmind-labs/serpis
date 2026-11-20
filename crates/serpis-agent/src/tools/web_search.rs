@@ -1,8 +1,8 @@
-// TODO-UPDATE-COMMENT: a Firecrawl backend was added; the list below doesn't name it
-// ---
-//! `web_search` tool: client-side search with pluggable backends (Brave, Exa, Tavily, DuckDuckGo).
-//! When the active model can search natively, the agent asks the provider instead and this tool
-//! is not offered (see `Agent::native_web_search`).
+//! `web_search` tool: client-side search with pluggable backends (Brave, Exa, Tavily, Firecrawl,
+//! DuckDuckGo). Exa and DuckDuckGo need no key (Exa's free endpoint is rate-limited per IP). A provider that fails every query hands them to the next one configured; when all
+//! of them fail, the result says so (`details.unavailable`), and the agent loop can stop the run
+//! there (`AgentConfig::web_search_required`). When the active model can search natively, the
+//! agent asks the provider instead and this tool is not offered (see `Agent::native_web_search`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,12 +137,13 @@ impl SearchBackend for Exa {
     fn id(&self) -> &str {
         "exa"
     }
+    /// Always: without a key it searches through Exa's free MCP endpoint (rate-limited per IP).
     fn available(&self) -> bool {
-        api_key("exa", "EXA_API_KEY").is_some()
+        true
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
-            let key = api_key("exa", "EXA_API_KEY").ok_or_else(|| missing("exa", "EXA_API_KEY"))?;
+            let Some(key) = api_key("exa", "EXA_API_KEY") else { return exa_mcp(&query, &opts).await };
             let base = env("EXA_BASE_URL").unwrap_or_else(|| "https://api.exa.ai".into());
             let (include, exclude): (Vec<_>, Vec<_>) = opts.domain_filter.iter().partition(|d| !d.starts_with('-'));
             let mut body = json!({"query": query, "numResults": opts.num_results, "contents": {"highlights": true}});
@@ -179,6 +180,76 @@ impl SearchBackend for Exa {
         }
         .boxed()
     }
+}
+
+/// Exa's free MCP search (`web_search_exa`), which needs no key. It takes only a query and a
+/// count: domain filters and recency go into the query, and domains are checked again here.
+async fn exa_mcp(query: &str, opts: &SearchOptions) -> anyhow::Result<Vec<SearchResult>> {
+    let url = env("EXA_MCP_URL").unwrap_or_else(|| "https://mcp.exa.ai/mcp".into());
+    let resp = client()
+        .post(format!("{url}?tools=web_search_exa"))
+        .header("Accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "web_search_exa", "arguments": {"query": exa_mcp_query(query, opts), "numResults": opts.num_results}}}))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        let message = format!("Exa (free, no key) search error {status}: {}", serpis_ai::stream::truncate_chars(&body, 300));
+        return Err(ProviderError { status, message, retry_after: None }.into());
+    }
+    exa_mcp_results(&body, opts)
+}
+
+fn exa_mcp_query(query: &str, opts: &SearchOptions) -> String {
+    let mut q = query.to_string();
+    for d in &opts.domain_filter {
+        q.push_str(&if let Some(d) = d.strip_prefix('-') { format!(" -site:{d}") } else { format!(" site:{d}") });
+    }
+    if let Some(r) = &opts.recency {
+        q.push_str(match r.as_str() { "day" => " past 24 hours", "week" => " past week", "month" => " past month", _ => " past year" });
+    }
+    q
+}
+
+/// The JSON-RPC reply (plain, or as server-sent events): its text lists each result as
+/// `Title:`, `URL:`, then `Text:` or `Highlights:`.
+fn exa_mcp_results(body: &str, opts: &SearchOptions) -> anyhow::Result<Vec<SearchResult>> {
+    let reply = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .chain([body])
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .find(|v| v.get("result").is_some() || v.get("error").is_some())
+        .ok_or_else(|| anyhow::anyhow!("Exa (free, no key) returned no reply"))?;
+    if let Some(e) = reply.get("error") {
+        anyhow::bail!("Exa (free, no key) search error: {}", e["message"].as_str().unwrap_or("unknown"));
+    }
+    let result = &reply["result"];
+    // A rate limit comes back as HTTP 200 with this flag.
+    if result.pointer("/_meta/ai.exa~1rateLimited") == Some(&json!(true)) {
+        let message = "Exa's free search is rate limited (add an Exa key for more)".to_string();
+        return Err(ProviderError { status: 429, message, retry_after: None }.into());
+    }
+    let text = result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    if result["isError"] == true {
+        anyhow::bail!("Exa (free, no key) search error: {}", serpis_ai::stream::truncate_chars(&text, 300));
+    }
+    let blocks = regex::Regex::new(r"(?m)^Title: ").unwrap();
+    let field = |block: &str, name: &str| block.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_string()).unwrap_or_default();
+    Ok(blocks
+        .split(&text)
+        .map(|b| format!("Title: {b}"))
+        .filter_map(|b| {
+            let url = field(&b, "URL: ");
+            let body = b.split_once("\nText: ").or_else(|| b.split_once("\nHighlights:")).map(|(_, t)| t).unwrap_or("");
+            let snippet: String = body.trim().trim_end_matches("---").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(400).collect();
+            (!url.is_empty()).then(|| SearchResult { title: field(&b, "Title: "), url, snippet })
+        })
+        .filter(|r| passes_filter(&r.url, &opts.domain_filter))
+        .take(opts.num_results)
+        .collect())
 }
 
 pub struct Tavily;
@@ -299,8 +370,9 @@ impl SearchBackend for DuckDuckGo {
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
+            let base = env("DUCKDUCKGO_BASE_URL").unwrap_or_else(|| "https://html.duckduckgo.com".into());
             let resp = client()
-                .get("https://html.duckduckgo.com/html/")
+                .get(format!("{base}/html/"))
                 .query(&[("q", &query)])
                 .header("Accept", "text/html")
                 .header("User-Agent", "Mozilla/5.0 (compatible; serpis/0.1)")
@@ -386,17 +458,37 @@ impl Default for WebSearchTool {
 }
 
 impl WebSearchTool {
-    fn pick(&self, requested: Option<&str>) -> anyhow::Result<Arc<dyn SearchBackend>> {
-        let requested = requested.map(str::to_string).or_else(|| env("SERPIS_WEB_SEARCH_PROVIDER"));
-        if let Some(b) = requested.and_then(|id| self.backends.iter().find(|b| b.id() == id && b.available())) {
-            return Ok(b.clone());
-        }
-        self.backends
-            .iter()
-            .find(|b| b.available())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("No web search provider is available"))
+    /// The built-in providers, less the ones named (`agent-web-search-disabled-providers`).
+    pub fn without(disabled: &[String]) -> Self {
+        let mut t = WebSearchTool::default();
+        t.backends.retain(|b| !disabled.iter().any(|d| d == b.id()));
+        t
     }
+
+    /// The providers to try, in order: the one asked for (else `SERPIS_WEB_SEARCH_PROVIDER`)
+    /// first, then the other configured ones.
+    fn candidates(&self, requested: Option<&str>) -> Vec<Arc<dyn SearchBackend>> {
+        let requested = requested.map(str::to_string).or_else(|| env("SERPIS_WEB_SEARCH_PROVIDER"));
+        let mut out: Vec<_> = self.backends.iter().filter(|b| b.available()).cloned().collect();
+        if let Some(i) = requested.and_then(|id| out.iter().position(|b| b.id() == id)) {
+            let b = out.remove(i);
+            out.insert(0, b);
+        }
+        out
+    }
+}
+
+/// Every query, on one provider (one at a time when it can't take them at once).
+async fn search_all(backend: &Arc<dyn SearchBackend>, queries: &[String], opts: &SearchOptions) -> Vec<anyhow::Result<Vec<SearchResult>>> {
+    let futs = queries.iter().map(|q| search_with_retry(backend.clone(), q.clone(), opts.clone()));
+    if backend.parallel() {
+        return futures::future::join_all(futs).await;
+    }
+    let mut out = Vec::new();
+    for f in futs {
+        out.push(f.await);
+    }
+    out
 }
 
 impl AgentTool for WebSearchTool {
@@ -416,7 +508,7 @@ impl AgentTool for WebSearchTool {
                 "numResults": {"type": "number", "description": "Results per query (default: 5, max: 20)"},
                 "recencyFilter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Only recent results"},
                 "domainFilter": {"type": "array", "items": {"type": "string"}, "description": "Domains to include, or exclude with a leading '-'"},
-                "provider": {"type": "string", "enum": ids, "description": "Search backend (default: first configured)"}
+                "provider": {"type": "string", "enum": ids, "description": "Search backend to try first (default: first configured; the others are tried if it fails)"}
             }
         })
     }
@@ -425,9 +517,8 @@ impl AgentTool for WebSearchTool {
     }
 
     fn execute(&self, _id: String, args: Value, ctx: ToolContext) -> BoxFuture<'static, anyhow::Result<ToolResult>> {
-        let backend = self.pick(arg_str(&args, "provider"));
+        let backends = self.candidates(arg_str(&args, "provider"));
         async move {
-            let backend = backend?;
             let mut queries: Vec<String> = args
                 .get("queries")
                 .and_then(Value::as_array)
@@ -449,53 +540,67 @@ impl AgentTool for WebSearchTool {
                     .unwrap_or_default(),
                 recency: arg_str(&args, "recencyFilter").map(str::to_string),
             };
-            let futs = queries.iter().map(|q| search_with_retry(backend.clone(), q.clone(), opts.clone()));
-            let all = async {
-                if backend.parallel() {
-                    futures::future::join_all(futs).await
-                } else {
-                    let mut out = Vec::new();
-                    for f in futs {
-                        out.push(f.await);
-                    }
-                    out
+            // Each provider's first error, for the ones that failed every query.
+            let mut failed: Vec<(String, String)> = Vec::new();
+            for backend in backends {
+                let results = tokio::select! {
+                    _ = ctx.cancel.cancelled() => anyhow::bail!("Operation aborted"),
+                    r = search_all(&backend, &queries, &opts) => r,
+                };
+                if let Some(Err(e)) = results.iter().find(|r| r.is_err())
+                    && results.iter().all(Result::is_err)
+                {
+                    failed.push((backend.id().to_string(), format!("{e:#}")));
+                    continue;
                 }
-            };
-            let results = tokio::select! {
-                _ = ctx.cancel.cancelled() => anyhow::bail!("Operation aborted"),
-                r = all => r,
-            };
-            let mut text = String::new();
-            let mut structured = Vec::new();
-            let mut all_failed = true;
-            for (q, r) in queries.iter().zip(results) {
-                text.push_str(&format!("## {q}\n"));
-                match r {
-                    Ok(list) => {
-                        all_failed = false;
-                        if list.is_empty() {
-                            text.push_str("(no results)\n");
-                        }
-                        for (i, r) in list.iter().enumerate() {
-                            text.push_str(&format!("{}. {}\n   {}\n", i + 1, r.title, r.url));
-                            if !r.snippet.is_empty() {
-                                text.push_str(&format!("   {}\n", r.snippet.replace('\n', " ")));
-                            }
-                        }
-                        structured.push(json!({"query": q, "provider": backend.id(), "results": list.iter().map(|r| json!({"title": r.title, "url": r.url, "snippet": r.snippet})).collect::<Vec<_>>()}));
-                    }
-                    Err(e) => {
-                        text.push_str(&format!("Error: {e:#}\n"));
-                        structured.push(json!({"query": q, "provider": backend.id(), "error": format!("{e:#}")}));
-                    }
-                }
-                text.push('\n');
+                return Ok(render(&backend, &queries, results, &failed));
             }
-            let result = ToolResult::text(text.trim_end().to_string()).with_details(json!({"queries": structured, "provider": backend.id()}));
-            Ok(if all_failed { ToolResult { is_error: true, ..result } } else { result })
+            let mut text = String::from("Web search is unavailable: every provider failed.\n");
+            if failed.is_empty() {
+                text.push_str("No web search provider is configured.\n");
+            }
+            for (id, e) in &failed {
+                text.push_str(&format!("- {id}: {e}\n"));
+            }
+            let failures: Vec<Value> = failed.iter().map(|(id, e)| json!({"provider": id, "error": e})).collect();
+            Ok(ToolResult::error(text.trim_end().to_string()).with_details(json!({"unavailable": true, "failures": failures})))
         }
         .boxed()
     }
+}
+
+/// The results from the provider that answered, noting the ones that failed before it.
+fn render(backend: &Arc<dyn SearchBackend>, queries: &[String], results: Vec<anyhow::Result<Vec<SearchResult>>>, failed: &[(String, String)]) -> ToolResult {
+    let mut text = String::new();
+    if !failed.is_empty() {
+        let ids: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
+        text.push_str(&format!("({} failed; results from {})\n\n", ids.join(", "), backend.id()));
+    }
+    let mut structured = Vec::new();
+    for (q, r) in queries.iter().zip(results) {
+        text.push_str(&format!("## {q}\n"));
+        match r {
+            Ok(list) => {
+                if list.is_empty() {
+                    text.push_str("(no results)\n");
+                }
+                for (i, r) in list.iter().enumerate() {
+                    text.push_str(&format!("{}. {}\n   {}\n", i + 1, r.title, r.url));
+                    if !r.snippet.is_empty() {
+                        text.push_str(&format!("   {}\n", r.snippet.replace('\n', " ")));
+                    }
+                }
+                structured.push(json!({"query": q, "provider": backend.id(), "results": list.iter().map(|r| json!({"title": r.title, "url": r.url, "snippet": r.snippet})).collect::<Vec<_>>()}));
+            }
+            Err(e) => {
+                text.push_str(&format!("Error: {e:#}\n"));
+                structured.push(json!({"query": q, "provider": backend.id(), "error": format!("{e:#}")}));
+            }
+        }
+        text.push('\n');
+    }
+    let failures: Vec<Value> = failed.iter().map(|(id, e)| json!({"provider": id, "error": e})).collect();
+    ToolResult::text(text.trim_end().to_string()).with_details(json!({"queries": structured, "provider": backend.id(), "failures": failures}))
 }
 
 #[cfg(test)]
@@ -600,7 +705,50 @@ mod tests {
         let (b, s) = fake("duckduckgo", true, false, 5);
         let r = run(vec![b], json!({"query": "q"})).await;
         assert!(r.is_error);
+        assert_eq!(r.details["unavailable"], true);
         assert_eq!(s.calls.load(Ordering::SeqCst), 1 + SEARCH_RETRIES as usize);
+    }
+
+    #[test]
+    fn exa_without_a_key_reads_the_free_search() {
+        let opts = SearchOptions { num_results: 5, domain_filter: vec!["-pinterest.com".into()], recency: Some("week".into()) };
+        assert_eq!(exa_mcp_query("rust", &opts), "rust -site:pinterest.com past week");
+        let text = "Title: Rust\nURL: https://rust-lang.org/\nPublished: N/A\nHighlights:\nRust is\n\nfast.\n---\nTitle: Pins\nURL: https://pinterest.com/r\nText: pins\nTitle: Book\nURL: https://doc.rust-lang.org/book/\nText: Learn Rust";
+        let body = format!("event: message\ndata: {}\n\n", json!({"result": {"content": [{"type": "text", "text": text}]}}));
+        let got: Vec<_> = exa_mcp_results(&body, &opts).unwrap().into_iter().map(|r| (r.title, r.url, r.snippet)).collect();
+        assert_eq!(got, [("Rust".into(), "https://rust-lang.org/".into(), "Rust is fast.".into()), ("Book".into(), "https://doc.rust-lang.org/book/".into(), "Learn Rust".into())]);
+        let limited = json!({"result": {"content": [], "_meta": {"ai.exa/rateLimited": true}}}).to_string();
+        let e = exa_mcp_results(&limited, &opts).unwrap_err();
+        assert_eq!(e.downcast_ref::<ProviderError>().map(|p| p.status), Some(429));
+    }
+
+    #[test]
+    fn disabled_providers_are_left_out() {
+        let ids = |t: WebSearchTool| t.backends.iter().map(|b| b.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(WebSearchTool::without(&["firecrawl".into()])), ["brave", "exa", "tavily", "duckduckgo"]);
+        assert_eq!(ids(WebSearchTool::without(&[])), ["brave", "exa", "tavily", "firecrawl", "duckduckgo"]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_provider_hands_the_search_to_the_next() {
+        let (brave, _) = fake("brave", true, true, 9);
+        let (exa, _) = fake("exa", true, true, 0);
+        let r = run(vec![brave, exa], json!({"query": "q"})).await;
+        assert!(!r.is_error, "{}", r.details);
+        assert_eq!(r.details["provider"], "exa");
+        assert_eq!(r.details["failures"][0]["provider"], "brave");
+    }
+
+    #[tokio::test]
+    async fn every_provider_failing_says_search_is_unavailable() {
+        let (brave, _) = fake("brave", true, true, 9);
+        let (ddg, _) = fake("duckduckgo", true, false, 9);
+        let r = run(vec![brave, ddg], json!({"query": "q"})).await;
+        assert!(r.is_error);
+        assert_eq!(r.details["unavailable"], true);
+        assert_eq!(r.details["failures"].as_array().unwrap().len(), 2);
+        let r = run(vec![], json!({"query": "q"})).await;
+        assert_eq!(r.details["unavailable"], true);
     }
 
     #[tokio::test]

@@ -23,6 +23,8 @@ models.json). What it says depends on the last user message:
   STEPS:<description>|<command>;;... several, one after another
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
+  SEARCH:<query>  call web_search with that query (ui-test.sh points DuckDuckGo here, which
+                  answers its GET with 501: every search fails)
   EDIT:<path>|<old>|<new>   call edit on that file, replacing old with new
   anything else   reply "ok"
 
@@ -162,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
                 call = ("edit", {"path": path, "edits": [{"oldText": old, "newText": new}]})
             elif prompt.startswith("API:"):
                 call = ("serpis_api", {"topic": prompt[4:]})
+            elif prompt.startswith("SEARCH:"):
+                call = ("web_search", {"query": prompt[7:]})
         if call:
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": f"call_{count}", "type": "function",

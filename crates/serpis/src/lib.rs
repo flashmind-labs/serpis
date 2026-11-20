@@ -167,6 +167,8 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("agent-model", Value::Null, "Default model for new chats, as provider/model-id.");
     ed.defvar("agent-thinking", Value::Null, "Default thinking level: off, minimal, low, medium, high, xhigh, max.");
     ed.defvar("agent-native-web-search", json!(true), "Use the provider's own web search when the model supports it.");
+    ed.defvar("agent-web-search-disabled-providers", json!([]), "web_search providers never used, even with a key: any of \"brave\", \"exa\", \"tavily\", \"firecrawl\", \"duckduckgo\".");
+    ed.defvar("agent-web-search-required", json!(true), "Stop the agent's run when web_search fails with every provider (each configured one is tried in turn), rather than let it go on without current information. Retrying the turn then lets it go on without search. Off: it gets the failure and carries on. Covers serpis's own web_search, not a provider's native search.");
     ed.defvar("agent-max-retries", json!(6), "How many times a model request is sent again when the provider rate-limits it, is overloaded or fails on its side, or the connection drops before anything streams. Waits 1, 2, 4, 8, 16, then 32 seconds, or what the provider asks for up to a minute. 0: never.");
     ed.defvar("agent-disabled-tools", json!([]), "Tool names hidden from the agent.");
     ed.defvar("agent-guidelines", json!([]), "Extra rule bullets for the system prompt.");

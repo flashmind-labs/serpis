@@ -605,6 +605,7 @@ impl Chat {
             session_id: self.session_id.clone(),
             cwd: self.cwd.clone(),
             native_web_search: native,
+            web_search_required: host.var_bool("agent-web-search-required", true),
             max_tokens: None,
             max_retries: Some(host.var_u64("agent-max-retries", serpis_ai::DEFAULT_MAX_RETRIES.into()) as u32),
             cache_retention,

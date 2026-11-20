@@ -1639,9 +1639,13 @@ fn failed_turn(entries: &[Entry], running: bool) -> bool {
     }
     let Some(last_user) = entries.iter().rposition(|e| matches!(e, Entry::User { .. })) else { return false };
     let after = &entries[last_user + 1..];
-    match after.iter().rposition(|e| !matches!(e, Entry::Info { .. })).map(|i| &after[i]) {
+    let last = after.iter().rposition(|e| !matches!(e, Entry::Info { .. }));
+    let noticed = |from: usize| after[from..].iter().any(|e| matches!(e, Entry::Info { tone: Tone::Error, .. }));
+    match last.map(|i| &after[i]) {
         Some(Entry::Assistant { streaming: false, error: Some(_), .. }) => true,
-        None => after.iter().any(|e| matches!(e, Entry::Info { tone: Tone::Error, .. })),
+        // The run stopped after its tools ran (every web search provider failing, say).
+        Some(Entry::Tool { result: Some(_), .. }) => noticed(last.unwrap() + 1),
+        None => noticed(0),
         _ => false,
     }
 }
@@ -4965,6 +4969,12 @@ mod tests {
         assert!(failed_turn(&[user.clone(), note("No API key", Tone::Error)], false));
         assert!(!failed_turn(&[user.clone(), said(vec![], Some("429"))], true));
         assert!(!failed_turn(&[user.clone(), said(vec![text("Done.")], None)], false));
+        // Stopped after a tool ran (web search down): retried, it goes on from there.
+        let tool = |result: Option<ToolResultMessage>| Entry::Tool { id: "1".into(), name: "web_search".into(), args: serde_json::json!({}), partial: None, result, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] };
+        let failed = ToolResultMessage { tool_call_id: "1".into(), tool_name: "web_search".into(), content: vec![], is_error: true, details: Value::Null, timestamp: 0 };
+        assert!(failed_turn(&[user.clone(), tool(Some(failed.clone())), note("Web search failed", Tone::Error)], false));
+        assert!(!failed_turn(&[user.clone(), tool(Some(failed)), note("Cache miss", Tone::MetaWarn)], false));
+        assert!(!failed_turn(&[user.clone(), tool(None), note("Web search failed", Tone::Error)], false));
         assert!(!failed_turn(&[user], false));
     }
 
