@@ -465,10 +465,10 @@ impl WebSearchTool {
         t
     }
 
-    /// The providers to try, in order: the one asked for (else `SERPIS_WEB_SEARCH_PROVIDER`)
-    /// first, then the other configured ones.
-    fn candidates(&self, requested: Option<&str>) -> Vec<Arc<dyn SearchBackend>> {
-        let requested = requested.map(str::to_string).or_else(|| env("SERPIS_WEB_SEARCH_PROVIDER"));
+    /// The providers to try, in order: `SERPIS_WEB_SEARCH_PROVIDER` first, then the other
+    /// configured ones. Which one answers is the harness's business: the model only searches.
+    fn candidates(&self) -> Vec<Arc<dyn SearchBackend>> {
+        let requested = env("SERPIS_WEB_SEARCH_PROVIDER");
         let mut out: Vec<_> = self.backends.iter().filter(|b| b.available()).cloned().collect();
         if let Some(i) = requested.and_then(|id| out.iter().position(|b| b.id() == id)) {
             let b = out.remove(i);
@@ -499,7 +499,6 @@ impl AgentTool for WebSearchTool {
         "Search the web. Returns titles, URLs and snippets for each query. Use several focused queries for broad research. Use domainFilter to restrict (\"example.com\") or exclude (\"-example.com\") sites.".into()
     }
     fn parameters(&self) -> Value {
-        let ids: Vec<&str> = self.backends.iter().filter(|b| b.available()).map(|b| b.id()).collect();
         json!({
             "type": "object",
             "properties": {
@@ -507,8 +506,7 @@ impl AgentTool for WebSearchTool {
                 "queries": {"type": "array", "items": {"type": "string"}, "description": "Several queries (instead of query)"},
                 "numResults": {"type": "number", "description": "Results per query (default: 5, max: 20)"},
                 "recencyFilter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Only recent results"},
-                "domainFilter": {"type": "array", "items": {"type": "string"}, "description": "Domains to include, or exclude with a leading '-'"},
-                "provider": {"type": "string", "enum": ids, "description": "Search backend to try first (default: first configured; the others are tried if it fails)"}
+                "domainFilter": {"type": "array", "items": {"type": "string"}, "description": "Domains to include, or exclude with a leading '-'"}
             }
         })
     }
@@ -517,7 +515,7 @@ impl AgentTool for WebSearchTool {
     }
 
     fn execute(&self, _id: String, args: Value, ctx: ToolContext) -> BoxFuture<'static, anyhow::Result<ToolResult>> {
-        let backends = self.candidates(arg_str(&args, "provider"));
+        let backends = self.candidates();
         async move {
             let mut queries: Vec<String> = args
                 .get("queries")
@@ -569,13 +567,10 @@ impl AgentTool for WebSearchTool {
     }
 }
 
-/// The results from the provider that answered, noting the ones that failed before it.
+/// The results from the provider that answered; the ones that failed before it are noted in the
+/// details (for the transcript), not in what the model reads.
 fn render(backend: &Arc<dyn SearchBackend>, queries: &[String], results: Vec<anyhow::Result<Vec<SearchResult>>>, failed: &[(String, String)]) -> ToolResult {
     let mut text = String::new();
-    if !failed.is_empty() {
-        let ids: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
-        text.push_str(&format!("({} failed; results from {})\n\n", ids.join(", "), backend.id()));
-    }
     let mut structured = Vec::new();
     for (q, r) in queries.iter().zip(results) {
         text.push_str(&format!("## {q}\n"));
@@ -737,6 +732,7 @@ mod tests {
         assert!(!r.is_error, "{}", r.details);
         assert_eq!(r.details["provider"], "exa");
         assert_eq!(r.details["failures"][0]["provider"], "brave");
+        assert!(!r.text_content().contains("brave") && !r.text_content().contains("failed"), "{}", r.text_content());
     }
 
     #[tokio::test]
@@ -762,12 +758,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_configured_providers_are_offered_and_others_fall_back() {
+    async fn the_model_never_sees_providers_and_unconfigured_ones_are_skipped() {
         let (brave, brave_stats) = fake("brave", false, true, 0);
         let (ddg, _) = fake("duckduckgo", true, false, 0);
         let t = WebSearchTool { backends: vec![brave, ddg] };
-        assert_eq!(t.parameters()["properties"]["provider"]["enum"], json!(["duckduckgo"]));
-        let r = t.execute("1".into(), json!({"query": "q", "provider": "brave"}), ToolContext::new(".")).await.unwrap();
+        assert!(!t.parameters().to_string().contains("provider"));
+        let r = t.execute("1".into(), json!({"query": "q"}), ToolContext::new(".")).await.unwrap();
         assert!(!r.is_error);
         assert_eq!(r.details["provider"], "duckduckgo");
         assert_eq!(brave_stats.calls.load(Ordering::SeqCst), 0);
