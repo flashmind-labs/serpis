@@ -769,14 +769,15 @@ impl ChatBuffer {
                     // A review serpis sent (of the agent's text, or a diff page's): drawn as one.
                     match crate::chat_review::parse_sent(text) {
                         Some(sent) => lines.extend(review_bubble_lines(&sent, ei, &mut find_targets, k)),
-                        None => lines.extend(text.lines().map(|l| StyledLine::new(l, Face::UserText))),
+                        None => lines.extend(user_lines(text, t, &m, self.text_w)),
                     }
                     if lines.is_empty() {
                         lines.push(StyledLine::new("", Face::UserText));
                     }
                     let n = lines.len();
                     for (i, l) in lines.into_iter().enumerate() {
-                        let mut l = l.block(blk.nth(i, n)).indent(14.0 * k);
+                        let inset = l.indent;
+                        let mut l = l.block(blk.nth(i, n)).indent(14.0 * k + inset);
                         if i == 0 {
                             l = l.gap(26.0 * k);
                             l.pad_top = 9.0 * k;
@@ -1921,6 +1922,25 @@ fn report_lines(sh: &Shaped, t: &crate::theme::Theme, m: &Measure, avail: f32, s
 /// cards with no fill; a quote's lines have a bar and no border, and are prose).
 fn is_prose(l: &StyledLine) -> bool {
     l.diagram.is_none() && l.block.is_none_or(|b| b.bg == Color32::TRANSPARENT && b.border.is_none())
+}
+
+/// Your message as markdown, as an agent's replies are, to sit inside your bubble: what would
+/// have its own card (code) or sit apart (paragraphs) is inset and spaced inside the bubble
+/// instead (`indent` is within it).
+fn user_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32) -> Vec<StyledLine> {
+    let k = m.scale();
+    markdown_lines(text, t, m, avail, false)
+        .into_iter()
+        .map(|mut l| {
+            if l.face == Face::AssistantText {
+                l.face = Face::UserText;
+            }
+            l.block = None;
+            l.indent = (l.indent - 14.0 * k).max(0.0);
+            l.pad_top += std::mem::take(&mut l.gap_above);
+            l
+        })
+        .collect()
 }
 
 fn markdown_lines(text: &str, t: &crate::theme::Theme, m: &Measure, avail: f32, diagrams: bool) -> Vec<StyledLine> {
@@ -4992,6 +5012,20 @@ mod tests {
         let (text, spans) = inline_spans(s);
         let parts = spans.iter().map(|(r, f)| (text[r.clone()].to_string(), *f)).collect();
         (text, parts)
+    }
+
+    #[test]
+    fn your_messages_are_markdown_inside_their_bubble() {
+        let t = crate::theme::Theme::default();
+        let m = Measure::Chars(8.0);
+        let lines = user_lines("run `foo` **now**\n\n- one\n\n```\nlet x = 1;\n```", &t, &m, 800.0);
+        assert_eq!(lines[0].text, "run foo now");
+        assert_eq!(lines[0].face, Face::UserText);
+        assert!(lines[0].spans.iter().any(|(r, f)| &lines[0].text[r.clone()] == "foo" && *f == Face::InlineCode), "{:?}", lines[0].spans);
+        assert!(lines.iter().all(|l| l.gap_above == 0.0 && l.block.is_none()), "the bubble stays one piece");
+        let item = lines.iter().find(|l| l.text == "one").unwrap();
+        assert!(item.marker.is_some() && item.pad_top > 0.0);
+        assert!(lines.iter().any(|l| l.text == "let x = 1;" && l.face == Face::Code));
     }
 
     #[test]
