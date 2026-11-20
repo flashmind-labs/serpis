@@ -1,5 +1,5 @@
 //! `web_search` tool: client-side search with pluggable backends (Brave, Exa, Tavily, Firecrawl,
-//! DuckDuckGo). A provider that fails every query hands them to the next one configured; when all
+//! DuckDuckGo). Exa and DuckDuckGo need no key (Exa's free endpoint is rate-limited per IP). A provider that fails every query hands them to the next one configured; when all
 //! of them fail, the result says so (`details.unavailable`), and the agent loop can stop the run
 //! there (`AgentConfig::web_search_required`). When the active model can search natively, the
 //! agent asks the provider instead and this tool is not offered (see `Agent::native_web_search`).
@@ -137,12 +137,13 @@ impl SearchBackend for Exa {
     fn id(&self) -> &str {
         "exa"
     }
+    /// Always: without a key it searches through Exa's free MCP endpoint (rate-limited per IP).
     fn available(&self) -> bool {
-        api_key("exa", "EXA_API_KEY").is_some()
+        true
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
-            let key = api_key("exa", "EXA_API_KEY").ok_or_else(|| missing("exa", "EXA_API_KEY"))?;
+            let Some(key) = api_key("exa", "EXA_API_KEY") else { return exa_mcp(&query, &opts).await };
             let base = env("EXA_BASE_URL").unwrap_or_else(|| "https://api.exa.ai".into());
             let (include, exclude): (Vec<_>, Vec<_>) = opts.domain_filter.iter().partition(|d| !d.starts_with('-'));
             let mut body = json!({"query": query, "numResults": opts.num_results, "contents": {"highlights": true}});
@@ -179,6 +180,76 @@ impl SearchBackend for Exa {
         }
         .boxed()
     }
+}
+
+/// Exa's free MCP search (`web_search_exa`), which needs no key. It takes only a query and a
+/// count: domain filters and recency go into the query, and domains are checked again here.
+async fn exa_mcp(query: &str, opts: &SearchOptions) -> anyhow::Result<Vec<SearchResult>> {
+    let url = env("EXA_MCP_URL").unwrap_or_else(|| "https://mcp.exa.ai/mcp".into());
+    let resp = client()
+        .post(format!("{url}?tools=web_search_exa"))
+        .header("Accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "web_search_exa", "arguments": {"query": exa_mcp_query(query, opts), "numResults": opts.num_results}}}))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        let message = format!("Exa (free, no key) search error {status}: {}", serpis_ai::stream::truncate_chars(&body, 300));
+        return Err(ProviderError { status, message, retry_after: None }.into());
+    }
+    exa_mcp_results(&body, opts)
+}
+
+fn exa_mcp_query(query: &str, opts: &SearchOptions) -> String {
+    let mut q = query.to_string();
+    for d in &opts.domain_filter {
+        q.push_str(&if let Some(d) = d.strip_prefix('-') { format!(" -site:{d}") } else { format!(" site:{d}") });
+    }
+    if let Some(r) = &opts.recency {
+        q.push_str(match r.as_str() { "day" => " past 24 hours", "week" => " past week", "month" => " past month", _ => " past year" });
+    }
+    q
+}
+
+/// The JSON-RPC reply (plain, or as server-sent events): its text lists each result as
+/// `Title:`, `URL:`, then `Text:` or `Highlights:`.
+fn exa_mcp_results(body: &str, opts: &SearchOptions) -> anyhow::Result<Vec<SearchResult>> {
+    let reply = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .chain([body])
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .find(|v| v.get("result").is_some() || v.get("error").is_some())
+        .ok_or_else(|| anyhow::anyhow!("Exa (free, no key) returned no reply"))?;
+    if let Some(e) = reply.get("error") {
+        anyhow::bail!("Exa (free, no key) search error: {}", e["message"].as_str().unwrap_or("unknown"));
+    }
+    let result = &reply["result"];
+    // A rate limit comes back as HTTP 200 with this flag.
+    if result.pointer("/_meta/ai.exa~1rateLimited") == Some(&json!(true)) {
+        let message = "Exa's free search is rate limited (add an Exa key for more)".to_string();
+        return Err(ProviderError { status: 429, message, retry_after: None }.into());
+    }
+    let text = result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    if result["isError"] == true {
+        anyhow::bail!("Exa (free, no key) search error: {}", serpis_ai::stream::truncate_chars(&text, 300));
+    }
+    let blocks = regex::Regex::new(r"(?m)^Title: ").unwrap();
+    let field = |block: &str, name: &str| block.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_string()).unwrap_or_default();
+    Ok(blocks
+        .split(&text)
+        .map(|b| format!("Title: {b}"))
+        .filter_map(|b| {
+            let url = field(&b, "URL: ");
+            let body = b.split_once("\nText: ").or_else(|| b.split_once("\nHighlights:")).map(|(_, t)| t).unwrap_or("");
+            let snippet: String = body.trim().trim_end_matches("---").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(400).collect();
+            (!url.is_empty()).then(|| SearchResult { title: field(&b, "Title: "), url, snippet })
+        })
+        .filter(|r| passes_filter(&r.url, &opts.domain_filter))
+        .take(opts.num_results)
+        .collect())
 }
 
 pub struct Tavily;
@@ -387,6 +458,13 @@ impl Default for WebSearchTool {
 }
 
 impl WebSearchTool {
+    /// The built-in providers, less the ones named (`agent-web-search-disabled-providers`).
+    pub fn without(disabled: &[String]) -> Self {
+        let mut t = WebSearchTool::default();
+        t.backends.retain(|b| !disabled.iter().any(|d| d == b.id()));
+        t
+    }
+
     /// The providers to try, in order: the one asked for (else `SERPIS_WEB_SEARCH_PROVIDER`)
     /// first, then the other configured ones.
     fn candidates(&self, requested: Option<&str>) -> Vec<Arc<dyn SearchBackend>> {
@@ -629,6 +707,26 @@ mod tests {
         assert!(r.is_error);
         assert_eq!(r.details["unavailable"], true);
         assert_eq!(s.calls.load(Ordering::SeqCst), 1 + SEARCH_RETRIES as usize);
+    }
+
+    #[test]
+    fn exa_without_a_key_reads_the_free_search() {
+        let opts = SearchOptions { num_results: 5, domain_filter: vec!["-pinterest.com".into()], recency: Some("week".into()) };
+        assert_eq!(exa_mcp_query("rust", &opts), "rust -site:pinterest.com past week");
+        let text = "Title: Rust\nURL: https://rust-lang.org/\nPublished: N/A\nHighlights:\nRust is\n\nfast.\n---\nTitle: Pins\nURL: https://pinterest.com/r\nText: pins\nTitle: Book\nURL: https://doc.rust-lang.org/book/\nText: Learn Rust";
+        let body = format!("event: message\ndata: {}\n\n", json!({"result": {"content": [{"type": "text", "text": text}]}}));
+        let got: Vec<_> = exa_mcp_results(&body, &opts).unwrap().into_iter().map(|r| (r.title, r.url, r.snippet)).collect();
+        assert_eq!(got, [("Rust".into(), "https://rust-lang.org/".into(), "Rust is fast.".into()), ("Book".into(), "https://doc.rust-lang.org/book/".into(), "Learn Rust".into())]);
+        let limited = json!({"result": {"content": [], "_meta": {"ai.exa/rateLimited": true}}}).to_string();
+        let e = exa_mcp_results(&limited, &opts).unwrap_err();
+        assert_eq!(e.downcast_ref::<ProviderError>().map(|p| p.status), Some(429));
+    }
+
+    #[test]
+    fn disabled_providers_are_left_out() {
+        let ids = |t: WebSearchTool| t.backends.iter().map(|b| b.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(WebSearchTool::without(&["firecrawl".into()])), ["brave", "exa", "tavily", "duckduckgo"]);
+        assert_eq!(ids(WebSearchTool::without(&[])), ["brave", "exa", "tavily", "firecrawl", "duckduckgo"]);
     }
 
     #[tokio::test]

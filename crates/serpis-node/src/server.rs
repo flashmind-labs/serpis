@@ -516,7 +516,11 @@ impl Host for NodeHost<'_> {
     fn tools(&self) -> Vec<serpis_agent::ToolRef> {
         // Built in, then the config's (which replace built-ins of the same name), then the ones
         // a client lends that the node has no tool of that name for.
-        let mut tools = serpis_agent::builtin_tools();
+        let off: Vec<String> = self.var("agent-web-search-disabled-providers").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let mut tools: Vec<serpis_agent::ToolRef> = serpis_agent::builtin_tools()
+            .into_iter()
+            .map(|t| if t.name() == "web_search" && !off.is_empty() { Arc::new(serpis_agent::tools::web_search::WebSearchTool::without(&off)) } else { t })
+            .collect();
         for spec in self.lua.tool_specs() {
             tools.retain(|t| t.name() != spec.name);
             tools.push(Arc::new(crate::lua::LuaTool { spec, chat: self.chat.to_string(), post: post(self.msgs) }));

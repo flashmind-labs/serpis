@@ -51,7 +51,9 @@ stop_boxes() {
 trap 'kill $mock $cache 2>/dev/null; stop_terminals; stop_boxes' EXIT
 for _ in $(seq 50); do [[ -s "$tmp/mock.port" && -s "$tmp/cache-mock.port" ]] && break; sleep 0.1; done
 export SERPIS_TEST_MOCK_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/v1" SERPIS_TEST_MOCK_LOG="$tmp/mock.log"
-# Web search never leaves the machine: DuckDuckGo (the keyless backend) is the mock, which fails it.
+# Web search never leaves the machine: DuckDuckGo is the mock, which fails it, and Exa's free
+# endpoint a closed port (the discard port, nothing listens on it).
+export EXA_MCP_URL="http://127.0.0.1:9/mcp"
 export DUCKDUCKGO_BASE_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/ddg"
 export SERPIS_TEST_CACHE_URL="http://127.0.0.1:$(cat "$tmp/cache-mock.port")" SERPIS_TEST_CACHE_LOG="$tmp/cache-mock.log"
 fail=0
