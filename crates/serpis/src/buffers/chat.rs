@@ -2124,6 +2124,18 @@ fn diff_code_start(l: &str) -> Option<usize> {
     (i > digits && b.get(i) == Some(&b' ')).then_some(i + 1)
 }
 
+/// Which provider a web search's results came from, and the ones that failed before it (the
+/// model isn't told: only you see this). Nothing when every one failed: its text says so.
+fn search_provider_lines(details: &Value) -> Vec<StyledLine> {
+    let Some(provider) = details.get("provider").and_then(Value::as_str) else { return Vec::new() };
+    let mut out = vec![StyledLine::new(format!("via {provider}"), Face::Meta)];
+    for f in details.get("failures").and_then(Value::as_array).into_iter().flatten() {
+        let error = f["error"].as_str().unwrap_or("").lines().next().unwrap_or("");
+        out.push(StyledLine::new(format!("{} failed first: {error}", f["provider"].as_str().unwrap_or("?")), Face::Meta));
+    }
+    out
+}
+
 fn default_expanded(name: &str, result: Option<&ToolResultMessage>) -> bool {
     match result {
         Some(r) if r.is_error => true,
@@ -2600,6 +2612,9 @@ fn tool_lines(
                 {
                     body.push((StyledLine::new(format!("[image {}×{}]", img.w, img.h), Face::Meta).image(img.id, img.fit(360.0 * k, 260.0 * k)).pad(4.0 * k, 4.0 * k), None));
                 }
+            }
+            if name == "web_search" {
+                body.extend(search_provider_lines(&r.details).into_iter().map(|l| (l, None)));
             }
             let text = tool_text(r);
             let lines: Vec<&str> = text.lines().collect();
@@ -5012,6 +5027,17 @@ mod tests {
         let (text, spans) = inline_spans(s);
         let parts = spans.iter().map(|(r, f)| (text[r.clone()].to_string(), *f)).collect();
         (text, parts)
+    }
+
+    #[test]
+    fn a_search_says_which_provider_answered() {
+        let texts = |d: Value| search_provider_lines(&d).into_iter().map(|l| l.text).collect::<Vec<_>>();
+        assert_eq!(texts(serde_json::json!({"provider": "exa", "failures": []})), ["via exa"]);
+        assert_eq!(
+            texts(serde_json::json!({"provider": "exa", "failures": [{"provider": "duckduckgo", "error": "bot check\nmore"}]})),
+            ["via exa", "duckduckgo failed first: bot check"]
+        );
+        assert!(texts(serde_json::json!({"unavailable": true, "failures": [{"provider": "exa", "error": "down"}]})).is_empty());
     }
 
     #[test]

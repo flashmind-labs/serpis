@@ -48,6 +48,11 @@ pub struct SearchOptions {
 pub trait SearchBackend: Send + Sync {
     fn id(&self) -> &str;
     fn available(&self) -> bool;
+    /// Searching with a key of yours (higher limits, what you set up), rather than a free
+    /// endpoint: tried before the ones that aren't, unless you set the order.
+    fn keyed(&self) -> bool {
+        true
+    }
     fn parallel(&self) -> bool {
         true
     }
@@ -140,6 +145,9 @@ impl SearchBackend for Exa {
     /// Always: without a key it searches through Exa's free MCP endpoint (rate-limited per IP).
     fn available(&self) -> bool {
         true
+    }
+    fn keyed(&self) -> bool {
+        api_key("exa", "EXA_API_KEY").is_some()
     }
     fn search(&self, query: String, opts: SearchOptions) -> BoxFuture<'static, anyhow::Result<Vec<SearchResult>>> {
         async move {
@@ -365,6 +373,9 @@ impl SearchBackend for DuckDuckGo {
     fn available(&self) -> bool {
         true
     }
+    fn keyed(&self) -> bool {
+        false
+    }
     fn parallel(&self) -> bool {
         false
     }
@@ -447,29 +458,42 @@ fn parse_ddg(html: &str, opts: &SearchOptions) -> Vec<SearchResult> {
 
 pub struct WebSearchTool {
     pub backends: Vec<Arc<dyn SearchBackend>>,
+    /// The providers to try, in this order, and only these (`agent-web-search-providers`).
+    /// None: the ones with a key first, then the free ones.
+    pub order: Option<Vec<String>>,
 }
 
 impl Default for WebSearchTool {
     fn default() -> Self {
         WebSearchTool {
             backends: vec![Arc::new(Brave), Arc::new(Exa), Arc::new(Tavily), Arc::new(Firecrawl), Arc::new(DuckDuckGo)],
+            order: None,
         }
     }
 }
 
 impl WebSearchTool {
-    /// The built-in providers, less the ones named (`agent-web-search-disabled-providers`).
-    pub fn without(disabled: &[String]) -> Self {
-        let mut t = WebSearchTool::default();
+    /// The built-in providers in `order` (`agent-web-search-providers`; None: keyed ones
+    /// first), less the ones `disabled` (`agent-web-search-disabled-providers`).
+    pub fn configured(order: Option<Vec<String>>, disabled: &[String]) -> Self {
+        let mut t = WebSearchTool { order, ..WebSearchTool::default() };
         t.backends.retain(|b| !disabled.iter().any(|d| d == b.id()));
         t
     }
 
-    /// The providers to try, in order: `SERPIS_WEB_SEARCH_PROVIDER` first, then the other
-    /// configured ones. Which one answers is the harness's business: the model only searches.
+    /// The providers to try, in order: `SERPIS_WEB_SEARCH_PROVIDER` first, then the configured
+    /// ones in the order set, else those with a key before the free ones. Which one answers is
+    /// the harness's business: the model only searches.
     fn candidates(&self) -> Vec<Arc<dyn SearchBackend>> {
         let requested = env("SERPIS_WEB_SEARCH_PROVIDER");
-        let mut out: Vec<_> = self.backends.iter().filter(|b| b.available()).cloned().collect();
+        let available: Vec<_> = self.backends.iter().filter(|b| b.available()).cloned().collect();
+        let mut out: Vec<_> = match &self.order {
+            Some(order) => order.iter().filter_map(|id| available.iter().find(|b| b.id() == id).cloned()).collect(),
+            None => {
+                let (keyed, free): (Vec<_>, Vec<_>) = available.into_iter().partition(|b| b.keyed());
+                keyed.into_iter().chain(free).collect()
+            }
+        };
         if let Some(i) = requested.and_then(|id| out.iter().position(|b| b.id() == id)) {
             let b = out.remove(i);
             out.insert(0, b);
@@ -615,6 +639,7 @@ mod tests {
     struct Fake {
         id: &'static str,
         available: bool,
+        keyed: bool,
         parallel: bool,
         stats: Arc<Stats>,
     }
@@ -625,6 +650,9 @@ mod tests {
         }
         fn available(&self) -> bool {
             self.available
+        }
+        fn keyed(&self) -> bool {
+            self.keyed
         }
         fn parallel(&self) -> bool {
             self.parallel
@@ -649,11 +677,11 @@ mod tests {
 
     fn fake(id: &'static str, available: bool, parallel: bool, failures: usize) -> (Arc<dyn SearchBackend>, Arc<Stats>) {
         let stats = Arc::new(Stats { failures: AtomicUsize::new(failures), ..Default::default() });
-        (Arc::new(Fake { id, available, parallel, stats: stats.clone() }), stats)
+        (Arc::new(Fake { id, available, keyed: id != "duckduckgo", parallel, stats: stats.clone() }), stats)
     }
 
     async fn run(backends: Vec<Arc<dyn SearchBackend>>, args: Value) -> ToolResult {
-        WebSearchTool { backends }.execute("1".into(), args, ToolContext::new(".")).await.unwrap()
+        WebSearchTool { backends, order: None }.execute("1".into(), args, ToolContext::new(".")).await.unwrap()
     }
 
     #[test]
@@ -720,8 +748,25 @@ mod tests {
     #[test]
     fn disabled_providers_are_left_out() {
         let ids = |t: WebSearchTool| t.backends.iter().map(|b| b.id().to_string()).collect::<Vec<_>>();
-        assert_eq!(ids(WebSearchTool::without(&["firecrawl".into()])), ["brave", "exa", "tavily", "duckduckgo"]);
-        assert_eq!(ids(WebSearchTool::without(&[])), ["brave", "exa", "tavily", "firecrawl", "duckduckgo"]);
+        assert_eq!(ids(WebSearchTool::configured(None, &["firecrawl".into()])), ["brave", "exa", "tavily", "duckduckgo"]);
+        assert_eq!(ids(WebSearchTool::configured(None, &[])), ["brave", "exa", "tavily", "firecrawl", "duckduckgo"]);
+    }
+
+    #[test]
+    fn providers_with_a_key_come_before_free_ones_unless_the_order_is_set() {
+        let free_exa: Arc<dyn SearchBackend> = Arc::new(Fake { id: "exa", available: true, keyed: false, parallel: true, stats: Default::default() });
+        let (tavily, _) = fake("tavily", true, true, 0);
+        let (firecrawl, _) = fake("firecrawl", true, true, 0);
+        let (brave, _) = fake("brave", false, true, 0);
+        let (ddg, _) = fake("duckduckgo", true, false, 0);
+        let backends = vec![brave, free_exa, tavily, firecrawl, ddg];
+        let ids = |order: Option<Vec<&str>>| {
+            let t = WebSearchTool { backends: backends.clone(), order: order.map(|o| o.into_iter().map(String::from).collect()) };
+            t.candidates().iter().map(|b| b.id().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(None), ["tavily", "firecrawl", "exa", "duckduckgo"]);
+        // Set: those, in that order; one without its key is skipped.
+        assert_eq!(ids(Some(vec!["duckduckgo", "brave", "exa"])), ["duckduckgo", "exa"]);
     }
 
     #[tokio::test]
@@ -761,7 +806,7 @@ mod tests {
     async fn the_model_never_sees_providers_and_unconfigured_ones_are_skipped() {
         let (brave, brave_stats) = fake("brave", false, true, 0);
         let (ddg, _) = fake("duckduckgo", true, false, 0);
-        let t = WebSearchTool { backends: vec![brave, ddg] };
+        let t = WebSearchTool { backends: vec![brave, ddg], order: None };
         assert!(!t.parameters().to_string().contains("provider"));
         let r = t.execute("1".into(), json!({"query": "q"}), ToolContext::new(".")).await.unwrap();
         assert!(!r.is_error);

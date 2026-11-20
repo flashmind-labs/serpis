@@ -23,8 +23,8 @@ models.json). What it says depends on the last user message:
   STEPS:<description>|<command>;;... several, one after another
   LUA:<code>      call serpis_lua with that code
   API:<topic>     call serpis_api with that topic
-  SEARCH:<query>  call web_search with that query (ui-test.sh points DuckDuckGo here, which
-                  answers its GET with 501: every search fails)
+  SEARCH:<query>  call web_search with that query. ui-test.sh points DuckDuckGo here: it gets
+                  one result, or, with "unreachable" in the query, a 501 (every search fails)
   EDIT:<path>|<old>|<new>   call edit on that file, replacing old with new
   anything else   reply "ok"
 
@@ -57,6 +57,23 @@ def text_of(content):
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def do_GET(self):
+        # DuckDuckGo's HTML search, as serpis's web_search reads it.
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+        if "unreachable" in q:
+            self.send_response(501)
+            self.end_headers()
+            return
+        page = ('<div class="result results_links results_links_deep web-result">'
+                '<a rel="nofollow" class="result__a" href="https://example.com/rust">Rust results</a>'
+                '<a class="result__snippet" href="https://example.com/rust">A page about rust.</a>'
+                '<div class="clear"></div></div>')
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(page.encode())
 
     def do_POST(self):
         global count

@@ -36,7 +36,7 @@ async fn search_with_providers_down(required: bool) -> (Option<String>, Message)
     let cfg = AgentConfig {
         model,
         reasoning: ThinkingLevel::Off,
-        tools: vec![Arc::new(WebSearchTool { backends: vec![Arc::new(Down)] })],
+        tools: vec![Arc::new(WebSearchTool { backends: vec![Arc::new(Down)], order: None })],
         system_prompt: "test".into(),
         api_key: Some("test-key".into()),
         headers: Default::default(),
