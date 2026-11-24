@@ -1784,6 +1784,8 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
         let png = std::fs::read(crate::expand_home(&path)).map_err(|e| mlua::Error::runtime(e.to_string()))?;
         ed(|e| e.paste_image(&png))
     })?)?;
+    // What serpis copied last (the newest of its kill ring), nil before anything is.
+    debug.set("copied", lua.create_function(|_, ()| ed(|e| e.kill_ring.last().cloned()))?)?;
     // Terminal images drawn last frame (Kitty graphics): {cell = {w, h}, images = {{id, x, y, w, h}}}.
     debug.set("terminal_images", lua.create_function(|lua, id: Option<u64>| {
         let v = ed(|e| {

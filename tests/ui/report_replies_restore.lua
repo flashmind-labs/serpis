@@ -18,7 +18,7 @@ local steps = {
     T.check("its comments still on the report", has("Question  ·  sent  ·  answered ↓"), true)
     T.check("both", has("Comment  ·  sent  ·  answered ↓"), true)
     local n = 0
-    for _, l in ipairs(d.chat_lines()) do if l.marker == "↑" then n = n + 1 end end
+    for _, l in ipairs(d.chat_lines()) do if l.bar ~= nil and l.links[1] and l.links[1]:sub(1, 5) == "find:" then n = n + 1 end end
     T.check("and the answers' quotes linked back", n, 2)
     T.finish()
     return 100000

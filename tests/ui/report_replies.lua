@@ -32,6 +32,8 @@ local function find(text)
     if at then return n, select(2, line:sub(1, at - 1):gsub("[^\128-\191]", "")) + 1 end
   end
 end
+-- A quote in the agent's answer that links back to what it is about.
+local function answer_quote(l) return l.bar ~= nil and l.links[1] ~= nil and l.links[1]:sub(1, 5) == "find:" end
 local function center(r) return r.x + r.w / 2, r.y + r.h / 2 end
 local function click(r)
   local x, y = center(r)
@@ -117,12 +119,12 @@ local steps = {
     local q, ql = line_where(function(l) return l.text == "Question  ·  sent  ·  answered ↓" end)
     T.check("a question sent stays on the report, answered", q ~= nil and ql.links[1] ~= nil, true)
     T.check("a comment too", line_where(function(l) return l.text == "Comment  ·  sent  ·  answered ↓" end) ~= nil, true)
-    report_line = line_where(function(l) return l.text:find(first, 1, true) and l.marks > 0 and not l.text:find("│", 1, true) and l.marker ~= "↑" end)
+    report_line = line_where(function(l) return l.text:find(first, 1, true) and l.marks > 0 and not l.text:find("│", 1, true) and not answer_quote(l) end)
     T.check("what it is about stays marked", report_line ~= nil, true)
     -- The answer: its quotes marked, linked back.
-    answer_line = line_where(function(l) return l.marker == "↑" and l.text:find("This is the likely cause", 1, true) end)
+    answer_line = line_where(function(l) return answer_quote(l) and l.text:find("This is the likely cause", 1, true) end)
     T.check("the answer's quote of it is marked", answer_line ~= nil, true)
-    T.check("both answered quotes", select(2, (function() local n = 0 for _, l in ipairs(d.chat_lines()) do if l.marker == "↑" then n = n + 1 end end return nil, n end)()), 2)
+    T.check("both answered quotes", select(2, (function() local n = 0 for _, l in ipairs(d.chat_lines()) do if answer_quote(l) then n = n + 1 end end return nil, n end)()), 2)
     -- Follow the links: card → answer.
     serpis.command.run("chat-focus-transcript")
     local text = ql and ql.text or ""
