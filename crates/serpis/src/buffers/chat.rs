@@ -3471,12 +3471,11 @@ impl ChatBuffer {
                 let reply = answer.as_ref().map(|segments| {
                     targets.push((first.to_string(), ei, true));
                     let to = targets.len() - 1;
-                    // The quote in the answer: marked, a link back to what it is about.
+                    // The quote in the answer: a link back to what it is about.
                     targets.push((quote.clone(), ei, false));
                     let back = format!("find:{}", targets.len() - 1);
                     for (line, _) in segments {
                         let l = &mut out[*line];
-                        l.marker = Some(("↑".into(), Face::Accent));
                         let n = l.text.chars().count();
                         l.links.push((0..n, back.clone()));
                     }
