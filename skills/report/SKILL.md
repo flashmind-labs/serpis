@@ -55,7 +55,7 @@ For a code review:
 Comments on your report come as one message: "Review comments on what you wrote". Your reply is
 a new report on what you did since the last one.
 
-- **A change asked for:** a bullet under `## Changed`, said as the change. One you didn't make,
+- **A comment:** a bullet under `## Changed`, said as the change. One you didn't act on,
   or made another way, goes under `## Needs you` with the reason.
 - **A question:** answer it after the first line, quoting the words it asks about.
 - **A challenge from another agent:** fix it (a bullet under `## Changed`), or answer it after

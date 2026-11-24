@@ -2853,7 +2853,7 @@ fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut
     let mut out = Vec::new();
     let challenges = sent.items.iter().filter(|i| i.challenge.is_some()).count();
     let questions = sent.items.iter().filter(|i| i.ask == Ask::Question).count();
-    let changes = sent.items.len() - questions - challenges;
+    let comments = sent.items.len() - questions - challenges;
     let mut parts = Vec::new();
     if challenges > 0 {
         parts.push(format!("{challenges} challenge{}", if challenges == 1 { "" } else { "s" }));
@@ -2861,8 +2861,8 @@ fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut
     if questions > 0 {
         parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
     }
-    if changes > 0 {
-        parts.push(format!("{changes} {}", if sent.compared.is_some() { if changes == 1 { "fix" } else { "fixes" } } else if changes == 1 { "change" } else { "changes" }));
+    if comments > 0 {
+        parts.push(format!("{comments} {}", if sent.compared.is_some() { if comments == 1 { "fix" } else { "fixes" } } else if comments == 1 { "comment" } else { "comments" }));
     }
     let head = match &sent.compared {
         Some(c) => format!("Review of {c}"),
@@ -2875,7 +2875,7 @@ fn review_bubble_lines(sent: &crate::chat_review::Sent, ei: usize, targets: &mut
             _ if it.challenge.is_some() => ("Challenge", Face::Error),
             (Ask::Question, _) => ("Question", Face::Accent),
             (Ask::Fix, true) => ("Fix", Face::MetaWarn),
-            (Ask::Fix, false) => ("Change", Face::MetaWarn),
+            (Ask::Fix, false) => ("Comment", Face::MetaWarn),
         };
         let place = if sent.compared.is_some() { it.place.clone() } else if it.place.is_empty() { "↑ in the report".to_string() } else { format!("↑ {}", it.place) };
         let verdict = it.challenge.as_ref().map(|f| format!("  {}", f.verdict())).unwrap_or_default();
@@ -3395,7 +3395,7 @@ impl ChatBuffer {
         self.submit(ed, message, false);
     }
 
-    /// Question or change: the other one, or `set`.
+    /// Question or comment: the other one, or `set`.
     pub fn cycle_comment_kind(&mut self, set: Option<crate::chat_review::Ask>) {
         use crate::chat_review::Ask;
         if let Some((w, _)) = self.commenting.as_mut() {
@@ -3508,7 +3508,7 @@ impl ChatBuffer {
             let (kind, kind_face) = match (&c.challenge, ask) {
                 (Some(_), _) => ("Challenge", Face::Error),
                 (None, Ask::Question) => ("Question", Face::Accent),
-                (None, Ask::Fix) => ("Change", Face::MetaWarn),
+                (None, Ask::Fix) => ("Comment", Face::MetaWarn),
             };
             // A challenge's verdict as a badge, as a report's outcome is.
             let verdict = c.challenge.as_ref().map(|f| format!(" {} ", if f.withdrawn.is_some() { "WITHDRAWN" } else { f.verdict() }.to_uppercase()));
@@ -3696,7 +3696,7 @@ impl ChatBuffer {
             painter.text(r.center(), egui::Align2::CENTER_CENTER, label, small.clone(), fg);
             (r, resp.clicked())
         };
-        let kind_of = |ask: Ask| if ask == Ask::Question { ("Question", theme.accent) } else { ("Change", theme.yellow) };
+        let kind_of = |ask: Ask| if ask == Ask::Question { ("Question", theme.accent) } else { ("Comment", theme.yellow) };
         let kind_of_comment = |c: &crate::chat_review::Comment| if c.challenge.is_some() { ("Challenge", theme.red) } else { kind_of(c.ask) };
         if let Some((w, _)) = &self.commenting {
             let cy = area.top() + 11.0 * k;
@@ -3704,7 +3704,7 @@ impl ChatBuffer {
             let (kind, kc) = if on_challenge { ("Note", theme.red) } else { kind_of(w.ask) };
             let kw = crate::chrome::text_width(painter, kind, small.clone());
             let kr = Rect::from_min_size(egui::pos2(area.left() - 4.0 * k, cy - 11.0 * k), egui::vec2(kw + 8.0 * k, 22.0 * k));
-            let kresp = ui.interact(kr, ui.scope_id().with("review-kind"), egui::Sense::click()).on_hover_text("Question or change (M-k)");
+            let kresp = ui.interact(kr, ui.scope_id().with("review-kind"), egui::Sense::click()).on_hover_text("Question or comment (M-k)");
             if kresp.hovered() {
                 painter.rect_filled(kr, 5.0 * k, crate::chrome::hover_bg(theme));
             }
@@ -3747,7 +3747,7 @@ impl ChatBuffer {
         let cy = row.center().y;
         let challenges = drafts.iter().filter(|c| c.challenge.is_some()).count();
         let questions = drafts.iter().filter(|c| c.ask == Ask::Question && c.challenge.is_none()).count();
-        let changes = drafts.len() - questions - challenges;
+        let comments = drafts.len() - questions - challenges;
         let rw = crate::chrome::text(painter, egui::pos2(row.left() + 10.0 * k, cy), "Review", small.clone(), theme.accent, 80.0 * k);
         let mut parts = Vec::new();
         if challenges > 0 {
@@ -3756,10 +3756,10 @@ impl ChatBuffer {
         if questions > 0 {
             parts.push(format!("{questions} question{}", if questions == 1 { "" } else { "s" }));
         }
-        if changes > 0 {
-            parts.push(format!("{changes} change{}", if changes == 1 { "" } else { "s" }));
+        if comments > 0 {
+            parts.push(format!("{comments} comment{}", if comments == 1 { "" } else { "s" }));
         }
-        let summary = format!("{} comment{} · {} · sent with your message", drafts.len(), if drafts.len() == 1 { "" } else { "s" }, parts.join(", "));
+        let summary = format!("{} · sent with your message", parts.join(", "));
         let (rx, discard) = button(ui, row.right() - 4.0 * k, cy, "×", false, "discard");
         let (rs, toggle) = button(ui, rx.left() - 4.0 * k, cy, if self.review_open { "Hide" } else { "Show" }, false, "toggle");
         crate::chrome::text(painter, egui::pos2(row.left() + 18.0 * k + rw, cy), &summary, small.clone(), theme.fg_dim, (rs.left() - row.left() - rw - 28.0 * k).max(0.0));

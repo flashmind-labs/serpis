@@ -14,9 +14,9 @@ local steps = {
     return 1500
   end,
   function()
-    T.check("the review you sent is still drawn as one", has("Review  ·  1 question, 1 change"), true)
+    T.check("the review you sent is still drawn as one", has("Review  ·  1 question, 1 comment"), true)
     T.check("its comments still on the report", has("Question  ·  sent  ·  answered ↓"), true)
-    T.check("both", has("Change  ·  sent  ·  answered ↓"), true)
+    T.check("both", has("Comment  ·  sent  ·  answered ↓"), true)
     local n = 0
     for _, l in ipairs(d.chat_lines()) do if l.marker == "↑" then n = n + 1 end end
     T.check("and the answers' quotes linked back", n, 2)
