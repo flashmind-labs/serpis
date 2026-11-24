@@ -439,27 +439,20 @@ impl Chat {
     /// Switch this chat's harness (Claude Code or Antigravity) to permission mode `mode`,
     /// at once if it is running, else from its next turn.
     pub fn set_permission_mode(&mut self, host: &mut dyn Host, mode: &str) -> Result<(), String> {
-        match self.harness() {
-            Some(Harness::Antigravity) => {
-                if !ANTIGRAVITY_MODES.contains(&mode) {
-                    return Err(format!("{mode} isn't an Antigravity mode (one of {})", ANTIGRAVITY_MODES.join(", ")));
-                }
-                if self.permission_mode.as_deref() != Some(mode) {
-                    self.append_entry(host, CLAUDE_MODE, json!({"mode": mode}));
-                }
-                self.permission_mode = Some(mode.to_string());
-                self.antigravity.set_mode(mode);
-            }
-            _ => {
-                if !PERMISSION_MODES.contains(&mode) {
-                    return Err(format!("{mode} isn't a Claude Code permission mode (one of {})", PERMISSION_MODES.join(", ")));
-                }
-                if self.permission_mode.as_deref() != Some(mode) {
-                    self.append_entry(host, CLAUDE_MODE, json!({"mode": mode}));
-                }
-                self.permission_mode = Some(mode.to_string());
-                self.claude.set_permission_mode(mode);
-            }
+        let antigravity = self.is_antigravity();
+        let (modes, what): (&[&str], _) =
+            if antigravity { (&ANTIGRAVITY_MODES, "an Antigravity mode") } else { (&PERMISSION_MODES, "a Claude Code permission mode") };
+        if !modes.contains(&mode) {
+            return Err(format!("{mode} isn't {what} (one of {})", modes.join(", ")));
+        }
+        if self.permission_mode.as_deref() != Some(mode) {
+            self.note_mode(host, mode);
+        }
+        self.permission_mode = Some(mode.to_string());
+        if antigravity {
+            self.antigravity.set_mode(mode);
+        } else {
+            self.claude.set_permission_mode(mode);
         }
         (self.wake)();
         Ok(())
@@ -475,6 +468,13 @@ impl Chat {
 
     pub fn stop_task(&mut self, task: &str) -> bool {
         self.claude.stop_task(task)
+    }
+
+    /// Keep `mode` with the harness it belongs to: a chat that changes harness starts over in
+    /// the new one's default mode.
+    fn note_mode(&mut self, host: &mut dyn Host, mode: &str) {
+        let harness = self.model.as_ref().map(|m| m.api.clone());
+        self.append_entry(host, CLAUDE_MODE, json!({"mode": mode, "harness": harness}));
     }
 
     fn stop_harnesses(&mut self, except: Option<Harness>) {
@@ -1714,7 +1714,7 @@ impl Chat {
             }
             AgentEvent::Nested { parent, event } => self.apply_nested(&parent, *event),
             AgentEvent::PermissionMode(m) => {
-                self.append_entry(host, CLAUDE_MODE, json!({"mode": m}));
+                self.note_mode(host, &m);
                 self.permission_mode = Some(m);
             }
             AgentEvent::ThinkingTokens(d) => *self.thinking_tokens.get_or_insert(0) += d,
@@ -1963,7 +1963,17 @@ impl Chat {
                 }
             }
         }
-        self.permission_mode = l.entries.iter().rev().find(|(k, _)| k == CLAUDE_MODE).and_then(|(_, d)| d["mode"].as_str()).map(str::to_string);
+        // The last mode chosen, if it was chosen on this chat's harness (saved before harnesses
+        // were noted: Claude Code).
+        let harness = self.model.as_ref().map(|m| m.api.as_str());
+        self.permission_mode = l
+            .entries
+            .iter()
+            .rev()
+            .find(|(k, _)| k == CLAUDE_MODE)
+            .filter(|(_, d)| d["harness"].as_str().unwrap_or(serpis_ai::claude_code::PROVIDER) == harness.unwrap_or_default())
+            .and_then(|(_, d)| d["mode"].as_str())
+            .map(str::to_string);
         // Stopped at a usage limit, with nothing sent since: it still goes on when that resets
         // (at once if it already has).
         self.stop_waiting_for_reset();
@@ -2102,14 +2112,14 @@ fn unix_now() -> i64 {
 /// Claude Code's permission modes.
 pub const PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
-/// Antigravity's permission modes (`agy acp` `session/set_mode`, plus `bypassPermissions`).
-pub const ANTIGRAVITY_MODES: [&str; 5] = ["default", "accept-edits", "auto", "plan", "bypassPermissions"];
+/// Antigravity's permission modes (`agy acp` `session/set_mode`).
+pub const ANTIGRAVITY_MODES: [&str; 4] = ["default", "accept-edits", "auto", "plan"];
 
 /// The custom entry a chat's own [`Chat::keep_going`] choice is kept in: `{on = bool}`.
 pub const KEEP_GOING: &str = "keep-going";
 
 /// The custom entries a Claude Code chat keeps what its messages don't say in: its permission
-/// mode (`{mode}`), how work a tool call started ended and a subagent's steps (`{id, task,
+/// mode (`{mode, harness}`: Claude Code's or Antigravity's), how work a tool call started ended and a subagent's steps (`{id, task,
 /// steps}`), and why it took a turn of its own (`{text, at}`: before history message `at`).
 pub const CLAUDE_MODE: &str = "claude-code-mode";
 pub const CLAUDE_TOOL: &str = "claude-code-tool";

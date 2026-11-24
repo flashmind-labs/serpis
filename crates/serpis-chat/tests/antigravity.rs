@@ -212,3 +212,95 @@ fn discovers_models_and_reads_usage_from_fake_agy() {
     assert_eq!(usage["groups"][0]["name"], "Gemini Models");
     assert_eq!(usage["groups"][0]["buckets"][0]["window"], "weekly");
 }
+
+impl World {
+    /// Poll until `done` holds and no turn is running.
+    fn until(&mut self, chat: &mut Chat, what: &str, done: impl Fn(&Chat) -> bool) {
+        for _ in 0..400 {
+            let _ = self.woken.recv_timeout(Duration::from_millis(25));
+            chat.poll(&mut self.host);
+            if !chat.running() && done(chat) {
+                return;
+            }
+        }
+        panic!("{what}: {:#?}", chat.entries());
+    }
+}
+
+fn tool_cards(chat: &Chat, id: &str) -> usize {
+    chat.entries().iter().filter(|e| matches!(e, Entry::Tool { id: i, .. } if i == id)).count()
+}
+
+#[test]
+fn stdout_noise_does_not_fail_a_turn() {
+    let mut world = setup();
+    let mut chat = world.chat();
+    chat.submit(&mut world.host, "noisy hello".into(), vec![], false, None).unwrap();
+    world.finish(&mut chat);
+    assert_eq!(chat.last_error, None);
+    assert!(
+        !chat.entries().iter().any(|e| matches!(e, Entry::Info { text, .. } if text.contains("went on by itself"))),
+        "the reply belongs to the turn, not one agy started: {:#?}",
+        chat.entries()
+    );
+    assert_eq!(last_text(&chat), "echo: noisy hello");
+}
+
+#[test]
+fn asks_between_runs_are_answered_once() {
+    // Antigravity asks after its turn ended: on its own (between runs), or in a turn it
+    // started by itself.
+    for prompt in ["background ask", "background turn ask"] {
+        let mut world = setup();
+        let mut chat = world.chat();
+        chat.submit(&mut world.host, prompt.into(), vec![], false, None).unwrap();
+        let id = world.wait_for_ask(&mut chat);
+        assert_eq!(id, "bg-1", "{prompt}");
+        assert!(chat.answer(&id, Decision::Allow));
+        world.until(&mut chat, prompt, |c| last_text(c) == "Command finished.");
+        assert_eq!(tool_cards(&chat, "bg-1"), 1, "{prompt}: one card for the tool: {:#?}", chat.entries());
+        assert!(
+            matches!(serpis_proto::find_tool(chat.entries(), "bg-1"), Some(Entry::Tool { result: Some(r), .. }) if !r.is_error),
+            "{prompt}"
+        );
+    }
+}
+
+#[test]
+fn clearing_a_chat_with_a_pending_ask_starts_agy_over() {
+    let mut world = setup();
+    let mut chat = world.chat();
+    chat.submit(&mut world.host, "background ask".into(), vec![], false, None).unwrap();
+    world.wait_for_ask(&mut chat);
+    chat.clear();
+    chat.submit(&mut world.host, "hello".into(), vec![], false, None).unwrap();
+    world.finish(&mut chat);
+    assert_eq!(last_text(&chat), "echo: hello");
+}
+
+#[test]
+fn modes_restore_only_on_their_harness() {
+    let mut world = setup();
+    let mut chat = world.chat();
+    chat.submit(&mut world.host, "hello".into(), vec![], false, None).unwrap();
+    world.finish(&mut chat);
+    assert!(chat.set_permission_mode(&mut world.host, "bypassPermissions").is_err());
+    assert!(chat.set_permission_mode(&mut world.host, "acceptEdits").is_err(), "Claude Code's spelling");
+    chat.set_permission_mode(&mut world.host, "accept-edits").unwrap();
+    let path = chat.session.as_ref().map(|s| s.path.clone()).expect("its session");
+
+    let mut back = world.chat();
+    back.restore(&mut world.host, &serpis_chat::session::load(&path).unwrap());
+    assert_eq!(back.state().permission_mode.as_deref(), Some("accept-edits"));
+
+    // The same mode, last chosen on Claude Code: not Antigravity's.
+    let mut loaded = serpis_chat::session::load(&path).unwrap();
+    for (k, d) in &mut loaded.entries {
+        if k == serpis_chat::CLAUDE_MODE {
+            d["harness"] = json!(serpis_ai::claude_code::PROVIDER);
+        }
+    }
+    let mut other = world.chat();
+    other.restore(&mut world.host, &loaded);
+    assert_eq!(other.state().permission_mode.as_deref(), Some("default"));
+}

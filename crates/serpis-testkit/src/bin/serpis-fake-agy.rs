@@ -41,7 +41,8 @@ fn main() {
     }
 
     let stdin = std::io::stdin();
-    let mut pending_permission: Option<(Value, Value, String)> = None;
+    // (permission request id, prompt to finish once answered, session, tool call)
+    let mut pending_permission: Option<(Value, Option<Value>, String, String)> = None;
     let mut current_model = "gemini-4-neon".to_string();
     let mut current_thought = "high".to_string();
     let mut current_mode = "default".to_string();
@@ -50,7 +51,7 @@ fn main() {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some((perm_id, prompt_id, session_id)) = pending_permission.take() {
+        if let Some((perm_id, prompt_id, session_id, tool_id)) = pending_permission.take() {
             if message["id"] == perm_id {
                 let outcome = message.pointer("/result/outcome/outcome").and_then(Value::as_str);
                 let option = message.pointer("/result/outcome/optionId").and_then(Value::as_str);
@@ -64,7 +65,7 @@ fn main() {
                         "sessionId": session_id,
                         "update": {
                             "sessionUpdate": "tool_call_update",
-                            "toolCallId": "cmd-1",
+                            "toolCallId": tool_id,
                             "status": status,
                             "content": [{"type": "content", "content": {"type": "text", "text": output}}]
                         }
@@ -81,10 +82,12 @@ fn main() {
                         }
                     }
                 }));
-                finish_prompt(prompt_id, &session_id);
+                if let Some(prompt_id) = prompt_id {
+                    finish_prompt(prompt_id, &session_id);
+                }
                 continue;
             }
-            pending_permission = Some((perm_id, prompt_id, session_id));
+            pending_permission = Some((perm_id, prompt_id, session_id, tool_id));
         }
 
         let id = message["id"].clone();
@@ -273,28 +276,47 @@ fn main() {
                             }
                         }
                     }));
-                    let perm_id = json!(9001);
+                    ask_permission(9001, &session_id, "cmd-1");
+                    pending_permission = Some((json!(9001), Some(id), session_id, "cmd-1".into()));
+                } else if text.contains("background") {
+                    // The prompt ends, then Antigravity goes on by itself and asks to run a
+                    // command: after starting to talk ("background turn"), or before.
+                    finish_prompt(id, &session_id);
+                    if text.contains("background turn") {
+                        send(json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "Background job started."}
+                                }
+                            }
+                        }));
+                    }
                     send(json!({
                         "jsonrpc": "2.0",
-                        "id": perm_id,
-                        "method": "session/request_permission",
+                        "method": "session/update",
                         "params": {
                             "sessionId": session_id,
-                            "toolCall": {
-                                "toolCallId": "cmd-1",
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "bg-1",
                                 "title": "Run printf ok",
                                 "kind": "execute",
+                                "status": "pending",
                                 "rawInput": {"CommandLine": "printf ok", "Cwd": "/tmp"}
-                            },
-                            "options": [
-                                {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
-                                {"optionId": "always", "name": "Allow always", "kind": "allow_always"},
-                                {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
-                            ]
+                            }
                         }
                     }));
-                    pending_permission = Some((perm_id, id, session_id));
+                    ask_permission(9002, &session_id, "bg-1");
+                    pending_permission = Some((json!(9002), None, session_id, "bg-1".into()));
                 } else {
+                    if text.contains("noisy") {
+                        // A log line on stdout that isn't JSON-RPC.
+                        println!("agy: warming up");
+                    }
                     send(json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",
@@ -323,6 +345,28 @@ fn main() {
             _ => {}
         }
     }
+}
+
+fn ask_permission(id: u64, session_id: &str, tool_id: &str) {
+    send(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": session_id,
+            "toolCall": {
+                "toolCallId": tool_id,
+                "title": "Run printf ok",
+                "kind": "execute",
+                "rawInput": {"CommandLine": "printf ok", "Cwd": "/tmp"}
+            },
+            "options": [
+                {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "always", "name": "Allow always", "kind": "allow_always"},
+                {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
+            ]
+        }
+    }));
 }
 
 fn finish_prompt(id: Value, session_id: &str) {

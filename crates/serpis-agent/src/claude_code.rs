@@ -308,7 +308,7 @@ async fn turns(p: &mut Process, mut queue: VecDeque<Message>, mut context: Optio
 /// SIGKILL after `grace` to those still there. Descendants are found by parent, not process
 /// group: the commands `claude` runs may be in groups of their own. A process is killed only
 /// if it is still the one found (same start time), never one that reused its pid.
-fn end_tree(pid: u32, grace: Duration) {
+pub(crate) fn end_tree(pid: u32, grace: Duration) {
     end_processes(process_tree(pid), grace);
 }
 

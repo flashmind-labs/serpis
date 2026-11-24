@@ -960,7 +960,7 @@ pub fn install(ed: &mut Editor) {
         |ed, _| {
             let (mode, is_agy) = with_chat(ed, |c, _| {
                 let s = c.state_now();
-                let agy = s.model.as_deref().is_some_and(|m| m.starts_with("antigravity/"));
+                let agy = s.model.as_deref().and_then(|m| m.strip_prefix(serpis_ai::antigravity::PROVIDER)).is_some_and(|r| r.starts_with('/'));
                 (s.permission_mode, agy)
             })?;
             let Some(mode) = mode else {
@@ -986,7 +986,7 @@ pub fn install(ed: &mut Editor) {
             let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
             let (mode, is_agy) = with_chat(ed, |c, _| {
                 let s = c.state_now();
-                let agy = s.model.as_deref().is_some_and(|m| m.starts_with("antigravity/"));
+                let agy = s.model.as_deref().and_then(|m| m.strip_prefix(serpis_ai::antigravity::PROVIDER)).is_some_and(|r| r.starts_with('/'));
                 (s.permission_mode, agy)
             })?;
             if mode.is_none() {
@@ -1011,7 +1011,6 @@ pub fn install(ed: &mut Editor) {
                     ("accept-edits", "edits without asking; asks for commands"),
                     ("auto", "approves edits and commands automatically (hooks still apply)"),
                     ("plan", "reads and plans, changes nothing until you approve"),
-                    ("bypassPermissions", "never asks and allows everything"),
                 ]
             } else {
                 &[

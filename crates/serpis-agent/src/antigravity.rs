@@ -3,8 +3,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -66,7 +67,14 @@ pub struct Antigravity {
     live_mode: Arc<Mutex<Option<String>>>,
     next_id: Arc<AtomicU64>,
     stop: Arc<Mutex<CancellationToken>>,
+    pid: Arc<Mutex<Option<u32>>>,
+    /// Stopped while locked: the next run starts it again.
+    stale: Arc<AtomicBool>,
 }
+
+/// How long a turn Antigravity started by itself may stay quiet before it counts as done
+/// (ACP marks no end for one).
+const QUIET: Duration = Duration::from_secs(2);
 
 pub fn is_reply(message: &Message) -> bool {
     matches!(message, Message::Assistant(a) if a.provider == serpis_ai::antigravity::PROVIDER)
@@ -107,13 +115,12 @@ impl Antigravity {
         let Some((tx, session_id)) = guard.as_ref() else {
             return false;
         };
-        let wire_mode = acp_mode_id(mode);
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = alloc_id(&self.next_id);
         let msg = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "session/set_mode",
-            "params": {"sessionId": session_id, "modeId": wire_mode}
+            "params": {"sessionId": session_id, "modeId": mode}
         });
         tx.send(format!("{msg}\n")).is_ok()
     }
@@ -124,11 +131,19 @@ impl Antigravity {
         }
         *self.writer.lock().unwrap() = None;
         self.stop.lock().unwrap().cancel();
-        if let Ok(mut process) = self.process.try_lock() {
-            if let Some(process) = process.as_mut() {
-                let _ = process.child.start_kill();
+        match self.process.try_lock() {
+            Ok(mut process) => {
+                if let Some(process) = process.as_mut() {
+                    let _ = process.child.start_kill();
+                }
+                *process = None;
             }
-            *process = None;
+            Err(_) => {
+                if let Some(pid) = self.pid.lock().unwrap().take() {
+                    crate::claude_code::end_tree(pid, Duration::from_secs(3));
+                }
+                self.stale.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -145,22 +160,23 @@ impl Antigravity {
                 let Some(p) = guard.as_mut().filter(|_| !token.is_cancelled()) else {
                     return;
                 };
-                let value = if let Some(ahead) = p.pending.pop_front() {
-                    Some(ahead)
-                } else {
-                    tokio::select! {
+                let value = match p.pending.pop_front() {
+                    Some(ahead) => ahead,
+                    None => tokio::select! {
                         line = p.lines.next_line() => match line {
-                            Ok(Some(l)) => serde_json::from_str::<Value>(&l).ok(),
+                            Ok(Some(l)) => match serde_json::from_str::<Value>(&l) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            },
                             _ => return,
                         },
                         _ = token.cancelled() => return,
-                    }
+                    },
                 };
-                let Some(value) = value else { continue };
-                if value.get("id").is_some() && value["method"].is_string() {
-                    let Some(sid) = p.session_id.clone() else { continue };
-                    let mut turn = Turn::new(&cfg.model, &sid, &emit);
-                    if p.handle_request(&value, &mut turn, &cfg, &AgentHandle::new(), &emit)
+                let Some(sid) = p.session_id.clone() else { continue };
+                if is_request(&value) {
+                    let turn = state.get_or_insert_with(|| Turn::new(&cfg.model, &sid, &emit));
+                    if p.handle_request(&value, turn, &cfg, &AgentHandle::new(), &token, &emit)
                         .await
                         .is_err()
                     {
@@ -172,72 +188,30 @@ impl Antigravity {
                     continue;
                 }
                 let update = &value["params"]["update"];
-                match update["sessionUpdate"].as_str().unwrap_or("") {
-                    "usage_update" => {
-                        let used = update["used"].as_u64().unwrap_or(0);
-                        let window = update["size"].as_u64().unwrap_or(cfg.model.context_window);
-                        if window > 0 {
-                            emit(AgentEvent::Context {
-                                used,
-                                window,
-                                compacts_at: None,
-                            });
-                        }
-                    }
-                    "current_mode_update" => {
-                        if let Some(mode) = update["currentModeId"].as_str() {
-                            p.active_mode = Some(mode.to_string());
-                            emit(AgentEvent::PermissionMode(mode.to_string()));
-                        }
-                    }
-                    "tool_call" | "tool_call_update" => {
-                        let Some(sid) = p.session_id.clone() else { continue };
-                        let turn = state.get_or_insert_with(|| Turn::new(&cfg.model, &sid, &emit));
-                        turn.session_update(update);
-                    }
-                    "agent_message_chunk" | "agent_thought_chunk" => {
-                        // Autonomous turn (e.g. a scheduled wake or background task finishing).
-                        let Some(sid) = p.session_id.clone() else { continue };
-                        let h = AgentHandle::new();
-                        emit(AgentEvent::Adopted {
-                            handle: h.clone(),
-                            why: None,
-                        });
-                        emit(AgentEvent::AgentStart);
-                        let mut turn = state
-                            .take()
-                            .unwrap_or_else(|| Turn::new(&cfg.model, &sid, &emit));
-                        turn.session_update(update);
-                        // Drain remaining updates until idle or cancelled.
-                        loop {
-                            let next = tokio::select! {
-                                line = tokio::time::timeout(std::time::Duration::from_secs(2), p.lines.next_line()) => match line {
-                                    Ok(Ok(Some(l))) => serde_json::from_str::<Value>(&l).ok(),
-                                    _ => None,
-                                },
-                                _ = h.cancel.cancelled() => {
-                                    let _ = p.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}));
-                                    None
-                                }
-                                _ = token.cancelled() => None,
-                            };
-                            let Some(next) = next else { break };
-                            if next["method"].as_str() == Some("session/update") {
-                                turn.session_update(&next["params"]["update"]);
-                            }
-                        }
-                        turn.finish(
-                            if h.cancel.is_cancelled() {
-                                StopReason::Aborted
-                            } else {
-                                StopReason::Stop
-                            },
-                            None,
-                        );
-                        emit(AgentEvent::AgentEnd { error: None });
-                    }
-                    _ => {}
+                p.track_mode(update);
+                if !matches!(
+                    update["sessionUpdate"].as_str(),
+                    Some("agent_message_chunk" | "agent_thought_chunk")
+                ) {
+                    state
+                        .get_or_insert_with(|| Turn::new(&cfg.model, &sid, &emit))
+                        .session_update(update);
+                    continue;
                 }
+                // Autonomous turn (e.g. a scheduled wake or background task finishing).
+                let h = AgentHandle::new();
+                emit(AgentEvent::Adopted {
+                    handle: h.clone(),
+                    why: None,
+                });
+                emit(AgentEvent::AgentStart);
+                let mut turn = state
+                    .take()
+                    .unwrap_or_else(|| Turn::new(&cfg.model, &sid, &emit));
+                turn.session_update(update);
+                let stop = p.follow(&mut turn, &cfg, &h, &token, &emit).await;
+                turn.finish(stop, None);
+                emit(AgentEvent::AgentEnd { error: None });
             }
         });
     }
@@ -258,10 +232,12 @@ impl Antigravity {
             }
             stop.clone()
         };
+        let stale = self.stale.swap(false, Ordering::SeqCst);
         let exited = guard
             .as_mut()
             .is_some_and(|p| p.child.try_wait().ok().flatten().is_some());
-        let restart = exited
+        let restart = stale
+            || exited
             || guard.as_ref().is_none_or(|p| {
                 p.launch.binary != cfg.launch.binary
                     || p.launch.cwd != cfg.launch.cwd
@@ -275,7 +251,9 @@ impl Antigravity {
             if let Some(old) = guard.as_mut() {
                 let _ = old.child.start_kill();
             }
-            *guard = Some(Process::start(cfg.launch.clone(), self.next_id.clone(), self.live_mode.clone()).await?);
+            let process = Process::start(cfg.launch.clone(), self.next_id.clone(), self.live_mode.clone()).await?;
+            *self.pid.lock().unwrap() = process.child.id();
+            *guard = Some(process);
         }
         let process = guard.as_mut().expect("process was started");
         let saved_session = history.iter().rev().find_map(|m| match m {
@@ -499,25 +477,24 @@ impl Process {
         }
         if let Some(mode) = cfg.mode.as_deref() {
             *self.live_mode.lock().unwrap() = Some(mode.to_string());
-            let wire_mode = acp_mode_id(mode);
-            if self.active_mode.as_deref() != Some(wire_mode) {
+            if self.active_mode.as_deref() != Some(mode) {
                 let response = self
                     .call(
                         "session/set_mode",
-                        json!({"sessionId": session_id, "modeId": wire_mode}),
+                        json!({"sessionId": session_id, "modeId": mode}),
                     )
                     .await;
                 if response.is_ok() {
-                    self.active_mode = Some(wire_mode.to_string());
+                    self.active_mode = Some(mode.to_string());
                 } else if let Ok(r) = self
                     .call(
                         "session/set_config_option",
-                        json!({"sessionId": session_id, "configId": "mode", "value": wire_mode}),
+                        json!({"sessionId": session_id, "configId": "mode", "value": mode}),
                     )
                     .await
                 {
                     self.record_config(&r["result"]);
-                    self.active_mode = Some(wire_mode.to_string());
+                    self.active_mode = Some(mode.to_string());
                 }
             }
         }
@@ -534,7 +511,56 @@ impl Process {
     }
 
     fn alloc_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::SeqCst) + 1
+        alloc_id(&self.next_id)
+    }
+
+    /// Remember a mode Antigravity reports switching to.
+    fn track_mode(&mut self, update: &Value) {
+        if update["sessionUpdate"].as_str() == Some("current_mode_update")
+            && let Some(mode) = update["currentModeId"].as_str()
+        {
+            self.active_mode = Some(mode.to_string());
+        }
+    }
+
+    /// Follow a turn Antigravity started by itself until it goes quiet, answering what it asks.
+    async fn follow(
+        &mut self,
+        turn: &mut Turn<'_>,
+        cfg: &RunConfig,
+        h: &AgentHandle,
+        stop: &CancellationToken,
+        emit: &EmitFn,
+    ) -> StopReason {
+        loop {
+            let value = match self.pending.pop_front() {
+                Some(ahead) => ahead,
+                None => tokio::select! {
+                    line = tokio::time::timeout(QUIET, self.lines.next_line()) => match line {
+                        Ok(Ok(Some(l))) => match serde_json::from_str::<Value>(&l) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        },
+                        _ => return StopReason::Stop,
+                    },
+                    _ = h.cancel.cancelled() => {
+                        let session_id = turn.session_id.clone();
+                        let _ = self.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}}));
+                        return StopReason::Aborted;
+                    }
+                    _ = stop.cancelled() => return StopReason::Aborted,
+                },
+            };
+            if is_request(&value) {
+                if self.handle_request(&value, turn, cfg, h, stop, emit).await.is_err() {
+                    return StopReason::Error;
+                }
+            } else if value["method"].as_str() == Some("session/update") {
+                let update = &value["params"]["update"];
+                self.track_mode(update);
+                turn.session_update(update);
+            }
+        }
     }
 
     async fn turn(
@@ -569,7 +595,13 @@ impl Process {
                 Some(value)
             } else {
                 tokio::select! {
-                    line = self.lines.next_line() => self.parse_line(line?).transpose()?,
+                    line = self.lines.next_line() => match line? {
+                        Some(l) => match serde_json::from_str::<Value>(&l) {
+                            Ok(v) => Some(v),
+                            Err(_) => continue,
+                        },
+                        None => None,
+                    },
                     _ = h.steered(), if !cancelled && self.supports_steering => {
                         for message in h.take_steering() {
                             let blocks = prompt_blocks(&message);
@@ -644,17 +676,13 @@ impl Process {
                 state.finish(stop, None);
                 return Ok(());
             }
-            if value.get("id").is_some() && value["method"].is_string() {
-                self.handle_request(&value, &mut state, cfg, h, emit).await?;
+            if is_request(&value) {
+                self.handle_request(&value, &mut state, cfg, h, process_stop, emit).await?;
                 continue;
             }
             if value["method"].as_str() == Some("session/update") {
                 let update = &value["params"]["update"];
-                if update["sessionUpdate"].as_str() == Some("current_mode_update")
-                    && let Some(mode) = update["currentModeId"].as_str()
-                {
-                    self.active_mode = Some(mode.to_string());
-                }
+                self.track_mode(update);
                 state.session_update(update);
             }
         }
@@ -666,6 +694,7 @@ impl Process {
         state: &mut Turn<'_>,
         cfg: &RunConfig,
         h: &AgentHandle,
+        stop: &CancellationToken,
         emit: &EmitFn,
     ) -> Result<()> {
         let method = request["method"].as_str().unwrap_or("");
@@ -711,7 +740,7 @@ impl Process {
         let mode = self.effective_mode(cfg);
         let auto_allow = !is_question
             && match mode.as_deref() {
-                Some("auto" | "bypassPermissions") => true,
+                Some("auto") => true,
                 Some("accept-edits") => matches!(name.as_str(), "edit" | "read" | "grep" | "web_search"),
                 _ => false,
             };
@@ -737,6 +766,7 @@ impl Process {
                     tokio::select! {
                         answer = answer => answer.unwrap_or(Answer::Deny(None)),
                         _ = h.cancel.cancelled() => Answer::Deny(Some("Stopped by the user".into())),
+                        _ = stop.cancelled() => Answer::Deny(Some("Stopped by the user".into())),
                     }
                 }
             },
@@ -781,10 +811,6 @@ impl Process {
         self.tx
             .send(format!("{value}\n"))
             .map_err(|_| anyhow!("Antigravity ACP stdin closed"))
-    }
-
-    fn parse_line(&self, line: Option<String>) -> Option<Result<Value>> {
-        line.map(|line| serde_json::from_str(&line).map_err(|e| anyhow!(e)))
     }
 }
 
@@ -1044,12 +1070,13 @@ impl<'a> Turn<'a> {
     }
 }
 
-/// Map Serpis permission modes onto the mode IDs `agy acp` accepts in `session/set_mode`.
-fn acp_mode_id(mode: &str) -> &str {
-    match mode {
-        "bypassPermissions" => "auto",
-        other => other,
-    }
+fn alloc_id(next: &AtomicU64) -> u64 {
+    next.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// A JSON-RPC request from `agy acp` (it has a method and an id to answer).
+fn is_request(value: &Value) -> bool {
+    value.get("id").is_some() && value["method"].is_string()
 }
 
 fn parse_semver(version: &str) -> Option<(u64, u64, u64)> {
