@@ -975,7 +975,7 @@ pub fn install(ed: &mut Editor) {
     ed.defvar("sidebar-git-refresh", json!(5.0), "Seconds between background refreshes of worktrees and git status while the sidebar shows.");
     ed.defvar("sidebar-jump-to-workspace", json!(true), "Opening a buffer shown on another workspace switches there instead of showing it here.");
     ed.defvar("projects", json!(Editor::persisted_state("projects").unwrap_or(json!([]))), "Project directories always listed in the sidebar (project-add / project-remove).");
-    ed.defvar("agent-programs", json!(["claude", "codex", "pi", "aider", "opencode", "gemini", "amp", "goose", "crush", "cursor-agent", "qwen", "droid"]), "Programs that count as coding agents when they run in a terminal.");
+    ed.defvar("agent-programs", json!(["claude", "codex", "agy", "pi", "aider", "opencode", "gemini", "amp", "goose", "crush", "cursor-agent", "qwen", "droid"]), "Programs that count as coding agents when they run in a terminal.");
     ed.defvar("terminal-busy-title-regexp", json!("^[\u{2800}-\u{28FF}]"), "A terminal title matching this means its agent is working (Claude Code spins a braille glyph). \"\" disables.");
     ed.defvar("terminal-quiet-seconds", json!(1.5), "Seconds without output after which an agent in a terminal counts as waiting for you.");
     ed.defvar("new-buffer-directory", json!("same"), "Where new-chat / new-terminal start: \"same\" (the folder the current chat or terminal is in; from anything else, its worktree root), \"project\" (the current buffer's worktree root), \"buffer\" (its directory) or \"editor\" (where serpis started).");

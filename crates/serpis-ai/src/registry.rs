@@ -158,6 +158,8 @@ struct State {
     claude_code: Option<PathBuf>,
     /// The `codex` CLI, when installed: Codex harness models are offered then.
     codex: Option<PathBuf>,
+    /// The `agy` CLI, when installed: Antigravity harness models are offered then.
+    antigravity: Option<PathBuf>,
 }
 
 /// Thread-safe model registry. Cheap to clone.
@@ -228,6 +230,7 @@ impl Registry {
         st.errors = errors;
         st.claude_code = crate::claude_code::find_binary();
         st.codex = crate::codex::find_binary();
+        st.antigravity = crate::antigravity::find_binary();
     }
 
     pub fn load_errors(&self) -> Vec<String> {
@@ -253,6 +256,9 @@ impl Registry {
         if st.codex.is_some() && !out.iter().any(|p| p == crate::codex::PROVIDER) {
             out.push(crate::codex::PROVIDER.into());
         }
+        if st.antigravity.is_some() && !out.iter().any(|p| p == crate::antigravity::PROVIDER) {
+            out.push(crate::antigravity::PROVIDER.into());
+        }
         out
     }
 
@@ -264,6 +270,11 @@ impl Registry {
     /// The `codex` CLI found when the registry was last loaded.
     pub fn codex_binary(&self) -> Option<PathBuf> {
         self.state.read().unwrap().codex.clone()
+    }
+
+    /// The `agy` CLI found when the registry was last loaded.
+    pub fn antigravity_binary(&self) -> Option<PathBuf> {
+        self.state.read().unwrap().antigravity.clone()
     }
 
     /// Whether `provider`'s credential is an OAuth login (its tokens belong to one machine:
@@ -348,6 +359,22 @@ impl Registry {
                 }
             }
         }
+        if let Some(binary) = self.antigravity_binary() {
+            let stale = {
+                let st = self.state.read().unwrap();
+                st.catalog.get(crate::antigravity::PROVIDER).is_none_or(|e| now_ms().saturating_sub(e.checked_at) > CATALOG_REFRESH_MS)
+            };
+            if stale || force {
+                match crate::antigravity::discover(&binary).await {
+                    Ok(models) if !models.is_empty() => {
+                        let entry = StoreEntry { models, checked_at: now_ms() };
+                        self.state.write().unwrap().catalog.insert(crate::antigravity::PROVIDER.into(), entry);
+                    }
+                    Ok(_) => {}
+                    Err(e) => errors.push(format!("{}: {e:#}", crate::antigravity::PROVIDER)),
+                }
+            }
+        }
         self.save_store();
         errors
     }
@@ -374,6 +401,9 @@ impl Registry {
             if provider == crate::codex::PROVIDER && st.codex.is_none() {
                 continue;
             }
+            if provider == crate::antigravity::PROVIDER && st.antigravity.is_none() {
+                continue;
+            }
             let cfg = st.models_file.providers.get(provider);
             for m in &entry.models {
                 if m.extra.get("type").and_then(Value::as_str).is_some_and(|t| t != "chat") {
@@ -393,6 +423,9 @@ impl Registry {
         }
         if st.codex.is_some() && !st.catalog.contains_key(crate::codex::PROVIDER) {
             out.extend(crate::codex::fallback_models());
+        }
+        if st.antigravity.is_some() && !st.catalog.contains_key(crate::antigravity::PROVIDER) {
+            out.extend(crate::antigravity::fallback_models());
         }
 
         for (provider, cfg) in &st.models_file.providers {

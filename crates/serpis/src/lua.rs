@@ -1246,6 +1246,20 @@ pub(crate) fn api(lua: &Lua) -> mlua::Result<Table> {
             })
         })
     })?)?;
+    // serpis.agent.antigravity_usage(function(usage, err) ... end, {machine = "box"}?):
+    // Antigravity plan usage (/usage) on that machine (this one by default).
+    agent.set("antigravity_usage", lua.create_function(|lua, (f, opts): (Function, Option<Table>)| {
+        let machine: Option<String> = opts.as_ref().and_then(|o| o.get("machine").ok());
+        let l = lua.clone();
+        ed(|e| {
+            crate::antigravity_usage::fetch(e, machine, move |e, result| {
+                let _ = match result {
+                    Ok(usage) => call(e, &l, &f, &usage),
+                    Err(error) => call_with(e, &l, &f, &[Value::Null, json!(error)]),
+                };
+            })
+        })
+    })?)?;
     s.set("agent", agent)?;
 
     // Chats. Every function takes the chat's buffer id first (nil: the current buffer).

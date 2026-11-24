@@ -574,7 +574,7 @@ impl ChatBuffer {
 
     pub fn can_retry(&self) -> bool {
         let harness = self.node.state.model.as_deref().is_some_and(|m| {
-            [serpis_ai::claude_code::PROVIDER, serpis_ai::codex::PROVIDER].iter().any(|p| m.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+            [serpis_ai::claude_code::PROVIDER, serpis_ai::codex::PROVIDER, serpis_ai::antigravity::PROVIDER].iter().any(|p| m.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
         });
         !harness && failed_turn(&self.entries, self.running())
     }

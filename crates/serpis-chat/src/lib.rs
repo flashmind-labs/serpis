@@ -232,6 +232,8 @@ pub struct Chat {
     claude: serpis_agent::claude_code::ClaudeCode,
     /// The `codex app-server` process of a chat on a Codex model, kept between turns.
     codex: serpis_agent::codex::Codex,
+    /// The `agy acp` process of a chat on an Antigravity model, kept between turns.
+    antigravity: serpis_agent::antigravity::Antigravity,
     /// Tool calls waiting for the person to allow them, by id: where the answer goes.
     asks: HashMap<String, serpis_agent::AskReply>,
     /// Claude Code's permission mode for this chat, once chosen or reported (else its
@@ -314,6 +316,7 @@ impl Chat {
             agent: None,
             claude: Default::default(),
             codex: Default::default(),
+            antigravity: Default::default(),
             asks: HashMap::new(),
             permission_mode: None,
             thinking_tokens: None,
@@ -367,6 +370,11 @@ impl Chat {
         self.model.as_ref().is_some_and(|m| m.api == serpis_ai::codex::PROVIDER)
     }
 
+    /// Whether this chat runs on the Antigravity harness (an `antigravity/*` model).
+    pub fn is_antigravity(&self) -> bool {
+        self.model.as_ref().is_some_and(|m| m.api == serpis_ai::antigravity::PROVIDER)
+    }
+
     pub fn running(&self) -> bool {
         self.agent.is_some()
     }
@@ -377,7 +385,7 @@ impl Chat {
 
     /// Where the chat's agent compacts its context by itself, in tokens.
     pub fn compacts_at(&self) -> Option<u64> {
-        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_claude_code() || self.is_codex())
+        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_claude_code() || self.is_codex() || self.is_antigravity())
     }
 
     /// The running agent (aborting through it takes effect at once).
@@ -428,6 +436,7 @@ impl Chat {
 
     pub fn clear(&mut self) {
         self.abort();
+        self.antigravity.stop();
         self.codex.stop();
         self.claude.stop();
         self.stop_waiting_for_reset();
@@ -452,6 +461,9 @@ impl Chat {
         }
         if m.api != serpis_ai::codex::PROVIDER {
             self.codex.stop();
+        }
+        if m.api != serpis_ai::antigravity::PROVIDER {
+            self.antigravity.stop();
         }
         self.thinking = clamp_thinking_level(&m, self.thinking);
         self.model = Some(m);
@@ -557,6 +569,10 @@ impl Chat {
         if self.is_codex() {
             self.answer_cut_off_calls(host);
             return self.start_codex(host, vec![msg]);
+        }
+        if self.is_antigravity() {
+            self.answer_cut_off_calls(host);
+            return self.start_antigravity(host, vec![msg]);
         }
         let Some(cfg) = self.agent_config(host) else { return Err("No model selected".into()) };
         // A turn that was cut off and not continued (parked, or not kept going).
@@ -773,13 +789,78 @@ impl Chat {
         Ok(())
     }
 
+    /// Run a turn through `agy acp` (Antigravity's harness, login, tools, permissions, sessions
+    /// and compaction).
+    fn start_antigravity(&mut self, host: &mut dyn Host, prompts: Vec<Message>) -> Result<(), String> {
+        let Some(model) = self.model.clone() else { return Err("No model selected".into()) };
+        let binary = match host.var_str("antigravity-path").filter(|p| !p.is_empty()) {
+            Some(path) => Some(expand_home(&path)),
+            None => host.registry().antigravity_binary(),
+        };
+        let Some(binary) = binary else {
+            let why = "Antigravity isn't installed on this machine (agy not found; set antigravity-path)".to_string();
+            host.notify(Level::Error, why.clone());
+            return Err(why);
+        };
+        self.ensure_session(host);
+        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
+        self.record(host, |writer| writer.note_settings(&provider, &id, thinking).map(|_| ()));
+        let effort = model.thinking_map(self.thinking).flatten().map(str::to_string);
+        let mut env = vec![
+            (serpis_agent::AGENT_ENV.0.into(), serpis_agent::AGENT_ENV.1.into()),
+            ("SERPIS_SESSION_ID".into(), self.session_id.clone()),
+        ];
+        if let Some(Value::Object(extra)) = host.var("antigravity-env") {
+            env.extend(extra.into_iter().filter_map(|(name, value)| value.as_str().map(|v| (name, v.to_string()))));
+        }
+        let args = match host.var("antigravity-args") {
+            Some(Value::Array(args)) => args.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        let instructions = host.var_bool("antigravity-skills", true).then(|| {
+            let skills = if host.var_bool("agent-skills", true) { serpis_agent::skills::discover(&self.skill_places(host)) } else { Vec::new() };
+            let list = serpis_agent::skills::for_prompt(&skills, "shell");
+            match serpis_agent::skills::report_rule(&skills, &Default::default()) {
+                Some(rule) => [list, rule].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n"),
+                None => list,
+            }
+        });
+        let launch = serpis_agent::antigravity::Launch {
+            binary,
+            cwd: self.cwd.clone(),
+            args,
+            instructions,
+            instructions_restart: host.var_bool("antigravity-skills-restart", false),
+            env,
+        };
+        let cfg = serpis_agent::antigravity::RunConfig {
+            launch,
+            model,
+            effort,
+            mode: host.var_str("antigravity-mode").filter(|s| !s.is_empty()),
+            hooks: host.tool_hooks(),
+            prompts: host.var_str("antigravity-permission-prompts").and_then(|p| serpis_agent::antigravity::Prompts::parse(&p)).unwrap_or_default(),
+        };
+        self.sent = None;
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
+        let emit: serpis_agent::EmitFn = Arc::new(move |event| {
+            let _ = tx.send(Done::Agent(event));
+            wake();
+        });
+        let runtime = host.runtime();
+        let _guard = runtime.enter();
+        self.last_error = None;
+        self.agent = Some(self.antigravity.run(self.history.clone(), prompts, cfg, emit));
+        Ok(())
+    }
+
     /// Replace the messages before a cut point with a summary (manually, or automatically near
     /// the context window). The summary is asked for in the conversation itself, so the request
     /// reads the prompt cache; see `serpis_agent::compaction`.
     pub fn compact(&mut self, host: &mut dyn Host, reason: CompactReason, instructions: Option<String>) {
         use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, summary_request};
-        if self.is_claude_code() {
-            // Claude Code compacts its own context (automatically, or with /compact).
+        if self.is_claude_code() || self.is_antigravity() {
+            // Claude Code and Antigravity compact their own context (automatically, or with /compact).
             if reason == CompactReason::Manual {
                 let text = match instructions {
                     Some(i) if !i.trim().is_empty() => format!("/compact {i}"),
@@ -897,7 +978,7 @@ impl Chat {
     /// After a run: compact when the context nears the window (chat-compact-auto), or when the
     /// run failed on a context overflow, then retry it once.
     fn compact_if_needed(&mut self, host: &mut dyn Host) {
-        if self.is_claude_code() || self.is_codex() {
+        if self.is_claude_code() || self.is_codex() || self.is_antigravity() {
             return;
         }
         if !host.var_bool("chat-compact-auto", true) {
@@ -925,7 +1006,7 @@ impl Chat {
     /// roughly), and the model's window. None before any response.
     pub fn context(&self) -> (Option<u64>, u64) {
         // An external harness's own count, including its system prompt and tools.
-        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_claude_code() || self.is_codex()) {
+        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_claude_code() || self.is_codex() || self.is_antigravity()) {
             return (Some(used), window);
         }
         let used = self.history.iter().rev().find_map(|m| match m {

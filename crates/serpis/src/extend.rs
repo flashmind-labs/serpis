@@ -115,6 +115,7 @@ pub const LUA_API: &[(&str, &str)] = &[
     ("serpis.agent.reload_models", "(): re-read models.json and auth.json."),
     ("serpis.agent.claude_code_usage", "(function(usage, err), {machine = \"box\", advice = false}?): Claude Code's /usage on that machine (this one by default): {subscription_type, rate_limits = {five_hour, seven_day, ... = {utilization, resets_at}}, behaviors}, as its CLI answers; advice defaults to claude-code-usage-advice."),
     ("serpis.agent.codex_status", "(function(status, err), {machine = \"box\"}?): Codex account, rate limits and token activity on that machine (this one by default), as app-server reports them."),
+    ("serpis.agent.antigravity_usage", "(function(usage, err), {machine = \"box\"}?): Antigravity's /usage quota groups and buckets on that machine (this one by default), as agy reports them."),
     // Sessions.
     ("serpis.session.list", "(fn(list)): saved sessions, newest first ({path, id, cwd, project, name, title, first_prompt, last_prompt, messages, model, seconds}); fn runs when the background scan is done."),
     ("serpis.session.resume", "(path, {show = false}?): load a session into a chat; returns its buffer id."),

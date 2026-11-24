@@ -1254,6 +1254,24 @@ pub fn install(ed: &mut Editor) {
         crate::codex_status::show(ed, machine);
         Ok(())
     });
+    ed.define_command(
+        "antigravity-usage",
+        "Show Antigravity's plan usage (/usage via agy), in a page of its own (g asks again). Asked of the current chat's machine, else this one. Param: a machine.",
+        o,
+        |ed, a| {
+            let machine = a.str(0).map(str::to_string).or_else(|| current_chat(ed).and_then(|id| ed.buffer_machine(id)));
+            crate::antigravity_usage::show(ed, machine);
+            Ok(())
+        },
+    );
+    ed.define_command("antigravity-usage-refresh", "Ask Antigravity for its usage again, in the usage page shown.", o, |ed, _| {
+        let id = ed.current_buffer();
+        let Some(machine) = ed.with_buffer_as::<crate::antigravity_usage::UsageBuffer, _>(id, |buffer, _| buffer.machine.clone()) else {
+            anyhow::bail!("Not in an Antigravity usage page");
+        };
+        crate::antigravity_usage::show(ed, machine);
+        Ok(())
+    });
     // Toggling tools throws the cache away (tools come first in every request): say what it costs.
     ed.add_hook("variable-changed", o, |ed, p| {
         let name = p.get("name").and_then(Value::as_str).unwrap_or_default();

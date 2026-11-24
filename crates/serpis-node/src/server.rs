@@ -952,6 +952,11 @@ impl Node {
             self.answer_codex_status(client, call.id);
             return false;
         }
+        // Antigravity usage: `agy -p /usage` reads quota limits without a model turn.
+        if let Request::AntigravityUsage = call.request {
+            self.answer_antigravity_usage(client, call.id);
+            return false;
+        }
         // A phone proposing its key: answered once the desktop says.
         if let Request::Pair { pairing, key, label } = call.request {
             if let Err(message) = self.pair(client, call.id, pairing, key, label) {
@@ -1227,6 +1232,7 @@ impl Node {
             Request::Pack { .. }
             | Request::ClaudeCodeUsage { .. }
             | Request::CodexStatus
+            | Request::AntigravityUsage
             | Request::Unpack { .. }
             | Request::Terminals
             | Request::NewTerminal { .. }
@@ -1377,6 +1383,22 @@ impl Node {
                 None => Response::Error { message: "Codex isn't installed on this machine (codex not found; set codex-path)".into() },
                 Some(b) => match serpis_ai::codex::status(&b).await {
                     Ok(status) => Response::CodexStatus { status },
+                    Err(e) => Response::Error { message: format!("{e:#}") },
+                },
+            };
+            let _ = msgs.send(Msg::Reply { client, id, response });
+        });
+    }
+
+    /// Ask this machine's Antigravity CLI (`agy`) for its plan usage.
+    fn answer_antigravity_usage(&mut self, client: u64, id: u64) {
+        let set = self.lua.var("antigravity-path").and_then(|v| v.as_str().filter(|p| !p.is_empty()).map(from_home));
+        let (msgs, binary) = (self.msgs.clone(), set.or_else(|| self.registry.antigravity_binary()));
+        self.rt.spawn(async move {
+            let response = match binary {
+                None => Response::Error { message: "Antigravity isn't installed on this machine (agy not found; set antigravity-path)".into() },
+                Some(b) => match serpis_ai::antigravity::usage(&b).await {
+                    Ok(usage) => Response::AntigravityUsage { usage },
                     Err(e) => Response::Error { message: format!("{e:#}") },
                 },
             };

@@ -1,6 +1,7 @@
 //! serpis-agent: pi's agent loop and built-in coding tools, in Rust.
 
 pub mod agent;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod compaction;
