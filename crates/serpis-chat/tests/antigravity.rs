@@ -169,6 +169,19 @@ fn chats_run_on_antigravity_and_answer_approvals() {
         matches!(tool, Entry::Tool { name, result: Some(result), .. } if name == "bash" && !result.is_error && result.content.iter().any(|part| matches!(part, serpis_ai::UserContent::Text { text } if text == "ok\n")))
     );
     assert_eq!(last_text(&chat), "Command finished.");
+
+    // Inline diff rendering on ACP edit tool calls.
+    chat.submit(&mut world.host, "edit a file".into(), vec![], false, None)
+        .unwrap();
+    world.finish(&mut chat);
+    let edit = serpis_proto::find_tool(chat.entries(), "edit-1").unwrap();
+    assert!(
+        matches!(edit, Entry::Tool { name, result: Some(result), .. } if name == "edit" && result.details["diff"].as_str().is_some_and(|d| d.contains("-1 before") && d.contains("+1 after")))
+    );
+
+    // Live permission-mode switching on Antigravity chats.
+    chat.set_permission_mode(&mut world.host, "accept-edits").unwrap();
+    assert_eq!(chat.state().permission_mode.as_deref(), Some("accept-edits"));
 }
 
 #[test]

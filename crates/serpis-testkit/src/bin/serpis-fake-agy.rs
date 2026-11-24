@@ -129,10 +129,21 @@ fn main() {
             Some("session/set_config_option") => {
                 let config_id = message.pointer("/params/configId").and_then(Value::as_str).unwrap_or("");
                 let value = message.pointer("/params/value").and_then(Value::as_str).unwrap_or("");
+                let sid = message.pointer("/params/sessionId").and_then(Value::as_str).unwrap_or("agy-fake-session");
                 match config_id {
                     "model" => current_model = value.to_string(),
                     "thought_level" => current_thought = value.to_string(),
-                    "mode" => current_mode = value.to_string(),
+                    "mode" => {
+                        current_mode = value.to_string();
+                        send(json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": sid,
+                                "update": {"sessionUpdate": "current_mode_update", "currentModeId": current_mode}
+                            }
+                        }));
+                    }
                     _ => {}
                 }
                 send(json!({
@@ -155,7 +166,48 @@ fn main() {
                     .filter_map(|v| v["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if text.contains("run a command") {
+                if text.contains("edit a file") {
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "edit-1",
+                                "title": "Edit notes.txt",
+                                "kind": "edit",
+                                "status": "in_progress",
+                                "rawInput": {"Path": "notes.txt"}
+                            }
+                        }
+                    }));
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "tool_call_update",
+                                "toolCallId": "edit-1",
+                                "status": "completed",
+                                "content": [{"type": "diff", "path": "notes.txt", "oldText": "before\n", "newText": "after\n"}]
+                            }
+                        }
+                    }));
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": "Edited notes.txt."}
+                            }
+                        }
+                    }));
+                    finish_prompt(id, &session_id);
+                } else if text.contains("run a command") {
                     send(json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",

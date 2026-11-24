@@ -218,12 +218,11 @@ impl ClaudeCode {
         let resume = history.iter().any(is_reply);
         let mut fresh = !resume;
         let stale = self.stale.swap(false, std::sync::atomic::Ordering::SeqCst);
-        // A new permission mode is switched to, not restarted for.
-        // Its mode is switched in place; serpis's skills are read once, when it starts (unless
-        // told to restart for them).
+        // A new permission mode or model is switched in place, not restarted for.
+        // Serpis's skills are read once, when it starts (unless told to restart for them).
         let same = |l: &Launch| {
             let skills = if cfg.launch.skills_restart { l.skills.clone() } else { cfg.launch.skills.clone() };
-            Launch { permission_mode: cfg.launch.permission_mode.clone(), skills, ..l.clone() } == cfg.launch
+            Launch { permission_mode: cfg.launch.permission_mode.clone(), model: cfg.launch.model.clone(), skills, ..l.clone() } == cfg.launch
         };
         if stale || guard.as_mut().is_none_or(|p| !same(&p.launch) || p.exited()) {
             if let Some(old) = guard.take() {
@@ -240,6 +239,18 @@ impl ClaudeCode {
                 }
                 Err(e) => return Err(e),
             });
+        }
+        let p = guard.as_mut().expect("started");
+        if p.launch.model != cfg.launch.model {
+            if p.request(json!({"subtype": "set_model", "model": cfg.launch.model})).await.is_ok() {
+                p.launch.model = cfg.launch.model.clone();
+            } else {
+                // Older `claude` without live `set_model`: restart with the new model.
+                let old = guard.take().expect("started");
+                *self.writer.lock().unwrap() = None;
+                old.stop().await;
+                *guard = Some(Process::start(cfg, resume).await?);
+            }
         }
         let p = guard.as_mut().expect("started");
         if p.mode != cfg.launch.permission_mode {

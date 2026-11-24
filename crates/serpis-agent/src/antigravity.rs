@@ -1,15 +1,17 @@
 //! Antigravity as a chat agent, driven through `agy acp` (ACP JSON-RPC 2.0 over stdio).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
 use serpis_ai::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{Child, ChildStdout};
+use tokio::sync::mpsc;
 
 use crate::agent::{AgentEvent, AgentHandle, Answer, AskReply, EmitFn, ToolGate, ToolHooks};
 use crate::tools::ToolResult;
@@ -57,7 +59,11 @@ impl Prompts {
 #[derive(Clone, Default)]
 pub struct Antigravity {
     process: Arc<tokio::sync::Mutex<Option<Process>>>,
-    stop: Arc<std::sync::Mutex<CancellationToken>>,
+    watching: Arc<Mutex<Option<CancellationToken>>>,
+    /// Live writer and active session id, so `set_mode` can send without locking `process`.
+    writer: Arc<Mutex<Option<(mpsc::UnboundedSender<String>, String)>>>,
+    next_id: Arc<AtomicU64>,
+    stop: Arc<Mutex<CancellationToken>>,
 }
 
 pub fn is_reply(message: &Message) -> bool {
@@ -73,6 +79,10 @@ impl Antigravity {
         emit: EmitFn,
     ) -> AgentHandle {
         let handle = AgentHandle::new();
+        if let Some(w) = self.watching.lock().unwrap().take() {
+            w.cancel();
+        }
+        let cfg = Arc::new(cfg);
         let (me, h) = (self.clone(), handle.clone());
         tokio::spawn(async move {
             emit(AgentEvent::AgentStart);
@@ -81,12 +91,34 @@ impl Antigravity {
                 .await
                 .err()
                 .map(|e| format!("{e:#}"));
+            me.watch(cfg, emit.clone());
             emit(AgentEvent::AgentEnd { error });
         });
         handle
     }
 
+    /// Switch Antigravity's permission mode live (between runs or during one).
+    /// Returns false when no session is open yet (the next turn applies it on start).
+    pub fn set_mode(&self, mode: &str) -> bool {
+        let guard = self.writer.lock().unwrap();
+        let Some((tx, session_id)) = guard.as_ref() else {
+            return false;
+        };
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/set_config_option",
+            "params": {"sessionId": session_id, "configId": "mode", "value": mode}
+        });
+        tx.send(format!("{msg}\n")).is_ok()
+    }
+
     pub fn stop(&self) {
+        if let Some(w) = self.watching.lock().unwrap().take() {
+            w.cancel();
+        }
+        *self.writer.lock().unwrap() = None;
         self.stop.lock().unwrap().cancel();
         if let Ok(mut process) = self.process.try_lock() {
             if let Some(process) = process.as_mut() {
@@ -94,6 +126,116 @@ impl Antigravity {
             }
             *process = None;
         }
+    }
+
+    /// Watch `agy acp` stdout between runs so background tool updates, permission requests,
+    /// mode/usage updates, or autonomous follow-up turns are surfaced immediately.
+    fn watch(&self, cfg: Arc<RunConfig>, emit: EmitFn) {
+        let token = CancellationToken::new();
+        *self.watching.lock().unwrap() = Some(token.clone());
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut guard = me.process.lock().await;
+            let mut state: Option<Turn<'_>> = None;
+            loop {
+                let Some(p) = guard.as_mut().filter(|_| !token.is_cancelled()) else {
+                    return;
+                };
+                let value = if let Some(ahead) = p.pending.pop_front() {
+                    Some(ahead)
+                } else {
+                    tokio::select! {
+                        line = p.lines.next_line() => match line {
+                            Ok(Some(l)) => serde_json::from_str::<Value>(&l).ok(),
+                            _ => return,
+                        },
+                        _ = token.cancelled() => return,
+                    }
+                };
+                let Some(value) = value else { continue };
+                if value.get("id").is_some() && value["method"].is_string() {
+                    let Some(sid) = p.session_id.clone() else { continue };
+                    let mut turn = Turn::new(&cfg.model, &sid, &emit);
+                    if p.handle_request(&value, &mut turn, &cfg, &AgentHandle::new(), &emit)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                if value["method"].as_str() != Some("session/update") {
+                    continue;
+                }
+                let update = &value["params"]["update"];
+                match update["sessionUpdate"].as_str().unwrap_or("") {
+                    "usage_update" => {
+                        let used = update["used"].as_u64().unwrap_or(0);
+                        let window = update["size"].as_u64().unwrap_or(cfg.model.context_window);
+                        if window > 0 {
+                            emit(AgentEvent::Context {
+                                used,
+                                window,
+                                compacts_at: None,
+                            });
+                        }
+                    }
+                    "current_mode_update" => {
+                        if let Some(mode) = update["currentModeId"].as_str() {
+                            p.active_mode = Some(mode.to_string());
+                            emit(AgentEvent::PermissionMode(mode.to_string()));
+                        }
+                    }
+                    "tool_call" | "tool_call_update" => {
+                        let Some(sid) = p.session_id.clone() else { continue };
+                        let turn = state.get_or_insert_with(|| Turn::new(&cfg.model, &sid, &emit));
+                        turn.session_update(update);
+                    }
+                    "agent_message_chunk" | "agent_thought_chunk" => {
+                        // Autonomous turn (e.g. a scheduled wake or background task finishing).
+                        let Some(sid) = p.session_id.clone() else { continue };
+                        let h = AgentHandle::new();
+                        emit(AgentEvent::Adopted {
+                            handle: h.clone(),
+                            why: None,
+                        });
+                        emit(AgentEvent::AgentStart);
+                        let mut turn = state
+                            .take()
+                            .unwrap_or_else(|| Turn::new(&cfg.model, &sid, &emit));
+                        turn.session_update(update);
+                        // Drain remaining updates until idle or cancelled.
+                        loop {
+                            let next = tokio::select! {
+                                line = tokio::time::timeout(std::time::Duration::from_secs(2), p.lines.next_line()) => match line {
+                                    Ok(Ok(Some(l))) => serde_json::from_str::<Value>(&l).ok(),
+                                    _ => None,
+                                },
+                                _ = h.cancel.cancelled() => {
+                                    let _ = p.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}));
+                                    None
+                                }
+                                _ = token.cancelled() => None,
+                            };
+                            let Some(next) = next else { break };
+                            if next["method"].as_str() == Some("session/update") {
+                                turn.session_update(&next["params"]["update"]);
+                            }
+                        }
+                        turn.finish(
+                            if h.cancel.is_cancelled() {
+                                StopReason::Aborted
+                            } else {
+                                StopReason::Stop
+                            },
+                            None,
+                        );
+                        emit(AgentEvent::AgentEnd { error: None });
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 
     async fn drive(
@@ -125,10 +267,11 @@ impl Antigravity {
                         && p.launch.instructions != cfg.launch.instructions)
             });
         if restart {
+            *self.writer.lock().unwrap() = None;
             if let Some(old) = guard.as_mut() {
                 let _ = old.child.start_kill();
             }
-            *guard = Some(Process::start(cfg.launch.clone()).await?);
+            *guard = Some(Process::start(cfg.launch.clone(), self.next_id.clone()).await?);
         }
         let process = guard.as_mut().expect("process was started");
         let saved_session = history.iter().rev().find_map(|m| match m {
@@ -139,6 +282,9 @@ impl Antigravity {
         });
         if process.session_id.is_none() {
             process.open_session(saved_session.as_deref(), cfg).await?;
+        }
+        if let Some(sid) = &process.session_id {
+            *self.writer.lock().unwrap() = Some((process.tx.clone(), sid.clone()));
         }
 
         // When a chat switches to Antigravity, give it the conversation its own session has not seen.
@@ -178,12 +324,13 @@ impl Antigravity {
 
 struct Process {
     child: Child,
-    input: ChildStdin,
+    tx: mpsc::UnboundedSender<String>,
     lines: Lines<BufReader<ChildStdout>>,
     pending: VecDeque<Value>,
-    next_id: u64,
+    next_id: Arc<AtomicU64>,
     session_id: Option<String>,
     supports_load: bool,
+    supports_steering: bool,
     supports_system_prompt_append: bool,
     active_model: Option<String>,
     active_effort: Option<String>,
@@ -192,7 +339,7 @@ struct Process {
 }
 
 impl Process {
-    async fn start(launch: Launch) -> Result<Self> {
+    async fn start(launch: Launch, next_id: Arc<AtomicU64>) -> Result<Self> {
         let mut command = tokio::process::Command::new(&launch.binary);
         command
             .arg("acp")
@@ -211,16 +358,25 @@ impl Process {
         let mut child = command
             .spawn()
             .with_context(|| format!("starting {} acp", launch.binary.display()))?;
-        let input = child.stdin.take().context("agy acp has no stdin")?;
+        let mut stdin = child.stdin.take().context("agy acp has no stdin")?;
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Some(line) = rx.recv().await {
+                if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
         let lines = BufReader::new(child.stdout.take().context("agy acp has no stdout")?).lines();
         let mut process = Process {
             child,
-            input,
+            tx,
             lines,
             pending: VecDeque::new(),
-            next_id: 0,
+            next_id,
             session_id: None,
             supports_load: false,
+            supports_steering: false,
             supports_system_prompt_append: false,
             active_model: None,
             active_effort: None,
@@ -244,6 +400,11 @@ impl Process {
             .pointer("/_meta/antigravity/systemPrompt/append")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        process.supports_steering = init
+            .pointer("/result/agentInfo/version")
+            .and_then(Value::as_str)
+            .and_then(parse_semver)
+            .is_some_and(|v| v >= (1, 5, 0));
         Ok(process)
     }
 
@@ -337,6 +498,10 @@ impl Process {
         Ok(())
     }
 
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     async fn turn(
         &mut self,
         prompt: Vec<Value>,
@@ -350,16 +515,15 @@ impl Process {
             .session_id
             .clone()
             .context("Antigravity session is not open")?;
-        self.next_id += 1;
-        let request_id = self.next_id;
+        let request_id = self.alloc_id();
         self.send(&json!({
             "jsonrpc": "2.0",
             "id": request_id,
             "method": "session/prompt",
             "params": {"sessionId": session_id, "prompt": prompt}
-        }))
-        .await?;
+        }))?;
         let mut state = Turn::new(&cfg.model, &session_id, emit);
+        let mut steering_ids: HashSet<u64> = HashSet::new();
         let mut cancelled = false;
         loop {
             let ahead = self.pending.pop_front();
@@ -368,13 +532,31 @@ impl Process {
             } else {
                 tokio::select! {
                     line = self.lines.next_line() => self.parse_line(line?).transpose()?,
+                    _ = h.steered(), if !cancelled && self.supports_steering => {
+                        for message in h.take_steering() {
+                            let blocks = prompt_blocks(&message);
+                            if !blocks.is_empty() {
+                                let steer_id = self.alloc_id();
+                                steering_ids.insert(steer_id);
+                                self.send(&json!({
+                                    "jsonrpc": "2.0",
+                                    "id": steer_id,
+                                    "method": "session/prompt",
+                                    "params": {"sessionId": session_id, "prompt": blocks}
+                                }))?;
+                                emit(AgentEvent::MessageStart(message.clone()));
+                                emit(AgentEvent::MessageEnd(message));
+                            }
+                        }
+                        continue;
+                    }
                     _ = h.cancel.cancelled(), if !cancelled => {
                         cancelled = true;
                         let _ = self.send(&json!({
                             "jsonrpc": "2.0",
                             "method": "session/cancel",
                             "params": {"sessionId": session_id}
-                        })).await;
+                        }));
                         continue;
                     }
                     _ = process_stop.cancelled() => {
@@ -395,35 +577,46 @@ impl Process {
                 );
                 bail!("Antigravity ACP stopped mid-turn");
             };
-            if value["id"].as_u64() == Some(request_id) {
-                if let Some(error) = value.get("error") {
-                    state.finish(
-                        StopReason::Error,
-                        Some(
-                            error["message"]
-                                .as_str()
-                                .unwrap_or("Antigravity refused the turn")
-                                .into(),
-                        ),
-                    );
+            if let Some(id) = value["id"].as_u64() {
+                if id == request_id {
+                    if let Some(error) = value.get("error") {
+                        state.finish(
+                            StopReason::Error,
+                            Some(
+                                error["message"]
+                                    .as_str()
+                                    .unwrap_or("Antigravity refused the turn")
+                                    .into(),
+                            ),
+                        );
+                        return Ok(());
+                    }
+                    let result = &value["result"];
+                    state.apply_prompt_usage(&result["usage"]);
+                    let stop = match result["stopReason"].as_str().unwrap_or("end_turn") {
+                        "end_turn" | "max_tokens" | "max_turn_requests" => StopReason::Stop,
+                        "cancelled" => StopReason::Aborted,
+                        _ => StopReason::Error,
+                    };
+                    state.finish(stop, None);
                     return Ok(());
                 }
-                let result = &value["result"];
-                state.apply_prompt_usage(&result["usage"]);
-                let stop = match result["stopReason"].as_str().unwrap_or("end_turn") {
-                    "end_turn" | "max_tokens" | "max_turn_requests" => StopReason::Stop,
-                    "cancelled" => StopReason::Aborted,
-                    _ => StopReason::Error,
-                };
-                state.finish(stop, None);
-                return Ok(());
+                if steering_ids.remove(&id) {
+                    continue;
+                }
             }
             if value.get("id").is_some() && value["method"].is_string() {
                 self.handle_request(&value, &mut state, cfg, h, emit).await?;
                 continue;
             }
             if value["method"].as_str() == Some("session/update") {
-                state.session_update(&value["params"]["update"]);
+                let update = &value["params"]["update"];
+                if update["sessionUpdate"].as_str() == Some("current_mode_update")
+                    && let Some(mode) = update["currentModeId"].as_str()
+                {
+                    self.active_mode = Some(mode.to_string());
+                }
+                state.session_update(update);
             }
         }
     }
@@ -438,8 +631,7 @@ impl Process {
     ) -> Result<()> {
         let method = request["method"].as_str().unwrap_or("");
         if method != "session/request_permission" {
-            self.respond_error(&request["id"], "Serpis does not handle this ACP request")
-                .await?;
+            self.respond_error(&request["id"], "Serpis does not handle this ACP request")?;
             return Ok(());
         }
         let params = &request["params"];
@@ -505,14 +697,11 @@ impl Process {
 
         let outcome = select_permission_outcome(&options, &answer, is_question);
         self.send(&json!({"jsonrpc": "2.0", "id": request["id"], "result": {"outcome": outcome}}))
-            .await
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(&json!({"jsonrpc": "2.0", "method": method, "id": id, "params": params}))
-            .await?;
+        let id = self.alloc_id();
+        self.send(&json!({"jsonrpc": "2.0", "method": method, "id": id, "params": params}))?;
         loop {
             let line = self
                 .lines
@@ -537,17 +726,14 @@ impl Process {
         }
     }
 
-    async fn respond_error(&mut self, id: &Value, message: &str) -> Result<()> {
+    fn respond_error(&self, id: &Value, message: &str) -> Result<()> {
         self.send(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": message}}))
-            .await
     }
 
-    async fn send(&mut self, value: &Value) -> Result<()> {
-        self.input
-            .write_all(format!("{value}\n").as_bytes())
-            .await
-            .context("writing to Antigravity ACP")?;
-        self.input.flush().await.context("flushing Antigravity ACP")
+    fn send(&self, value: &Value) -> Result<()> {
+        self.tx
+            .send(format!("{value}\n"))
+            .map_err(|_| anyhow!("Antigravity ACP stdin closed"))
     }
 
     fn parse_line(&self, line: Option<String>) -> Option<Result<Value>> {
@@ -557,7 +743,7 @@ impl Process {
 
 struct Turn<'a> {
     model: &'a Model,
-    session_id: &'a str,
+    session_id: String,
     emit: &'a EmitFn,
     reply: Option<AssistantMessage>,
     text: Option<usize>,
@@ -567,10 +753,10 @@ struct Turn<'a> {
 }
 
 impl<'a> Turn<'a> {
-    fn new(model: &'a Model, session_id: &'a str, emit: &'a EmitFn) -> Self {
+    fn new(model: &'a Model, session_id: &str, emit: &'a EmitFn) -> Self {
         Self {
             model,
-            session_id,
+            session_id: session_id.to_string(),
             emit,
             reply: None,
             text: None,
@@ -738,13 +924,14 @@ impl<'a> Turn<'a> {
             .remove(&id)
             .unwrap_or_else(|| normalize_tool(update).0);
         let text = tool_output_text(update);
+        let details = tool_output_details(update);
         let is_error = update["status"].as_str() == Some("failed");
         let result = ToolResultMessage {
             tool_call_id: id.clone(),
             tool_name: name.clone(),
             content: vec![UserContent::Text { text }],
             is_error,
-            details: Value::Null,
+            details,
             timestamp: now_ms(),
         };
         (self.emit)(AgentEvent::ToolEnd {
@@ -800,6 +987,14 @@ impl<'a> Turn<'a> {
         self.close_reply(stop, error);
         (self.emit)(AgentEvent::TurnEnd);
     }
+}
+
+fn parse_semver(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.trim().split(['.', '-', '+']);
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
 }
 
 fn normalize_tool(tool: &Value) -> (String, Value) {
@@ -887,7 +1082,11 @@ fn tool_output_text(update: &Value) -> String {
     let mut parts = Vec::new();
     if let Some(content) = update["content"].as_array() {
         for item in content {
-            if let Some(text) = item.pointer("/content/text").and_then(Value::as_str) {
+            if item["type"].as_str() == Some("diff") {
+                if let Some(path) = item["path"].as_str() {
+                    parts.push(format!("edited {path}"));
+                }
+            } else if let Some(text) = item.pointer("/content/text").and_then(Value::as_str) {
                 parts.push(text.to_string());
             } else if let Some(text) = item["text"].as_str() {
                 parts.push(text.to_string());
@@ -913,6 +1112,41 @@ fn tool_output_text(update: &Value) -> String {
         return raw.to_string();
     }
     String::new()
+}
+
+/// Extract inline diff details from ACP `content` diff blocks (or `rawOutput.diff`) so
+/// Serpis's edit tool cards render diffs just like built-in, Claude Code, and Codex edits.
+fn tool_output_details(update: &Value) -> Value {
+    let mut diffs = Vec::new();
+    let mut first_changed: Option<usize> = None;
+    if let Some(content) = update["content"].as_array() {
+        for item in content {
+            if item["type"].as_str() == Some("diff") {
+                let old = item["oldText"].as_str().unwrap_or("");
+                let new = item["newText"].as_str().unwrap_or("");
+                let rendered = crate::tools::edit_diff::generate_diff_string(old, new, 3);
+                if first_changed.is_none() {
+                    first_changed = rendered.first_changed_line;
+                }
+                if !rendered.diff.is_empty() {
+                    diffs.push(rendered.diff);
+                }
+            }
+        }
+    }
+    if !diffs.is_empty() {
+        let mut obj = json!({"diff": diffs.join("\n")});
+        if let Some(line) = first_changed {
+            obj["firstChangedLine"] = json!(line);
+        }
+        return obj;
+    }
+    if let Some(diff) = update.pointer("/rawOutput/diff").and_then(Value::as_str)
+        && !diff.is_empty()
+    {
+        return json!({"diff": diff});
+    }
+    Value::Null
 }
 
 fn select_permission_outcome(options: &[Value], answer: &Answer, is_question: bool) -> Value {
@@ -1033,6 +1267,29 @@ mod tests {
         }));
         assert_eq!(name, "read");
         assert_eq!(args["path"], "/tmp/a.rs");
+    }
+
+    #[test]
+    fn renders_acp_diff_content_into_tool_details() {
+        let update = json!({
+            "toolCallId": "e-1",
+            "status": "completed",
+            "content": [{"type": "diff", "path": "notes.txt", "oldText": "hello\n", "newText": "world\n"}]
+        });
+        let details = tool_output_details(&update);
+        let diff = details["diff"].as_str().unwrap();
+        assert!(diff.contains("-1 hello"));
+        assert!(diff.contains("+1 world"));
+        assert_eq!(details["firstChangedLine"], 1);
+        assert_eq!(tool_output_text(&update), "edited notes.txt");
+    }
+
+    #[test]
+    fn parses_semver_for_steering_capability() {
+        assert_eq!(parse_semver("1.5.15"), Some((1, 5, 15)));
+        assert_eq!(parse_semver("1.5.0-beta.1"), Some((1, 5, 0)));
+        assert!(parse_semver("1.5.0").unwrap() >= (1, 5, 0));
+        assert!(parse_semver("1.4.9").unwrap() < (1, 5, 0));
     }
 
     #[test]

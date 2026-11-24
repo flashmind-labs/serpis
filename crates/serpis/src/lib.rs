@@ -224,6 +224,7 @@ pub fn bootstrap(ed: &mut Editor) {
     ed.defvar("antigravity-path", Value::Null, "The agy CLI that chats on antigravity/* models run through. Unset: agy on PATH or its usual install locations. Each machine uses its own CLI and login.");
     ed.defvar("antigravity-permission-prompts", json!("ask"), "Who answers Antigravity permission requests that before-tool-call and tool-ask handlers let through: \"ask\", \"allow\" or \"deny\".");
     ed.defvar("antigravity-mode", json!("default"), "Antigravity's mode for antigravity/* chats: \"default\", \"accept-edits\", \"auto\" or \"plan\". An empty string inherits Antigravity's default.");
+    ed.defvar("antigravity-mode-cycle", json!(["default", "accept-edits", "auto", "plan"]), "The modes chat-cycle-permission-mode (S-TAB in an Antigravity chat) goes through, in order.");
     ed.defvar("antigravity-args", json!([]), "More arguments for agy acp.");
     ed.defvar("antigravity-env", json!({}), "Extra environment variables for the agy acp process of antigravity/* chats.");
     ed.defvar("antigravity-skills", json!(true), "Offer serpis's skills to Antigravity beside the skills it finds itself.");

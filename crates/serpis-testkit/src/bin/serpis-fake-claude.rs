@@ -193,6 +193,10 @@ fn main() {
             system("status", json!({"status": null, "permissionMode": msg["request"]["mode"]}));
             continue;
         }
+        if msg["type"] == "control_request" && msg["request"]["subtype"] == "set_model" {
+            out(json!({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"model": msg["request"]["model"]}}}));
+            continue;
+        }
         if msg["type"] == "control_request" && msg["request"]["subtype"] == "get_usage" {
             let window = |pct: u32, at: &str| json!({"utilization": pct, "resets_at": at});
             let behaviors = (msg["request"]["skip_behaviors"] != true).then(|| {

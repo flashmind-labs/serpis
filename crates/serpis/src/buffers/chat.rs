@@ -2181,10 +2181,10 @@ pub fn background_counts(running: &[serpis_proto::Task]) -> String {
     counts.iter().map(|(one, many, n)| if *n == 1 { format!("1 {one}") } else { format!("{n} {many}") }).collect::<Vec<_>>().join(" · ")
 }
 
-/// Claude Code's permission mode as its prompt line says it, and its color.
+/// Claude Code or Antigravity permission mode as its prompt line says it, and its color.
 pub fn permission_mode_label(mode: &str, t: &crate::theme::Theme) -> (String, Color32) {
     match mode {
-        "acceptEdits" => ("⏵⏵ accept edits on".into(), t.purple),
+        "acceptEdits" | "accept-edits" => ("⏵⏵ accept edits on".into(), t.purple),
         "plan" => ("⏸ plan mode on".into(), t.cyan),
         "auto" => ("⏵⏵ auto mode on".into(), t.yellow),
         "dontAsk" => ("⏵⏵ don't ask on".into(), t.yellow),

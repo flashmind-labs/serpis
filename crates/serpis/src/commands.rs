@@ -955,16 +955,22 @@ pub fn install(ed: &mut Editor) {
     });
     ed.define_command(
         "chat-cycle-permission-mode",
-        "Switch this Claude Code chat to the next permission mode of claude-code-permission-mode-cycle (default, accept edits, plan, auto), as shift+tab does in Claude Code.",
+        "Switch this Claude Code or Antigravity chat to the next permission mode, as shift+tab does.",
         o,
         |ed, _| {
-            let Some(mode) = with_chat(ed, |c, _| c.state_now().permission_mode)? else {
-                ed.message("Only chats on Claude Code have permission modes");
+            let (mode, is_agy) = with_chat(ed, |c, _| {
+                let s = c.state_now();
+                let agy = s.model.as_deref().is_some_and(|m| m.starts_with("antigravity/"));
+                (s.permission_mode, agy)
+            })?;
+            let Some(mode) = mode else {
+                ed.message("Only chats on Claude Code or Antigravity have permission modes");
                 return Ok(());
             };
-            let cycle: Vec<String> = ed.var("claude-code-permission-mode-cycle").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            let var = if is_agy { "antigravity-mode-cycle" } else { "claude-code-permission-mode-cycle" };
+            let cycle: Vec<String> = ed.var(var).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
             let Some(next) = cycle.iter().position(|m| *m == mode).map(|i| cycle[(i + 1) % cycle.len()].clone()).or_else(|| cycle.first().cloned()) else {
-                ed.message("claude-code-permission-mode-cycle is empty");
+                ed.message(format!("{var} is empty"));
                 return Ok(());
             };
             with_chat(ed, |c, _| c.set_permission_mode(&next))?;
@@ -974,33 +980,48 @@ pub fn install(ed: &mut Editor) {
     );
     ed.define_command(
         "chat-select-permission-mode",
-        "Choose this Claude Code chat's permission mode: when it asks you before acting. Param: default, acceptEdits, plan, auto, dontAsk or bypassPermissions.",
+        "Choose this Claude Code or Antigravity chat's permission mode: when it asks you before acting.",
         o,
         |ed, a| {
             let id = current_chat(ed).ok_or_else(|| anyhow::anyhow!("Not in a chat buffer"))?;
-            if with_chat(ed, |c, _| c.state_now().permission_mode)?.is_none() {
-                ed.message("Only chats on Claude Code have permission modes");
+            let (mode, is_agy) = with_chat(ed, |c, _| {
+                let s = c.state_now();
+                let agy = s.model.as_deref().is_some_and(|m| m.starts_with("antigravity/"));
+                (s.permission_mode, agy)
+            })?;
+            if mode.is_none() {
+                ed.message("Only chats on Claude Code or Antigravity have permission modes");
                 return Ok(());
             }
             let set = move |ed: &mut Editor, mode: String| {
                 ed.with_buffer_as::<ChatBuffer, _>(id, |c, _| c.set_permission_mode(&mode));
                 ed.message(crate::buffers::chat::permission_mode_label(&mode, &ed.theme).0);
             };
+            let allowed: &[&str] = if is_agy { &serpis_chat::ANTIGRAVITY_MODES } else { &serpis_chat::PERMISSION_MODES };
             if let Some(m) = a.str(0) {
-                if !serpis_chat::PERMISSION_MODES.contains(&m) {
-                    anyhow::bail!("{m} isn't a permission mode (one of {})", serpis_chat::PERMISSION_MODES.join(", "));
+                if !allowed.contains(&m) {
+                    anyhow::bail!("{m} isn't a permission mode (one of {})", allowed.join(", "));
                 }
                 set(ed, m.to_string());
                 return Ok(());
             }
-            let about = [
-                ("default", "asks before edits and commands its rules don't allow"),
-                ("acceptEdits", "edits without asking; asks for commands"),
-                ("plan", "reads and plans, changes nothing until you approve"),
-                ("auto", "decides itself what is safe, asks only for what isn't"),
-                ("dontAsk", "never asks: what its rules don't allow is refused"),
-                ("bypassPermissions", "never asks and allows everything"),
-            ];
+            let about: &[(&str, &str)] = if is_agy {
+                &[
+                    ("default", "asks before edits and commands its rules don't allow"),
+                    ("accept-edits", "edits without asking; asks for commands"),
+                    ("auto", "approves edits and safe commands; asks before irreversible actions"),
+                    ("plan", "reads and plans, changes nothing until you approve"),
+                ]
+            } else {
+                &[
+                    ("default", "asks before edits and commands its rules don't allow"),
+                    ("acceptEdits", "edits without asking; asks for commands"),
+                    ("plan", "reads and plans, changes nothing until you approve"),
+                    ("auto", "decides itself what is safe, asks only for what isn't"),
+                    ("dontAsk", "never asks: what its rules don't allow is refused"),
+                    ("bypassPermissions", "never asks and allows everything"),
+                ]
+            };
             let cands = about.iter().map(|(m, d)| Candidate::new(*m).detail(*d)).collect();
             ed.completing_read("Permission mode: ", cands, true, move |ed, c, _| {
                 if let Some(c) = c {
