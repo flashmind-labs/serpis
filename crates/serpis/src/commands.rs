@@ -1392,6 +1392,10 @@ pub fn install(ed: &mut Editor) {
             c.focus = Focus::Prompt;
         })
     });
+    ed.define_command("chat-report-copy", "Copy the chat's latest report to the clipboard, as the markdown it was written in. Param: the report's entry (1-based), for another.", o, |ed, a| {
+        let entry = a.params.first().and_then(Value::as_u64).map(|e| e.saturating_sub(1) as usize);
+        with_chat(ed, |c, ed| c.copy_report(ed, entry))
+    });
     ed.define_command("chat-focus-transcript", "Move to the transcript (to read, search and copy; i/a/o return to the prompt).", o, |ed, _| {
         with_chat(ed, |c, _| {
             c.focus = Focus::Transcript;

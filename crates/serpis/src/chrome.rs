@@ -474,6 +474,17 @@ pub fn arrow_up(p: &egui::Painter, r: Rect, c: Color32) {
     p.add(egui::Shape::line(vec![egui::pos2(r.left(), r.center().y - r.height() * 0.1), r.center_top(), egui::pos2(r.right(), r.center().y - r.height() * 0.1)], s));
 }
 
+/// Copy: two overlapping rectangles, the front one at the bottom left.
+pub fn copy(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.3, c);
+    let o = r.width() * 0.3;
+    let front = Rect::from_min_max(egui::pos2(r.left(), r.top() + o), egui::pos2(r.right() - o, r.bottom()));
+    let back = front.translate(egui::vec2(o, -o));
+    p.rect_stroke(front, 1.5, s, StrokeKind::Inside);
+    // Only what the front one doesn't cover.
+    p.add(egui::Shape::line(vec![egui::pos2(back.left(), front.top()), back.left_top(), back.right_top(), back.right_bottom(), egui::pos2(front.right(), back.bottom())], s));
+}
+
 pub fn replay(p: &egui::Painter, r: Rect, c: Color32) {
     let (center, radius) = (r.center(), r.width() / 2.0);
     let dir = |deg: f32| egui::vec2(deg.to_radians().cos(), deg.to_radians().sin());

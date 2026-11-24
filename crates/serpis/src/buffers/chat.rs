@@ -130,6 +130,8 @@ pub struct ChatBuffer {
     /// A report's challenge being set up in the composer (its text is the note), and what was
     /// typed there before.
     challenge_form: Option<(ChallengeForm, String)>,
+    /// The report just copied from its header, and when (its icon shows a tick a moment).
+    report_copied: Option<(usize, f64)>,
     /// Each report's header line: (line, entry), for its Challenge button.
     report_heads: Vec<(usize, usize)>,
     /// Transcript lines that show a comment: (line, its id), to change it on a click.
@@ -231,6 +233,7 @@ impl ChatBuffer {
             commenting: None,
             review_open: false,
             challenge_form: None,
+            report_copied: None,
             report_heads: Vec::new(),
             comment_lines: Vec::new(),
             find_targets: Vec::new(),
@@ -2841,6 +2844,7 @@ enum ReviewAct {
 
 /// What a report's header was asked: challenge it (again), show the challenger's chat, stop it.
 enum ReportAct {
+    Copy(usize),
     Challenge(usize),
     OpenChat(String),
     Stop(String),
@@ -2959,6 +2963,22 @@ impl ChatBuffer {
         let Entry::Assistant { blocks, .. } = self.entries.get(entry)? else { return None };
         let text = blocks.iter().filter_map(|b| if let AssistantContent::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n\n");
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Put the report at `entry` (None: the latest) on the clipboard, as the markdown it was
+    /// written in.
+    pub fn copy_report(&self, ed: &mut Editor, entry: Option<usize>) {
+        let report = match entry {
+            Some(e) => self.report_text(e),
+            None => self.reports(ed).pop().map(|(_, t)| t),
+        };
+        match report {
+            Some(text) => {
+                ed.copy_to_clipboard(&text);
+                ed.message("Copied the report as markdown");
+            }
+            None => ed.message("No report to copy here"),
+        }
     }
 
     /// The chat's reports (as chat-report finds them): (entry, text), oldest first.
@@ -3869,11 +3889,12 @@ impl ChatBuffer {
         act
     }
 
-    /// On each report's header line, at the right: Challenge, or how its challenge goes (with
-    /// Open chat and Stop, or Again once done). Over a claim that held, a "held" mark after it.
+    /// On each report's header line, at the right: Copy (chat-report-copy), then Challenge, or
+    /// how its challenge goes (with Open chat and Stop, or Again once done). Over a claim that
+    /// held, a "held" mark after it.
     #[allow(clippy::too_many_arguments)]
-    fn draw_report_actions(&self, ui: &mut egui::Ui, area: Rect, theme: &crate::theme::Theme, k: f32, runs: &[(crate::chat_challenge::Run, bool)], enabled: bool, now: u64, rects: &mut Vec<(&'static str, Rect)>) -> Option<ReportAct> {
-        if !enabled && runs.is_empty() {
+    fn draw_report_actions(&self, ui: &mut egui::Ui, area: Rect, theme: &crate::theme::Theme, k: f32, runs: &[(crate::chat_challenge::Run, bool)], enabled: bool, copy: bool, now: u64, rects: &mut Vec<(&'static str, Rect)>) -> Option<ReportAct> {
+        if !enabled && !copy && runs.is_empty() {
             return None;
         }
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, ui.scope_id().with("chat-report-actions"))).with_clip_rect(area);
@@ -3888,6 +3909,32 @@ impl ChatBuffer {
             }
             let text_end = self.lines.get(*line).and_then(|l| self.view.screen_rect(Pos::new(*line, char_len(&l.text)))).map_or(head.right(), |r| r.right());
             let cy = head.center().y;
+            // Copy, rightmost: the report as markdown, onto the clipboard.
+            let mut col_right = col_right;
+            if copy {
+                let r = Rect::from_min_max(egui::pos2(col_right - 22.0 * k, cy - 11.0 * k), egui::pos2(col_right, cy + 11.0 * k));
+                if r.left() < text_end + 12.0 * k {
+                    continue;
+                }
+                let resp = ui.interact(r, ui.scope_id().with(("report-copy", n)), egui::Sense::click()).on_hover_text("Copy the report as markdown");
+                rects.push(("report-copy", r));
+                if resp.hovered() {
+                    painter.rect_filled(r, 6.0 * k, crate::chrome::hover_bg(theme));
+                }
+                let fg = if resp.hovered() { theme.fg } else { theme.fg_faint };
+                let time = ui.ctx().input(|i| i.time);
+                match self.report_copied {
+                    Some((e, at)) if e == *entry && time - at < 1.5 => {
+                        crate::chrome::check(&painter, r.center(), 12.0 * k, theme.green);
+                        ui.ctx().request_repaint_after(Duration::from_millis(250));
+                    }
+                    _ => crate::chrome::copy(&painter, Rect::from_center_size(r.center(), Vec2::splat(11.0 * k)), fg),
+                }
+                if resp.clicked() {
+                    act = Some(ReportAct::Copy(*entry));
+                }
+                col_right = r.left() - 6.0 * k;
+            }
             let run = runs.iter().rev().find(|(r, _)| r.entry == *entry);
             // Buttons, right to left, then what to say before them.
             let mut buttons: Vec<(&str, bool, ReportAct, &'static str)> = Vec::new();
@@ -4200,11 +4247,16 @@ impl Buffer for ChatBuffer {
         let enabled = ed.var_bool("chat-report-challenge") && self.node.local();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let mut action_rects = Vec::new();
-        let report_act = self.draw_report_actions(ui, transcript_rect, &theme, k, &runs, enabled, now, &mut action_rects);
+        let copy = ed.var_bool("chat-report-copy");
+        let report_act = self.draw_report_actions(ui, transcript_rect, &theme, k, &runs, enabled, copy, now, &mut action_rects);
         for (name, r) in action_rects {
             ed.debug_rects.insert(name.into(), r);
         }
         match report_act {
+            Some(ReportAct::Copy(entry)) => {
+                self.copy_report(ed, Some(entry));
+                self.report_copied = Some((entry, ui.ctx().input(|i| i.time)));
+            }
             Some(ReportAct::Challenge(entry)) => self.open_challenge_form(ed, Some(entry)),
             Some(ReportAct::OpenChat(id)) => ed.main_sender().send(move |ed| {
                 if let Err(e) = crate::chat_challenge::open(ed, &id) {
