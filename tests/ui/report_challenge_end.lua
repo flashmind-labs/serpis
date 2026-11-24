@@ -1,6 +1,7 @@
 -- A challenge always ends: its challenger ran out of output tokens while thinking (no report),
 -- Stop on the report's header, its chat closed while it works (its worktree removed, say).
--- Each time the header says it stopped and offers Again.
+-- Each time the header says it stopped and offers Again. Gone on in its own chat, the challenge
+-- runs again and ends with its findings.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 local d = serpis.debug
 local agent_dir = os.getenv("SERPIS_AGENT_DIR")
@@ -29,6 +30,7 @@ local function click(r)
 end
 
 local chat
+local stopped_id
 local function latest()
   local runs = serpis.chat.challenges(chat)
   return runs[#runs]
@@ -88,6 +90,26 @@ local steps = {
   function()
     shot("2-stopped")
     stopped("Stop", "stopped")
+    stopped_id = latest().id
+    return 1500
+  end,
+  -- Gone on in its own chat (as after a rate limit): the same challenge, running again, then
+  -- over with its findings.
+  function()
+    serpis.chat.prompt(latest().challenger_buffer, "CHALLENGE")
+    return 2500
+  end,
+  function()
+    to_header()
+    return 600
+  end,
+  function()
+    shot("2b-went-on")
+    local r = latest()
+    T.check("went on: the same challenge", r and r.id, stopped_id)
+    T.check("went on: it has ended", r and r.running, false)
+    T.check("went on: not stopped", r and r.error, nil)
+    T.check("went on: its findings placed", (r and r.findings or 0) > 0 and serpis.chat.review(chat).drafts == r.findings, true)
     challenge("SLOW")
     return 2500
   end,

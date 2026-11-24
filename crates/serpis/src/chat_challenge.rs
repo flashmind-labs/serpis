@@ -54,6 +54,9 @@ pub struct Challenges {
     pub runs: Vec<Run>,
     loaded: bool,
     checked: Option<Instant>,
+    /// Challenges that stopped whose challenger has been seen idle since: working again, it was
+    /// retried or continued in its chat.
+    idle: std::collections::HashSet<String>,
 }
 
 /// What the person chose for a challenge: the challenger's model and thinking, and what else
@@ -396,6 +399,31 @@ pub fn tick(ed: &mut Editor) {
         return;
     }
     let mut changed = false;
+    // A challenge that stopped (a rate limit, say) goes on when its chat does, retried or
+    // continued there: it ends again when that chat finishes.
+    for i in 0..ed.challenges.runs.len() {
+        let run = ed.challenges.runs[i].clone();
+        if run.error.is_none() {
+            continue;
+        }
+        let Some(buf) = crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.challenger) else { continue };
+        let Some((running, finished)) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| (c.running(), matches!(c.finished_reply(), Some(Ok(_))))) else { continue };
+        if !ed.challenges.idle.contains(&run.id) {
+            // Still winding down from what stopped it (Stop aborts it).
+            if !running {
+                ed.challenges.idle.insert(run.id);
+            }
+            continue;
+        }
+        if running || finished {
+            ed.challenges.idle.remove(&run.id);
+            let r = &mut ed.challenges.runs[i];
+            r.ended = None;
+            r.error = None;
+            changed = true;
+            ed.message("The challenge goes on");
+        }
+    }
     for i in 0..ed.challenges.runs.len() {
         let run = ed.challenges.runs[i].clone();
         if run.ended.is_some() || run.challenger.is_empty() {
