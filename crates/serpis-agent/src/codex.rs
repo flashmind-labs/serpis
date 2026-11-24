@@ -625,6 +625,9 @@ impl<'a> Turn<'a> {
 
     fn text(&mut self, delta: &str) {
         self.ensure_reply();
+        if let Some(index) = self.thinking.take() {
+            (self.emit)(AgentEvent::MessageDelta(StreamEvent::ThinkingEnd { index }));
+        }
         let reply = self.reply.as_mut().unwrap();
         let index = *self.text.get_or_insert_with(|| {
             let index = reply.content.len();
@@ -646,6 +649,9 @@ impl<'a> Turn<'a> {
 
     fn thinking(&mut self, delta: &str) {
         self.ensure_reply();
+        if let Some(index) = self.text.take() {
+            (self.emit)(AgentEvent::MessageDelta(StreamEvent::TextEnd { index }));
+        }
         let reply = self.reply.as_mut().unwrap();
         let index = *self.thinking.get_or_insert_with(|| {
             let index = reply.content.len();

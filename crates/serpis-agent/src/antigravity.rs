@@ -419,13 +419,18 @@ impl Process {
     }
 
     async fn open_session(&mut self, saved: Option<&str>, cfg: &RunConfig) -> Result<()> {
+        let mut meta = None;
+        if self.supports_system_prompt_append
+            && let Some(instructions) = cfg.launch.instructions.as_deref().filter(|s| !s.is_empty())
+        {
+            meta = Some(json!({"antigravity": {"systemPrompt": {"append": instructions}}}));
+        }
         if let Some(session_id) = saved.filter(|_| self.supports_load) {
-            let loaded = self
-                .call(
-                    "session/load",
-                    json!({"sessionId": session_id, "cwd": cfg.launch.cwd, "mcpServers": []}),
-                )
-                .await;
+            let mut params = json!({"sessionId": session_id, "cwd": cfg.launch.cwd, "mcpServers": []});
+            if let Some(m) = &meta {
+                params["_meta"] = m.clone();
+            }
+            let loaded = self.call("session/load", params).await;
             if let Ok(response) = loaded {
                 self.session_id = Some(session_id.to_string());
                 self.record_config(&response["result"]);
@@ -433,10 +438,8 @@ impl Process {
             }
         }
         let mut params = json!({"cwd": cfg.launch.cwd, "mcpServers": []});
-        if self.supports_system_prompt_append
-            && let Some(instructions) = cfg.launch.instructions.as_deref().filter(|s| !s.is_empty())
-        {
-            params["_meta"] = json!({"antigravity": {"systemPrompt": {"append": instructions}}});
+        if let Some(m) = meta {
+            params["_meta"] = m;
         }
         let response = self.call("session/new", params).await?;
         let id = response
@@ -558,7 +561,7 @@ impl Process {
         // Open a streaming assistant entry right away so Serpis shows `Thinking…` while
         // Antigravity thinks silently (Gemini models often omit thought chunks).
         state.ensure_reply();
-        let mut steering_ids: HashSet<u64> = HashSet::new();
+        let mut in_flight: HashSet<u64> = HashSet::from([request_id]);
         let mut cancelled = false;
         loop {
             let ahead = self.pending.pop_front();
@@ -572,7 +575,7 @@ impl Process {
                             let blocks = prompt_blocks(&message);
                             if !blocks.is_empty() {
                                 let steer_id = self.alloc_id();
-                                steering_ids.insert(steer_id);
+                                in_flight.insert(steer_id);
                                 self.send(&json!({
                                     "jsonrpc": "2.0",
                                     "id": steer_id,
@@ -612,33 +615,34 @@ impl Process {
                 );
                 bail!("Antigravity ACP stopped mid-turn");
             };
-            if let Some(id) = value["id"].as_u64() {
-                if id == request_id {
-                    if let Some(error) = value.get("error") {
-                        state.finish(
-                            StopReason::Error,
-                            Some(
-                                error["message"]
-                                    .as_str()
-                                    .unwrap_or("Antigravity refused the turn")
-                                    .into(),
-                            ),
-                        );
-                        return Ok(());
-                    }
-                    let result = &value["result"];
-                    state.apply_prompt_usage(&result["usage"]);
-                    let stop = match result["stopReason"].as_str().unwrap_or("end_turn") {
-                        "end_turn" | "max_tokens" | "max_turn_requests" => StopReason::Stop,
-                        "cancelled" => StopReason::Aborted,
-                        _ => StopReason::Error,
-                    };
-                    state.finish(stop, None);
+            if let Some(id) = value["id"].as_u64()
+                && in_flight.remove(&id)
+            {
+                if let Some(error) = value.get("error") {
+                    state.finish(
+                        StopReason::Error,
+                        Some(
+                            error["message"]
+                                .as_str()
+                                .unwrap_or("Antigravity refused the turn")
+                                .into(),
+                        ),
+                    );
                     return Ok(());
                 }
-                if steering_ids.remove(&id) {
+                let result = &value["result"];
+                state.apply_prompt_usage(&result["usage"]);
+                if !in_flight.is_empty() {
+                    // A steered prompt is still running; stay in this turn until it completes.
                     continue;
                 }
+                let stop = match result["stopReason"].as_str().unwrap_or("end_turn") {
+                    "end_turn" | "max_tokens" | "max_turn_requests" => StopReason::Stop,
+                    "cancelled" => StopReason::Aborted,
+                    _ => StopReason::Error,
+                };
+                state.finish(stop, None);
+                return Ok(());
             }
             if value.get("id").is_some() && value["method"].is_string() {
                 self.handle_request(&value, &mut state, cfg, h, emit).await?;
@@ -823,6 +827,10 @@ impl<'a> Turn<'a> {
             return;
         }
         self.ensure_reply();
+        // Close any open thinking block first so blocks stay strictly sequential for streaming.
+        if let Some(index) = self.thinking.take() {
+            (self.emit)(AgentEvent::MessageDelta(StreamEvent::ThinkingEnd { index }));
+        }
         let reply = self.reply.as_mut().unwrap();
         let index = *self.text.get_or_insert_with(|| {
             let index = reply.content.len();
@@ -847,6 +855,10 @@ impl<'a> Turn<'a> {
             return;
         }
         self.ensure_reply();
+        // Close any open text block first so subsequent text opens a fresh block after thinking.
+        if let Some(index) = self.text.take() {
+            (self.emit)(AgentEvent::MessageDelta(StreamEvent::TextEnd { index }));
+        }
         let reply = self.reply.as_mut().unwrap();
         let index = *self.thinking.get_or_insert_with(|| {
             let index = reply.content.len();

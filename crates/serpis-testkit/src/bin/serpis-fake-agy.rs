@@ -222,6 +222,41 @@ fn main() {
                         }
                     }));
                     finish_prompt(id, &session_id);
+                } else if text.contains("interleaved report") {
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": "Waiting for tests to finish."}
+                            }
+                        }
+                    }));
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_thought_chunk",
+                                "content": {"type": "text", "text": "Tests passed, writing the final report."}
+                            }
+                        }
+                    }));
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": "Done: final report delivered."}
+                            }
+                        }
+                    }));
+                    finish_prompt(id, &session_id);
                 } else if text.contains("run a command") {
                     send(json!({
                         "jsonrpc": "2.0",

@@ -1516,9 +1516,13 @@ impl Chat {
                         blocks.push(AssistantContent::Text { text: String::new(), text_signature: None });
                     }
                 }
-                StreamEvent::TextDelta { delta, .. } => {
-                    if let Some(AssistantContent::Text { text, .. }) = self.last_assistant().and_then(|b| b.last_mut()) {
-                        text.push_str(&delta);
+                StreamEvent::TextDelta { index, delta } => {
+                    if let Some(blocks) = self.last_assistant() {
+                        if let Some(AssistantContent::Text { text, .. }) = blocks.last_mut() {
+                            text.push_str(&delta);
+                        } else if let Some(AssistantContent::Text { text, .. }) = blocks.get_mut(index) {
+                            text.push_str(&delta);
+                        }
                     }
                 }
                 StreamEvent::ThinkingStart { .. } => {
@@ -1527,9 +1531,13 @@ impl Chat {
                         blocks.push(AssistantContent::Thinking { thinking: String::new(), thinking_signature: None, redacted: false });
                     }
                 }
-                StreamEvent::ThinkingDelta { delta, .. } => {
-                    if let Some(AssistantContent::Thinking { thinking, .. }) = self.last_assistant().and_then(|b| b.last_mut()) {
-                        thinking.push_str(&delta);
+                StreamEvent::ThinkingDelta { index, delta } => {
+                    if let Some(blocks) = self.last_assistant() {
+                        if let Some(AssistantContent::Thinking { thinking, .. }) = blocks.last_mut() {
+                            thinking.push_str(&delta);
+                        } else if let Some(AssistantContent::Thinking { thinking, .. }) = blocks.get_mut(index) {
+                            thinking.push_str(&delta);
+                        }
                     }
                 }
                 StreamEvent::ToolCallStart { id, name, .. } => {
@@ -1748,7 +1756,12 @@ impl Chat {
                     self.agent = Some(handle);
                     self.last_error = None;
                 }
-                let text = why.unwrap_or_else(|| "Claude Code went on by itself".into());
+                let who = match self.harness() {
+                    Some(Harness::Antigravity) => "Antigravity",
+                    Some(Harness::Codex) => "Codex",
+                    _ => "Claude Code",
+                };
+                let text = why.unwrap_or_else(|| format!("{who} went on by itself"));
                 self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len()}));
                 self.entries.push(Entry::Info { text, tone: Tone::Meta });
             }

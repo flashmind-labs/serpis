@@ -191,6 +191,12 @@ fn chats_run_on_antigravity_and_answer_approvals() {
     world.finish(&mut chat);
     assert!(chat.asking().is_empty());
     assert_eq!(last_text(&chat), "Command finished.");
+
+    // Interleaved text -> thinking -> text never drops the trailing report text.
+    chat.submit(&mut world.host, "interleaved report".into(), vec![], false, None)
+        .unwrap();
+    world.finish(&mut chat);
+    assert_eq!(last_text(&chat), "Done: final report delivered.");
 }
 
 #[test]
