@@ -62,6 +62,8 @@ pub struct Antigravity {
     watching: Arc<Mutex<Option<CancellationToken>>>,
     /// Live writer and active session id, so `set_mode` can send without locking `process`.
     writer: Arc<Mutex<Option<(mpsc::UnboundedSender<String>, String)>>>,
+    /// The latest mode requested by the user (updated immediately by `set_mode`, even mid-turn).
+    live_mode: Arc<Mutex<Option<String>>>,
     next_id: Arc<AtomicU64>,
     stop: Arc<Mutex<CancellationToken>>,
 }
@@ -100,16 +102,18 @@ impl Antigravity {
     /// Switch Antigravity's permission mode live (between runs or during one).
     /// Returns false when no session is open yet (the next turn applies it on start).
     pub fn set_mode(&self, mode: &str) -> bool {
+        *self.live_mode.lock().unwrap() = Some(mode.to_string());
         let guard = self.writer.lock().unwrap();
         let Some((tx, session_id)) = guard.as_ref() else {
             return false;
         };
+        let wire_mode = acp_mode_id(mode);
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let msg = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "session/set_mode",
-            "params": {"sessionId": session_id, "modeId": mode}
+            "params": {"sessionId": session_id, "modeId": wire_mode}
         });
         tx.send(format!("{msg}\n")).is_ok()
     }
@@ -271,7 +275,7 @@ impl Antigravity {
             if let Some(old) = guard.as_mut() {
                 let _ = old.child.start_kill();
             }
-            *guard = Some(Process::start(cfg.launch.clone(), self.next_id.clone()).await?);
+            *guard = Some(Process::start(cfg.launch.clone(), self.next_id.clone(), self.live_mode.clone()).await?);
         }
         let process = guard.as_mut().expect("process was started");
         let saved_session = history.iter().rev().find_map(|m| match m {
@@ -335,11 +339,16 @@ struct Process {
     active_model: Option<String>,
     active_effort: Option<String>,
     active_mode: Option<String>,
+    live_mode: Arc<Mutex<Option<String>>>,
     launch: Launch,
 }
 
 impl Process {
-    async fn start(launch: Launch, next_id: Arc<AtomicU64>) -> Result<Self> {
+    async fn start(
+        launch: Launch,
+        next_id: Arc<AtomicU64>,
+        live_mode: Arc<Mutex<Option<String>>>,
+    ) -> Result<Self> {
         let mut command = tokio::process::Command::new(&launch.binary);
         command
             .arg("acp")
@@ -381,6 +390,7 @@ impl Process {
             active_model: None,
             active_effort: None,
             active_mode: None,
+            live_mode,
             launch,
         };
         let init = process
@@ -484,29 +494,40 @@ impl Process {
                 self.active_effort = Some(effort.to_string());
             }
         }
-        if let Some(mode) = cfg.mode.as_deref()
-            && self.active_mode.as_deref() != Some(mode)
-        {
-            let response = self
-                .call(
-                    "session/set_mode",
-                    json!({"sessionId": session_id, "modeId": mode}),
-                )
-                .await;
-            if response.is_ok() {
-                self.active_mode = Some(mode.to_string());
-            } else if let Ok(r) = self
-                .call(
-                    "session/set_config_option",
-                    json!({"sessionId": session_id, "configId": "mode", "value": mode}),
-                )
-                .await
-            {
-                self.record_config(&r["result"]);
-                self.active_mode = Some(mode.to_string());
+        if let Some(mode) = cfg.mode.as_deref() {
+            *self.live_mode.lock().unwrap() = Some(mode.to_string());
+            let wire_mode = acp_mode_id(mode);
+            if self.active_mode.as_deref() != Some(wire_mode) {
+                let response = self
+                    .call(
+                        "session/set_mode",
+                        json!({"sessionId": session_id, "modeId": wire_mode}),
+                    )
+                    .await;
+                if response.is_ok() {
+                    self.active_mode = Some(wire_mode.to_string());
+                } else if let Ok(r) = self
+                    .call(
+                        "session/set_config_option",
+                        json!({"sessionId": session_id, "configId": "mode", "value": wire_mode}),
+                    )
+                    .await
+                {
+                    self.record_config(&r["result"]);
+                    self.active_mode = Some(wire_mode.to_string());
+                }
             }
         }
         Ok(())
+    }
+
+    fn effective_mode(&self, cfg: &RunConfig) -> Option<String> {
+        self.live_mode
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| cfg.mode.clone())
+            .or_else(|| self.active_mode.clone())
     }
 
     fn alloc_id(&self) -> u64 {
@@ -683,6 +704,13 @@ impl Process {
             state.start_tool(id.clone(), name.clone(), args.clone());
         }
 
+        let mode = self.effective_mode(cfg);
+        let auto_allow = !is_question
+            && match mode.as_deref() {
+                Some("auto" | "bypassPermissions") => true,
+                Some("accept-edits") => matches!(name.as_str(), "edit" | "read" | "grep" | "web_search"),
+                _ => false,
+            };
         let gate = match &cfg.hooks {
             Some(hooks) => hooks.before_tool_call(&name, args).await,
             None => ToolGate::Allow(Value::Null),
@@ -690,10 +718,11 @@ impl Process {
         let answer = match gate {
             ToolGate::Block(reason) => Answer::Deny(Some(reason)),
             ToolGate::Allow(_) => match cfg.prompts {
-                Prompts::Allow if !is_question => Answer::Allow,
                 Prompts::Deny => {
                     Answer::Deny(Some("Refused by antigravity-permission-prompts".into()))
                 }
+                Prompts::Allow if !is_question => Answer::Allow,
+                _ if auto_allow => Answer::Allow,
                 _ => {
                     let (reply, answer) = AskReply::new();
                     emit(AgentEvent::ToolAsk {
@@ -880,7 +909,7 @@ impl<'a> Turn<'a> {
                     let (name, args) = normalize_tool(update);
                     self.start_tool(id.to_string(), name, args);
                 }
-                if matches!(update["status"].as_str(), Some("completed" | "failed")) {
+                if matches!(update["status"].as_str(), Some("completed" | "failed" | "cancelled" | "error")) {
                     self.finish_tool(update);
                 }
             }
@@ -893,7 +922,7 @@ impl<'a> Turn<'a> {
                     self.start_tool(id.to_string(), name, args);
                 }
                 match update["status"].as_str() {
-                    Some("completed" | "failed") => self.finish_tool(update),
+                    Some("completed" | "failed" | "cancelled" | "error") => self.finish_tool(update),
                     _ => {
                         let text = tool_output_text(update);
                         if !text.is_empty() {
@@ -1000,6 +1029,14 @@ impl<'a> Turn<'a> {
         }
         self.close_reply(stop, error);
         (self.emit)(AgentEvent::TurnEnd);
+    }
+}
+
+/// Map Serpis permission modes onto the mode IDs `agy acp` accepts in `session/set_mode`.
+fn acp_mode_id(mode: &str) -> &str {
+    match mode {
+        "bypassPermissions" => "auto",
+        other => other,
     }
 }
 

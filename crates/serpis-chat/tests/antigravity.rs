@@ -182,6 +182,15 @@ fn chats_run_on_antigravity_and_answer_approvals() {
     // Live permission-mode switching on Antigravity chats.
     chat.set_permission_mode(&mut world.host, "accept-edits").unwrap();
     assert_eq!(chat.state().permission_mode.as_deref(), Some("accept-edits"));
+
+    // Auto mode approves permission requests automatically without waiting for ToolAsk.
+    chat.set_permission_mode(&mut world.host, "auto").unwrap();
+    assert_eq!(chat.state().permission_mode.as_deref(), Some("auto"));
+    chat.submit(&mut world.host, "run a command".into(), vec![], false, None)
+        .unwrap();
+    world.finish(&mut chat);
+    assert!(chat.asking().is_empty());
+    assert_eq!(last_text(&chat), "Command finished.");
 }
 
 #[test]

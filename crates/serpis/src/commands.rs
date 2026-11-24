@@ -1009,8 +1009,9 @@ pub fn install(ed: &mut Editor) {
                 &[
                     ("default", "asks before edits and commands its rules don't allow"),
                     ("accept-edits", "edits without asking; asks for commands"),
-                    ("auto", "approves edits and safe commands; asks before irreversible actions"),
+                    ("auto", "approves edits and commands automatically (hooks still apply)"),
                     ("plan", "reads and plans, changes nothing until you approve"),
+                    ("bypassPermissions", "never asks and allows everything"),
                 ]
             } else {
                 &[

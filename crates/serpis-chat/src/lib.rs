@@ -2089,8 +2089,8 @@ fn unix_now() -> i64 {
 /// Claude Code's permission modes.
 pub const PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
-/// Antigravity's permission modes (`agy acp` `configId: "mode"`).
-pub const ANTIGRAVITY_MODES: [&str; 4] = ["default", "accept-edits", "auto", "plan"];
+/// Antigravity's permission modes (`agy acp` `session/set_mode`, plus `bypassPermissions`).
+pub const ANTIGRAVITY_MODES: [&str; 5] = ["default", "accept-edits", "auto", "plan", "bypassPermissions"];
 
 /// The custom entry a chat's own [`Chat::keep_going`] choice is kept in: `{on = bool}`.
 pub const KEEP_GOING: &str = "keep-going";
