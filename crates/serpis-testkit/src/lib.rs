@@ -58,3 +58,24 @@ pub fn fake_codex() -> std::path::PathBuf {
         })
         .clone()
 }
+
+/// The stand-in `agy` CLI (`agy acp` and `agy -p /usage`) used by Antigravity integration tests.
+pub fn fake_agy() -> std::path::PathBuf {
+    static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let dir = profile_dir();
+            let release = dir.file_name().is_some_and(|n| n == "release");
+            let mut cargo = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+            cargo.args(["build", "-q", "-p", "serpis-testkit", "--bin", "serpis-fake-agy"]);
+            if release {
+                cargo.arg("--release");
+            }
+            if let Some(target) = dir.parent() {
+                cargo.env("CARGO_TARGET_DIR", target);
+            }
+            assert!(cargo.status().expect("running cargo").success(), "building serpis-fake-agy");
+            dir.join("serpis-fake-agy")
+        })
+        .clone()
+}

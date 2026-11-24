@@ -25,6 +25,25 @@ pub use cache_watch::{fmt_cost, fmt_duration, fmt_tokens};
 /// The session entry holding the system prompt a chat sends.
 pub const SYSTEM_PROMPT_ENTRY: &str = "serpis-system-prompt";
 
+/// External coding-agent CLI harnesses that run a chat instead of serpis's own agent loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Harness {
+    ClaudeCode,
+    Codex,
+    Antigravity,
+}
+
+impl Harness {
+    pub fn of(model: &Model) -> Option<Self> {
+        match model.api.as_str() {
+            serpis_ai::claude_code::PROVIDER => Some(Self::ClaudeCode),
+            serpis_ai::codex::PROVIDER => Some(Self::Codex),
+            serpis_ai::antigravity::PROVIDER => Some(Self::Antigravity),
+            _ => None,
+        }
+    }
+}
+
 /// How loud a notice is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -232,6 +251,8 @@ pub struct Chat {
     claude: serpis_agent::claude_code::ClaudeCode,
     /// The `codex app-server` process of a chat on a Codex model, kept between turns.
     codex: serpis_agent::codex::Codex,
+    /// The `agy acp` process of a chat on an Antigravity model, kept between turns.
+    antigravity: serpis_agent::antigravity::Antigravity,
     /// Tool calls waiting for the person to allow them, by id: where the answer goes.
     asks: HashMap<String, serpis_agent::AskReply>,
     /// Claude Code's permission mode for this chat, once chosen or reported (else its
@@ -314,6 +335,7 @@ impl Chat {
             agent: None,
             claude: Default::default(),
             codex: Default::default(),
+            antigravity: Default::default(),
             asks: HashMap::new(),
             permission_mode: None,
             thinking_tokens: None,
@@ -357,14 +379,29 @@ impl Chat {
         chat
     }
 
+    /// The external CLI harness backing this chat, if any.
+    pub fn harness(&self) -> Option<Harness> {
+        self.model.as_ref().and_then(Harness::of)
+    }
+
     /// Whether this chat runs on Claude Code (a `claude-code/*` model).
     pub fn is_claude_code(&self) -> bool {
-        self.model.as_ref().is_some_and(|m| m.api == serpis_ai::claude_code::PROVIDER)
+        self.harness() == Some(Harness::ClaudeCode)
     }
 
     /// Whether this chat runs on the Codex harness (a `codex/*` model).
     pub fn is_codex(&self) -> bool {
-        self.model.as_ref().is_some_and(|m| m.api == serpis_ai::codex::PROVIDER)
+        self.harness() == Some(Harness::Codex)
+    }
+
+    /// Whether this chat runs on the Antigravity harness (an `antigravity/*` model).
+    pub fn is_antigravity(&self) -> bool {
+        self.harness() == Some(Harness::Antigravity)
+    }
+
+    /// Whether this chat runs on any external CLI harness (Claude Code, Codex, Antigravity).
+    pub fn is_external_harness(&self) -> bool {
+        self.harness().is_some()
     }
 
     pub fn running(&self) -> bool {
@@ -377,7 +414,7 @@ impl Chat {
 
     /// Where the chat's agent compacts its context by itself, in tokens.
     pub fn compacts_at(&self) -> Option<u64> {
-        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_claude_code() || self.is_codex())
+        self.claude_context.and_then(|(_, _, at)| at).filter(|_| self.is_external_harness())
     }
 
     /// The running agent (aborting through it takes effect at once).
@@ -399,17 +436,24 @@ impl Chat {
         }
     }
 
-    /// Switch this chat's Claude Code to permission mode `mode` (one of [`PERMISSION_MODES`]),
+    /// Switch this chat's harness (Claude Code or Antigravity) to permission mode `mode`,
     /// at once if it is running, else from its next turn.
     pub fn set_permission_mode(&mut self, host: &mut dyn Host, mode: &str) -> Result<(), String> {
-        if !PERMISSION_MODES.contains(&mode) {
-            return Err(format!("{mode} isn't a Claude Code permission mode (one of {})", PERMISSION_MODES.join(", ")));
+        let antigravity = self.is_antigravity();
+        let (modes, what): (&[&str], _) =
+            if antigravity { (&ANTIGRAVITY_MODES, "an Antigravity mode") } else { (&PERMISSION_MODES, "a Claude Code permission mode") };
+        if !modes.contains(&mode) {
+            return Err(format!("{mode} isn't {what} (one of {})", modes.join(", ")));
         }
         if self.permission_mode.as_deref() != Some(mode) {
-            self.append_entry(host, CLAUDE_MODE, json!({"mode": mode}));
+            self.note_mode(host, mode);
         }
         self.permission_mode = Some(mode.to_string());
-        self.claude.set_permission_mode(mode);
+        if antigravity {
+            self.antigravity.set_mode(mode);
+        } else {
+            self.claude.set_permission_mode(mode);
+        }
         (self.wake)();
         Ok(())
     }
@@ -426,10 +470,28 @@ impl Chat {
         self.claude.stop_task(task)
     }
 
+    /// Keep `mode` with the harness it belongs to: a chat that changes harness starts over in
+    /// the new one's default mode.
+    fn note_mode(&mut self, host: &mut dyn Host, mode: &str) {
+        let harness = self.model.as_ref().map(|m| m.api.clone());
+        self.append_entry(host, CLAUDE_MODE, json!({"mode": mode, "harness": harness}));
+    }
+
+    fn stop_harnesses(&mut self, except: Option<Harness>) {
+        if except != Some(Harness::ClaudeCode) {
+            self.claude.stop();
+        }
+        if except != Some(Harness::Codex) {
+            self.codex.stop();
+        }
+        if except != Some(Harness::Antigravity) {
+            self.antigravity.stop();
+        }
+    }
+
     pub fn clear(&mut self) {
         self.abort();
-        self.codex.stop();
-        self.claude.stop();
+        self.stop_harnesses(None);
         self.stop_waiting_for_reset();
         self.limit = None;
         self.entries.clear();
@@ -447,12 +509,11 @@ impl Chat {
     }
 
     pub fn set_model(&mut self, m: Model) {
-        if m.api != serpis_ai::claude_code::PROVIDER {
-            self.claude.stop();
+        let next = Harness::of(&m);
+        if self.harness() != next {
+            self.permission_mode = None;
         }
-        if m.api != serpis_ai::codex::PROVIDER {
-            self.codex.stop();
-        }
+        self.stop_harnesses(next);
         self.thinking = clamp_thinking_level(&m, self.thinking);
         self.model = Some(m);
     }
@@ -557,6 +618,10 @@ impl Chat {
         if self.is_codex() {
             self.answer_cut_off_calls(host);
             return self.start_codex(host, vec![msg]);
+        }
+        if self.is_antigravity() {
+            self.answer_cut_off_calls(host);
+            return self.start_antigravity(host, vec![msg]);
         }
         let Some(cfg) = self.agent_config(host) else { return Err("No model selected".into()) };
         // A turn that was cut off and not continued (parked, or not kept going).
@@ -706,50 +771,79 @@ impl Chat {
         Ok(())
     }
 
-    /// Run a turn through the Codex app-server, with Codex's own tools, login, permissions,
-    /// threads and compaction.
-    fn start_codex(&mut self, host: &mut dyn Host, prompts: Vec<Message>) -> Result<(), String> {
-        let Some(model) = self.model.clone() else { return Err("No model selected".into()) };
-        let binary = match host.var_str("codex-path").filter(|p| !p.is_empty()) {
+    fn harness_binary(
+        host: &mut dyn Host,
+        path_var: &str,
+        detected: Option<PathBuf>,
+        not_found: &str,
+    ) -> Result<PathBuf, String> {
+        let binary = match host.var_str(path_var).filter(|p| !p.is_empty()) {
             Some(path) => Some(expand_home(&path)),
-            None => host.registry().codex_binary(),
+            None => detected,
         };
-        let Some(binary) = binary else {
-            let why = "Codex isn't installed on this machine (codex not found; set codex-path)".to_string();
-            host.notify(Level::Error, why.clone());
-            return Err(why);
-        };
-        self.ensure_session(host);
-        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
-        self.record(host, |writer| writer.note_settings(&provider, &id, thinking).map(|_| ()));
-        let effort = model.thinking_map(self.thinking).flatten().map(str::to_string);
+        binary.ok_or_else(|| {
+            host.notify(Level::Error, not_found.to_string());
+            not_found.to_string()
+        })
+    }
+
+    fn harness_env(&self, host: &dyn Host, env_var: Option<&str>) -> Vec<(String, String)> {
         let mut env = vec![
             (serpis_agent::AGENT_ENV.0.into(), serpis_agent::AGENT_ENV.1.into()),
             ("SERPIS_SESSION_ID".into(), self.session_id.clone()),
         ];
-        if let Some(Value::Object(extra)) = host.var("codex-env") {
+        if let Some(var) = env_var
+            && let Some(Value::Object(extra)) = host.var(var)
+        {
             env.extend(extra.into_iter().filter_map(|(name, value)| value.as_str().map(|v| (name, v.to_string()))));
         }
-        let args = match host.var("codex-args") {
+        env
+    }
+
+    fn harness_args(host: &dyn Host, args_var: &str) -> Vec<String> {
+        match host.var(args_var) {
             Some(Value::Array(args)) => args.iter().filter_map(Value::as_str).map(str::to_string).collect(),
             _ => Vec::new(),
-        };
-        let instructions = host.var_bool("codex-skills", true).then(|| {
-            let skills = if host.var_bool("agent-skills", true) { serpis_agent::skills::discover(&self.skill_places(host)) } else { Vec::new() };
-            let list = serpis_agent::skills::for_prompt(&skills, "shell");
-            // Each task ends with a report in the skill's shape (chat-report-skill).
+        }
+    }
+
+    fn harness_skills(&self, host: &dyn Host, skills_var: &str, tool_hint: &str) -> Option<String> {
+        host.var_bool(skills_var, true).then(|| {
+            let skills = if host.var_bool("agent-skills", true) {
+                serpis_agent::skills::discover(&self.skill_places(host))
+            } else {
+                Vec::new()
+            };
+            let list = serpis_agent::skills::for_prompt(&skills, tool_hint);
             match serpis_agent::skills::report_rule(&skills, &Default::default()) {
                 Some(rule) => [list, rule].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n"),
                 None => list,
             }
-        });
+        })
+    }
+
+    /// Run a turn through the Codex app-server, with Codex's own tools, login, permissions,
+    /// threads and compaction.
+    fn start_codex(&mut self, host: &mut dyn Host, prompts: Vec<Message>) -> Result<(), String> {
+        let Some(model) = self.model.clone() else { return Err("No model selected".into()) };
+        let detected = host.registry().codex_binary();
+        let binary = Self::harness_binary(
+            host,
+            "codex-path",
+            detected,
+            "Codex isn't installed on this machine (codex not found; set codex-path)",
+        )?;
+        self.ensure_session(host);
+        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
+        self.record(host, |writer| writer.note_settings(&provider, &id, thinking).map(|_| ()));
+        let effort = model.thinking_map(self.thinking).flatten().map(str::to_string);
         let launch = serpis_agent::codex::Launch {
             binary,
             cwd: self.cwd.clone(),
-            args,
-            instructions,
+            args: Self::harness_args(host, "codex-args"),
+            instructions: self.harness_skills(host, "codex-skills", "shell"),
             instructions_restart: host.var_bool("codex-skills-restart", false),
-            env,
+            env: self.harness_env(host, Some("codex-env")),
         };
         let cfg = serpis_agent::codex::RunConfig {
             launch,
@@ -773,13 +867,62 @@ impl Chat {
         Ok(())
     }
 
+    /// Run a turn through `agy acp` (Antigravity's harness, login, tools, permissions, sessions
+    /// and compaction).
+    fn start_antigravity(&mut self, host: &mut dyn Host, prompts: Vec<Message>) -> Result<(), String> {
+        let Some(model) = self.model.clone() else { return Err("No model selected".into()) };
+        let detected = host.registry().antigravity_binary();
+        let binary = Self::harness_binary(
+            host,
+            "antigravity-path",
+            detected,
+            "Antigravity isn't installed on this machine (agy not found; set antigravity-path)",
+        )?;
+        self.ensure_session(host);
+        let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
+        self.record(host, |writer| writer.note_settings(&provider, &id, thinking).map(|_| ()));
+        let effort = model.thinking_map(self.thinking).flatten().map(str::to_string);
+        let launch = serpis_agent::antigravity::Launch {
+            binary,
+            cwd: self.cwd.clone(),
+            args: Self::harness_args(host, "antigravity-args"),
+            instructions: self.harness_skills(host, "antigravity-skills", "shell"),
+            instructions_restart: host.var_bool("antigravity-skills-restart", false),
+            env: self.harness_env(host, Some("antigravity-env")),
+        };
+        let mode = self
+            .permission_mode
+            .clone()
+            .or_else(|| host.var_str("antigravity-mode"))
+            .filter(|s| !s.is_empty());
+        let cfg = serpis_agent::antigravity::RunConfig {
+            launch,
+            model,
+            effort,
+            mode,
+            hooks: host.tool_hooks(),
+            prompts: host.var_str("antigravity-permission-prompts").and_then(|p| serpis_agent::antigravity::Prompts::parse(&p)).unwrap_or_default(),
+        };
+        self.sent = None;
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
+        let emit: serpis_agent::EmitFn = Arc::new(move |event| {
+            let _ = tx.send(Done::Agent(event));
+            wake();
+        });
+        let runtime = host.runtime();
+        let _guard = runtime.enter();
+        self.last_error = None;
+        self.agent = Some(self.antigravity.run(self.history.clone(), prompts, cfg, emit));
+        Ok(())
+    }
+
     /// Replace the messages before a cut point with a summary (manually, or automatically near
     /// the context window). The summary is asked for in the conversation itself, so the request
     /// reads the prompt cache; see `serpis_agent::compaction`.
     pub fn compact(&mut self, host: &mut dyn Host, reason: CompactReason, instructions: Option<String>) {
         use serpis_agent::compaction::{context_tokens, cut_point, estimate_tokens, summary_request};
-        if self.is_claude_code() {
-            // Claude Code compacts its own context (automatically, or with /compact).
+        if self.is_claude_code() || self.is_antigravity() {
+            // Claude Code and Antigravity compact their own context (automatically, or with /compact).
             if reason == CompactReason::Manual {
                 let text = match instructions {
                     Some(i) if !i.trim().is_empty() => format!("/compact {i}"),
@@ -897,7 +1040,7 @@ impl Chat {
     /// After a run: compact when the context nears the window (chat-compact-auto), or when the
     /// run failed on a context overflow, then retry it once.
     fn compact_if_needed(&mut self, host: &mut dyn Host) {
-        if self.is_claude_code() || self.is_codex() {
+        if self.is_external_harness() {
             return;
         }
         if !host.var_bool("chat-compact-auto", true) {
@@ -925,7 +1068,7 @@ impl Chat {
     /// roughly), and the model's window. None before any response.
     pub fn context(&self) -> (Option<u64>, u64) {
         // An external harness's own count, including its system prompt and tools.
-        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_claude_code() || self.is_codex()) {
+        if let Some((used, window, _)) = self.claude_context.filter(|_| self.is_external_harness()) {
             return (Some(used), window);
         }
         let used = self.history.iter().rev().find_map(|m| match m {
@@ -1312,7 +1455,8 @@ impl Chat {
     /// whenever the chat's [`Wake`] fires, and once after creating or restoring it.
     pub fn poll(&mut self, host: &mut dyn Host) {
         if self.permission_mode.is_none() {
-            self.default_mode = host.var_str("claude-code-permission-mode").unwrap_or_else(|| "default".into());
+            let var = if self.is_antigravity() { "antigravity-mode" } else { "claude-code-permission-mode" };
+            self.default_mode = host.var_str(var).filter(|s| !s.is_empty()).unwrap_or_else(|| "default".into());
         }
         if let Some(p) = self.pending_resume.take() {
             self.finish_resume(host, p);
@@ -1372,9 +1516,13 @@ impl Chat {
                         blocks.push(AssistantContent::Text { text: String::new(), text_signature: None });
                     }
                 }
-                StreamEvent::TextDelta { delta, .. } => {
-                    if let Some(AssistantContent::Text { text, .. }) = self.last_assistant().and_then(|b| b.last_mut()) {
-                        text.push_str(&delta);
+                StreamEvent::TextDelta { index, delta } => {
+                    if let Some(blocks) = self.last_assistant() {
+                        if let Some(AssistantContent::Text { text, .. }) = blocks.last_mut() {
+                            text.push_str(&delta);
+                        } else if let Some(AssistantContent::Text { text, .. }) = blocks.get_mut(index) {
+                            text.push_str(&delta);
+                        }
                     }
                 }
                 StreamEvent::ThinkingStart { .. } => {
@@ -1383,9 +1531,13 @@ impl Chat {
                         blocks.push(AssistantContent::Thinking { thinking: String::new(), thinking_signature: None, redacted: false });
                     }
                 }
-                StreamEvent::ThinkingDelta { delta, .. } => {
-                    if let Some(AssistantContent::Thinking { thinking, .. }) = self.last_assistant().and_then(|b| b.last_mut()) {
-                        thinking.push_str(&delta);
+                StreamEvent::ThinkingDelta { index, delta } => {
+                    if let Some(blocks) = self.last_assistant() {
+                        if let Some(AssistantContent::Thinking { thinking, .. }) = blocks.last_mut() {
+                            thinking.push_str(&delta);
+                        } else if let Some(AssistantContent::Thinking { thinking, .. }) = blocks.get_mut(index) {
+                            thinking.push_str(&delta);
+                        }
                     }
                 }
                 StreamEvent::ToolCallStart { id, name, .. } => {
@@ -1562,7 +1714,7 @@ impl Chat {
             }
             AgentEvent::Nested { parent, event } => self.apply_nested(&parent, *event),
             AgentEvent::PermissionMode(m) => {
-                self.append_entry(host, CLAUDE_MODE, json!({"mode": m}));
+                self.note_mode(host, &m);
                 self.permission_mode = Some(m);
             }
             AgentEvent::ThinkingTokens(d) => *self.thinking_tokens.get_or_insert(0) += d,
@@ -1604,7 +1756,12 @@ impl Chat {
                     self.agent = Some(handle);
                     self.last_error = None;
                 }
-                let text = why.unwrap_or_else(|| "Claude Code went on by itself".into());
+                let who = match self.harness() {
+                    Some(Harness::Antigravity) => "Antigravity",
+                    Some(Harness::Codex) => "Codex",
+                    _ => "Claude Code",
+                };
+                let text = why.unwrap_or_else(|| format!("{who} went on by itself"));
                 self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len()}));
                 self.entries.push(Entry::Info { text, tone: Tone::Meta });
             }
@@ -1806,7 +1963,17 @@ impl Chat {
                 }
             }
         }
-        self.permission_mode = l.entries.iter().rev().find(|(k, _)| k == CLAUDE_MODE).and_then(|(_, d)| d["mode"].as_str()).map(str::to_string);
+        // The last mode chosen, if it was chosen on this chat's harness (saved before harnesses
+        // were noted: Claude Code).
+        let harness = self.model.as_ref().map(|m| m.api.as_str());
+        self.permission_mode = l
+            .entries
+            .iter()
+            .rev()
+            .find(|(k, _)| k == CLAUDE_MODE)
+            .filter(|(_, d)| d["harness"].as_str().unwrap_or(serpis_ai::claude_code::PROVIDER) == harness.unwrap_or_default())
+            .and_then(|(_, d)| d["mode"].as_str())
+            .map(str::to_string);
         // Stopped at a usage limit, with nothing sent since: it still goes on when that resets
         // (at once if it already has).
         self.stop_waiting_for_reset();
@@ -1900,7 +2067,7 @@ impl Chat {
             custom: self.custom_entries.clone(),
             cache_info: self.cache_info(),
             keep_going: self.keep_going(),
-            permission_mode: self.is_claude_code().then(|| self.permission_mode.clone().unwrap_or_else(|| self.default_mode.clone())),
+            permission_mode: (self.is_claude_code() || self.is_antigravity()).then(|| self.permission_mode.clone().unwrap_or_else(|| self.default_mode.clone())),
             thinking_tokens: self.thinking_tokens.filter(|_| self.running()),
             limit: self.current_limit(),
             continues_at: self.continues.as_ref().map(|(at, _)| *at),
@@ -1945,11 +2112,14 @@ fn unix_now() -> i64 {
 /// Claude Code's permission modes.
 pub const PERMISSION_MODES: [&str; 6] = ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
+/// Antigravity's permission modes (`agy acp` `session/set_mode`).
+pub const ANTIGRAVITY_MODES: [&str; 4] = ["default", "accept-edits", "auto", "plan"];
+
 /// The custom entry a chat's own [`Chat::keep_going`] choice is kept in: `{on = bool}`.
 pub const KEEP_GOING: &str = "keep-going";
 
 /// The custom entries a Claude Code chat keeps what its messages don't say in: its permission
-/// mode (`{mode}`), how work a tool call started ended and a subagent's steps (`{id, task,
+/// mode (`{mode, harness}`: Claude Code's or Antigravity's), how work a tool call started ended and a subagent's steps (`{id, task,
 /// steps}`), and why it took a turn of its own (`{text, at}`: before history message `at`).
 pub const CLAUDE_MODE: &str = "claude-code-mode";
 pub const CLAUDE_TOOL: &str = "claude-code-tool";

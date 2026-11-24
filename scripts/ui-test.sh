@@ -57,19 +57,20 @@ export EXA_MCP_URL="http://127.0.0.1:9/mcp"
 export DUCKDUCKGO_BASE_URL="http://127.0.0.1:$(cat "$tmp/mock.port")/ddg"
 export SERPIS_TEST_CACHE_URL="http://127.0.0.1:$(cat "$tmp/cache-mock.port")" SERPIS_TEST_CACHE_LOG="$tmp/cache-mock.log"
 fail=0
-for t in "${@:-vim emacs terminal terminal_esc terminal_vim terminal_vim_prompt workspaces fonts layout mouse sidebar sessions sessions_restore pins pins_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model model_selection cache cache_restore compact worktree remote remote_login remote_setup config_reload var_reload folders switch_project chat_measure report_render report_links report_review report_review_vim report_challenge report_challenge_end report_review_restore report_replies report_replies_restore review_send report_skill report_tables chat_diagrams start_chat start_chat_restore remote_move remote_resume shared_chat terminal_node terminal_node_restore terminal_speed keep_going machine_add phone_pair claude_code codex_status bash_highlight tool_cards chat_follow log_view diff_view diff_remote diff_resume diff_resume_restore notify skills multi_click checklist code_comments sidebar_review diff_upstream response_time buffer_preview retry search_required search_provider review_targets chat_links terminal_blocks}"; do
+for t in "${@:-vim emacs terminal terminal_esc terminal_vim terminal_vim_prompt workspaces fonts layout mouse sidebar sessions sessions_restore pins pins_restore composer pickers chrome vim_chat jump extend terminal_images images terminal_mouse vim_wrap scroll frecency accent jump_quotes resume_scope header_model model_selection cache cache_restore compact worktree remote remote_login remote_setup config_reload var_reload folders switch_project chat_measure report_render report_links report_review report_review_vim report_challenge report_challenge_end report_review_restore report_replies report_replies_restore review_send report_skill report_tables chat_diagrams start_chat start_chat_restore remote_move remote_resume shared_chat terminal_node terminal_node_restore terminal_speed keep_going machine_add phone_pair claude_code codex_status antigravity bash_highlight tool_cards chat_follow log_view diff_view diff_remote diff_resume diff_resume_restore notify skills multi_click checklist code_comments sidebar_review diff_upstream response_time buffer_preview retry search_required search_provider review_targets chat_links terminal_blocks}"; do
   for name in $t; do
     out="$tmp/$name.out"
     # Each test starts from fresh state; sessions_restore checks what sessions left behind.
     state="${name%_restore}"
     [[ -d "$tmp/home-$state" ]] || new_home "$tmp/home-$state"
-    # Never the real claude CLI (its login, sessions): no Claude Code, except the stand-in for
-    # the test of it.
+    # Never the real claude or agy CLI (their login, sessions): only the stand-ins for their tests.
     claude=""
     [[ "$state" == claude_code ]] && claude="$root/target/debug/serpis-fake-claude"
+    agy=""
+    [[ "$state" == antigravity ]] && agy="$root/target/debug/serpis-fake-agy"
     SERPIS_TEST_DIR="$root/tests/ui" SERPIS_TEST_OUT="$out" SERPIS_TEST_SCRIPT="$root/tests/ui/$name.lua" \
       SERPIS_CONFIG_DIR="$tmp/cfg-$state" SERPIS_AGENT_DIR="$tmp/agent-$state" HOME="$tmp/home-$state" SERPIS_TERMINAL_SOCKET="$tmp/home-$state/.t.sock" \
-      SERPIS_CLAUDE_CODE_PATH="$claude" FAKE_CLAUDE_LOG="$tmp/$name.claude.log" FAKE_CLAUDE_DIR="$tmp/home-$state" \
+      SERPIS_CLAUDE_CODE_PATH="$claude" SERPIS_ANTIGRAVITY_PATH="$agy" FAKE_CLAUDE_LOG="$tmp/$name.claude.log" FAKE_CLAUDE_DIR="$tmp/home-$state" \
       timeout "${SERPIS_TEST_TIMEOUT:-60}" "${SERPIS_TEST_BIN:-$root/target/debug/serpis}" >"$tmp/$name.log" 2>&1 || true
     # Chats run in this machine's node, which outlives the window: stopped with the test.
     HOME="$tmp/home-$state" "$root/target/debug/serpis-node" stop >/dev/null 2>&1 || true

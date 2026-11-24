@@ -1,5 +1,5 @@
 //! Reviewing what an agent wrote in a chat (its report, or any message): comments on quoted
-//! parts of it, asking a question or a change, saved as you read and sent as one message with
+//! parts of it, asking a question or commenting, saved as you read and sent as one message with
 //! whatever you type. Kept between runs like a diff page's review (`diff::review`): drafts and
 //! the comment being written, one file per chat session. No UI in here (the chat draws it).
 
@@ -24,7 +24,7 @@ pub struct Comment {
     /// How the message it is about starts, so the agent knows which one.
     #[serde(default)]
     pub opening: String,
-    /// What you wrote: the question or change, or your note on a challenge's finding.
+    /// What you wrote: the question or comment, or your note on a challenge's finding.
     pub text: String,
     pub ask: Ask,
     pub state: State,
@@ -145,16 +145,16 @@ pub struct Framing {
     pub reply: String,
     /// What to do about questions.
     pub question: String,
-    /// What to do about changes asked for.
+    /// What to do about comments.
     pub fix: String,
 }
 
 /// chat-review-reply-instructions' default.
-pub const REPLY_INSTRUCTIONS: &str = "Reply with a report, as after any task. Each change asked for is a bullet under `## Changed`. Each answer comes after the report's first line, quoting what it answers. A place such as item 2 under \"Needs you\" is in your last report: don't use it as a heading.";
+pub const REPLY_INSTRUCTIONS: &str = "Reply with a report, as after any task. Each comment acted on is a bullet under `## Changed`. Each answer comes after the report's first line, quoting what it answers. A place such as item 2 under \"Needs you\" is in your last report: don't use it as a heading.";
 /// chat-review-question-instructions' default.
 pub const QUESTION_INSTRUCTIONS: &str = "Answer each, quoting it. Change nothing for these.";
 /// chat-review-fix-instructions' default.
-pub const FIX_INSTRUCTIONS: &str = "Make these changes. When one is unclear or wrong, say so instead of guessing.";
+pub const FIX_INSTRUCTIONS: &str = "Address these comments. When one is unclear or wrong, say so instead of guessing.";
 
 /// What a review message says, from the settings: how to reply only when the agent writes
 /// reports (chat-report-skill).
@@ -257,7 +257,7 @@ pub fn prompt(comments: &[&Comment], also: &str, f: &Framing) -> String {
         }
     };
     section(&mut out, Ask::Question, "Questions", &f.question);
-    section(&mut out, Ask::Fix, "Changes asked for", &f.fix);
+    section(&mut out, Ask::Fix, "Comments", &f.fix);
     let also = also.trim();
     if !also.is_empty() {
         out.push_str(&format!("\n\n## Also\n\n{also}\n"));
@@ -367,7 +367,7 @@ pub fn parse_sent(text: &str) -> Option<Sent> {
             match h.trim() {
                 CHALLENGED => ask = Some(Ask::Fix),
                 "Questions" => ask = Some(Ask::Question),
-                "Changes asked for" | "Fix" => ask = Some(Ask::Fix),
+                "Comments" | "Changes asked for" | "Fix" => ask = Some(Ask::Fix),
                 "Also" => also = Some(Vec::new()),
                 _ => ask = None,
             }
@@ -451,9 +451,9 @@ pub fn install(ed: &mut crate::editor::Editor) {
     let o = crate::editor::BUILTIN;
     ed.defvar("chat-review-reply-instructions", json!(REPLY_INSTRUCTIONS), "What a review sent to a chat's agent says first, about how to reply (only while chat-report-skill is on). Empty: nothing.");
     ed.defvar("chat-review-question-instructions", json!(QUESTION_INSTRUCTIONS), "What a review sent to a chat's agent says about questions.");
-    ed.defvar("chat-review-fix-instructions", json!(FIX_INSTRUCTIONS), "What a review sent to a chat's agent says about changes asked for.");
+    ed.defvar("chat-review-fix-instructions", json!(FIX_INSTRUCTIONS), "What a review sent to a chat's agent says about comments.");
     ed.define_command("chat-ask", "Ask a question about the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Question)));
-    ed.define_command("chat-comment", "Ask for a change about the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Fix)));
+    ed.define_command("chat-comment", "Comment on the selection in what the agent wrote (or the line at the cursor): written in the composer, saved to the chat's review.", o, |ed, _| with_chat(ed, |c, ed| c.start_comment(ed, Ask::Fix)));
     ed.define_command("chat-comment-save", "Save the comment being written to the chat's review, sent with your next message (emptied, a saved one is deleted).", o, |ed, _| with_chat(ed, |c, ed| c.save_comment(ed)));
     ed.define_command("chat-comment-send", "Send the comment being written now, on its own.", o, |ed, _| with_chat(ed, |c, ed| c.send_comment_now(ed)));
     ed.define_command("chat-comment-cancel", "Drop the comment being written (a saved one stays as it was).", o, |ed, _| with_chat(ed, |c, ed| c.cancel_comment(ed)));
@@ -465,7 +465,7 @@ pub fn install(ed: &mut crate::editor::Editor) {
         }
         with_chat(ed, |c, ed| c.cancel_comment(ed))
     });
-    ed.define_command("chat-comment-cycle-kind", "Whether the comment being written asks a question or for a change (param: \"question\" or \"fix\").", o, |ed, a| {
+    ed.define_command("chat-comment-cycle-kind", "Whether the comment being written is a question or a comment (param: \"question\" or \"fix\").", o, |ed, a| {
         let set = a.str(0).and_then(Ask::parse);
         with_chat(ed, |c, _| c.cycle_comment_kind(set))
     });
@@ -530,7 +530,7 @@ mod tests {
     use super::*;
 
     fn framing() -> Framing {
-        Framing { reply: String::new(), question: "Answer each, quoting it.".into(), fix: "Make these changes.".into() }
+        Framing { reply: String::new(), question: "Answer each, quoting it.".into(), fix: "Address these comments.".into() }
     }
 
     fn writing(quote: &str, text: &str, ask: Ask) -> Writing {
@@ -561,7 +561,7 @@ mod tests {
         let p = prompt(&[&q, &f], "Then run the tests again.", &framing());
         assert_eq!(
             p,
-            "Review comments on what you wrote.\n\n## Questions\nAnswer each, quoting it.\n\nIn your message that starts \"Done: the retry change is sound\", item 1 under \"Changed\":\n> This is the likely cause\n> of the flake.\nDid you reproduce it?\n\n\n## Changes asked for\nMake these changes.\n\nItem 2 under \"Needs you\":\n> Its Display output changed.\nUpdate the dashboards' parser too.\n\n\n## Also\n\nThen run the tests again.\n"
+            "Review comments on what you wrote.\n\n## Questions\nAnswer each, quoting it.\n\nIn your message that starts \"Done: the retry change is sound\", item 1 under \"Changed\":\n> This is the likely cause\n> of the flake.\nDid you reproduce it?\n\n\n## Comments\nAddress these comments.\n\nItem 2 under \"Needs you\":\n> Its Display output changed.\nUpdate the dashboards' parser too.\n\n\n## Also\n\nThen run the tests again.\n"
         );
         // Nothing typed: no "Also".
         assert!(!prompt(&[&q], "  ", &framing()).contains("## Also"));
@@ -619,8 +619,8 @@ mod tests {
         assert!(p.starts_with(&format!("Review comments on what you wrote.\n\n## {CHALLENGED}\n")), "{p}");
         assert!(p.contains("In your message that starts \"Done: retries\", item 1 under \"Changed\":\n> This is the likely cause.\nChallenge (confirmed): The race is still there.\nEvidence: 8 workers: 3 of 500 failed.\nMy note: Agreed. Add the run to the test.\n"), "{p}");
         assert!(p.contains("Item 2 under \"Checked\":\n> passed every time.\nChallenge (plausible): One thread can't race.\n\n"), "{p}");
-        // Not repeated under the changes asked for.
-        assert!(!p.contains("## Changes asked for"), "{p}");
+        // Not repeated under Comments.
+        assert!(!p.contains("## Comments"), "{p}");
         let sent = parse_sent(&p).unwrap();
         assert_eq!(sent.items.len(), 3);
         let (a, b, c) = (&sent.items[0], &sent.items[1], &sent.items[2]);

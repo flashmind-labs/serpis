@@ -108,7 +108,7 @@ local steps = {
     shot("1-sent")
     T.check("sent, nothing waits", serpis.chat.review(chat).drafts, 0)
     -- Your bubble: the review as one.
-    T.check("your message is drawn as a review", line_where(function(l) return l.text == "Review  ·  1 question, 1 change" end) ~= nil, true)
+    T.check("your message is drawn as a review", line_where(function(l) return l.text == "Review  ·  1 question, 1 comment" end) ~= nil, true)
     local _, place = line_where(function(l) return l.text == "Question   ↑ Changed 1" end)
     T.check("each comment says where, as a link", place and place.links[1] and place.links[1]:sub(1, 5), "find:")
     T.check("what it quotes", line_where(function(l) return l.text == "│ " .. first end) ~= nil, true)
@@ -116,7 +116,7 @@ local steps = {
     -- The report: the comments sent stay, linked to their answers.
     local q, ql = line_where(function(l) return l.text == "Question  ·  sent  ·  answered ↓" end)
     T.check("a question sent stays on the report, answered", q ~= nil and ql.links[1] ~= nil, true)
-    T.check("a change too", line_where(function(l) return l.text == "Change  ·  sent  ·  answered ↓" end) ~= nil, true)
+    T.check("a comment too", line_where(function(l) return l.text == "Comment  ·  sent  ·  answered ↓" end) ~= nil, true)
     report_line = line_where(function(l) return l.text:find(first, 1, true) and l.marks > 0 and not l.text:find("│", 1, true) and l.marker ~= "↑" end)
     T.check("what it is about stays marked", report_line ~= nil, true)
     -- The answer: its quotes marked, linked back.
