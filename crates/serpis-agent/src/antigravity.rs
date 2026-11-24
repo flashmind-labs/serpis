@@ -108,8 +108,8 @@ impl Antigravity {
         let msg = json!({
             "jsonrpc": "2.0",
             "id": id,
-            "method": "session/set_config_option",
-            "params": {"sessionId": session_id, "configId": "mode", "value": mode}
+            "method": "session/set_mode",
+            "params": {"sessionId": session_id, "modeId": mode}
         });
         tx.send(format!("{msg}\n")).is_ok()
     }
@@ -439,6 +439,9 @@ impl Process {
     }
 
     fn record_config(&mut self, result: &Value) {
+        if let Some(mode) = result.pointer("/modes/currentModeId").and_then(Value::as_str) {
+            self.active_mode = Some(mode.to_string());
+        }
         for opt in result["configOptions"].as_array().into_iter().flatten() {
             let value = opt["currentValue"].as_str().map(str::to_string);
             match opt["id"].as_str() {
@@ -486,11 +489,19 @@ impl Process {
         {
             let response = self
                 .call(
+                    "session/set_mode",
+                    json!({"sessionId": session_id, "modeId": mode}),
+                )
+                .await;
+            if response.is_ok() {
+                self.active_mode = Some(mode.to_string());
+            } else if let Ok(r) = self
+                .call(
                     "session/set_config_option",
                     json!({"sessionId": session_id, "configId": "mode", "value": mode}),
                 )
-                .await;
-            if let Ok(r) = response {
+                .await
+            {
                 self.record_config(&r["result"]);
                 self.active_mode = Some(mode.to_string());
             }
@@ -523,6 +534,9 @@ impl Process {
             "params": {"sessionId": session_id, "prompt": prompt}
         }))?;
         let mut state = Turn::new(&cfg.model, &session_id, emit);
+        // Open a streaming assistant entry right away so Serpis shows `Thinking…` while
+        // Antigravity thinks silently (Gemini models often omit thought chunks).
+        state.ensure_reply();
         let mut steering_ids: HashSet<u64> = HashSet::new();
         let mut cancelled = false;
         loop {
@@ -827,21 +841,17 @@ impl<'a> Turn<'a> {
     }
 
     fn start_tool(&mut self, id: String, name: String, args: Value) {
+        self.ensure_reply();
+        if let Some(reply) = self.reply.as_mut() {
+            reply.content.push(AssistantContent::ToolCall(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: args.clone(),
+                thought_signature: None,
+                arguments_error: None,
+            }));
+        }
         self.close_reply(StopReason::ToolUse, None);
-        let mut message = AssistantMessage::empty(self.model);
-        message.response_id = Some(self.session_id.to_string());
-        message.stop_reason = StopReason::ToolUse;
-        message.content.push(AssistantContent::ToolCall(ToolCall {
-            id: id.clone(),
-            name: name.clone(),
-            arguments: args.clone(),
-            thought_signature: None,
-            arguments_error: None,
-        }));
-        (self.emit)(AgentEvent::MessageStart(Message::Assistant(
-            AssistantMessage::empty(self.model),
-        )));
-        (self.emit)(AgentEvent::MessageEnd(Message::Assistant(message)));
         (self.emit)(AgentEvent::ToolStart {
             id: id.clone(),
             name: name.clone(),
@@ -942,6 +952,10 @@ impl<'a> Turn<'a> {
         let message = Message::ToolResult(result);
         (self.emit)(AgentEvent::MessageStart(message.clone()));
         (self.emit)(AgentEvent::MessageEnd(message));
+        if self.tools.is_empty() {
+            // Show `Thinking…` again while Antigravity processes the tool result.
+            self.ensure_reply();
+        }
     }
 
     fn apply_prompt_usage(&mut self, usage: &Value) {

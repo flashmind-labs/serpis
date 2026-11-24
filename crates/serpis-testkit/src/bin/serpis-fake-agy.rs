@@ -126,6 +126,21 @@ fn main() {
                     }
                 }));
             }
+            Some("session/set_mode") => {
+                let sid = message.pointer("/params/sessionId").and_then(Value::as_str).unwrap_or("agy-fake-session");
+                if let Some(mode) = message.pointer("/params/modeId").and_then(Value::as_str) {
+                    current_mode = mode.to_string();
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": sid,
+                            "update": {"sessionUpdate": "current_mode_update", "currentModeId": current_mode}
+                        }
+                    }));
+                }
+                send(json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+            }
             Some("session/set_config_option") => {
                 let config_id = message.pointer("/params/configId").and_then(Value::as_str).unwrap_or("");
                 let value = message.pointer("/params/value").and_then(Value::as_str).unwrap_or("");
