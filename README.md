@@ -143,7 +143,8 @@ transcript, so it lasts as long as the chat.
 
 A report can be challenged: Challenge on its header (`chat-report-challenge`) sets it up in the
 composer, with the challenger's model (another vendor's listed first) and thinking, "default from
-now on" (`chat-report-challenge-model`, `-thinking`), and what you type as a note to it; RET
+now on" (`chat-report-challenge-model`, `-thinking`: ticked when there is a default, unticked
+there is none and challenges start on the chat's own model), and what you type as a note to it; RET
 starts it. A fresh agent, in a new worktree of the chat's checkout with its uncommitted work
 copied in, is sent the report with the `challenge` skill (`skills/challenge`) and tries to prove
 its claims wrong, running its checks again where it may (`chat-report-challenge-run`). The

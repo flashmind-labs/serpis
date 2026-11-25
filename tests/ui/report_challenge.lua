@@ -45,10 +45,13 @@ local function asked()
   end
   return out
 end
+-- The latest such request (the mock model's log is shared with the tests run before this one).
 local function find_asked(prefix)
+  local found
   for _, t in ipairs(asked()) do
-    if t:sub(1, #prefix) == prefix then return t end
+    if t:sub(1, #prefix) == prefix then found = t end
   end
+  return found
 end
 
 -- The transcript line (1-based) holding `text`, and the column it starts at (in characters).

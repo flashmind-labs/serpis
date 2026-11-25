@@ -853,7 +853,7 @@ pub fn install(ed: &mut Editor) {
             };
         })
     });
-    ed.define_command("chat-challenge-form-remember", "Whether the model and thinking of the challenge being set up become the default (chat-report-challenge-model, -thinking).", o, |ed, _| {
+    ed.define_command("chat-challenge-form-remember", "Whether the model and thinking of the challenge being set up are the default (chat-report-challenge-model, -thinking): ticked, they become it; unticked, there is none (challenges start on the chat's own model). It opens ticked when there is one.", o, |ed, _| {
         crate::commands::with_chat(ed, |c, _| {
             if let Some(f) = c.challenge_form_mut() {
                 f.remember = !f.remember;
