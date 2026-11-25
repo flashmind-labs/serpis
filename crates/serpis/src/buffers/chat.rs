@@ -3133,8 +3133,12 @@ impl ChatBuffer {
         self.dirty = true;
         // Ticked: these are the default. Unticked: there is none (the chat's own model next time).
         let (model, thinking) = if f.remember { (f.model.clone(), f.thinking.clone()) } else { (None, None) };
-        ed.set_var("chat-report-challenge-model", model.map(Value::String).unwrap_or(Value::Null));
-        ed.set_var("chat-report-challenge-thinking", thinking.map(Value::String).unwrap_or(Value::Null));
+        // From now on: after a restart too.
+        for (name, v) in [("chat-report-challenge-model", model), ("chat-report-challenge-thinking", thinking)] {
+            let v = v.map(Value::String).unwrap_or(Value::Null);
+            ed.set_var(name, v.clone());
+            ed.persist_state(name, v);
+        }
         let Some(id) = ed.this_buffer() else { return };
         let opts = crate::chat_challenge::Options { model: f.model, thinking: f.thinking, note };
         let entry = f.entry;

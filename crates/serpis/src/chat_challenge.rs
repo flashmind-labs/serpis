@@ -769,8 +769,9 @@ pub fn stop(ed: &mut Editor, id: &str) {
 
 pub fn install(ed: &mut Editor) {
     ed.defvar("chat-report-challenge", json!(true), "Challenge an agent's report: a fresh agent, in a worktree of its own, tries to prove the report's claims wrong, and what it finds goes to your review as drafts under the claims (chat-report-challenge, the command). Off: no Challenge on reports, and agents don't get the challenge skill.");
-    ed.defvar("chat-report-challenge-model", Value::Null, "The challenger's model (\"provider/id\"); nil: the challenged chat's own. A model from another vendor catches more of what the author's missed.");
-    ed.defvar("chat-report-challenge-thinking", Value::Null, "The challenger's thinking level (off, minimal, low, medium, high, xhigh, max); nil: new chats' default.");
+    // What the challenge form's "default from now on" chose, kept between runs.
+    ed.defvar("chat-report-challenge-model", Editor::persisted_state("chat-report-challenge-model").unwrap_or(Value::Null), "The challenger's model (\"provider/id\"); nil: the challenged chat's own. A model from another vendor catches more of what the author's missed. The challenge form's \"default from now on\" sets it, kept between runs.");
+    ed.defvar("chat-report-challenge-thinking", Editor::persisted_state("chat-report-challenge-thinking").unwrap_or(Value::Null), "The challenger's thinking level (off, minimal, low, medium, high, xhigh, max); nil: new chats' default. The challenge form's \"default from now on\" sets it, kept between runs.");
     ed.defvar("chat-report-challenge-skill", json!("challenge"), "The skill the challenger is sent by name: serpis's own (skills/challenge), or one of yours by that name or another.");
     ed.defvar("chat-report-challenge-run", json!(true), "Whether the challenger may run commands, such as the report's checks; off, it only reads.");
     ed.defvar("chat-report-challenge-worktree-ttl", json!(1800), "Seconds after a challenge ends before its worktree and branch are removed, once its chat is closed; 0 keeps them.");

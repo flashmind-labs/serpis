@@ -1,7 +1,8 @@
 -- "default from now on" says whether the challenge's model and thinking are the default, and
 -- makes it so: unticked, a challenge on another model leaves none, and the next one is set up
 -- on the chat's own model; ticked, they are the next one's, which opens with it ticked;
--- unticked then, the default goes.
+-- unticked then, the default goes. It ends with one, which report_challenge_default_restore finds
+-- after a restart.
 local T = dofile(os.getenv("SERPIS_TEST_DIR") .. "/lib.lua")
 local d = serpis.debug
 local agent_dir = os.getenv("SERPIS_AGENT_DIR")
@@ -108,6 +109,18 @@ local steps = {
   function()
     T.check("last: on the chat's model again", form() and form().model, "mock/m")
     T.check("last: unticked", form() and form().remember, false)
+    -- A default to keep: report_challenge_default_restore finds it after a restart.
+    serpis.command.run("chat-challenge-form-model", "mock/third")
+    serpis.command.run("chat-challenge-form-thinking", "low")
+    click(d.rect("challenge-remember"))
+    return 500
+  end,
+  function()
+    T.press("RET")
+    return 5000
+  end,
+  function()
+    T.check("kept: the default", default(), "mock/third")
     T.finish()
   end,
 }
