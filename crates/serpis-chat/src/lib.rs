@@ -648,7 +648,7 @@ impl Chat {
         self.ensure_session(host);
         let (provider, id, thinking) = (model.provider.clone(), model.id.clone(), self.thinking.as_str());
         self.record(host, |w| w.note_settings(&provider, &id, thinking).map(|_| ()));
-        let tools = host.tools();
+        let tools = self.tools(host);
         let system_prompt = self.system_prompt_for(host, &tools);
         let native = host.var_bool("agent-native-web-search", true);
         let cache_retention = model.cache_retention(cache_retention(host, &model.provider));
@@ -677,6 +677,17 @@ impl Chat {
             hooks: host.tool_hooks(),
             sequential_tools: false,
         })
+    }
+
+    /// The tools its agent gets: the host's, and a challenger's own (its session's
+    /// `serpis-challenge` entry, skills/challenge) after them.
+    fn tools(&self, host: &dyn Host) -> Vec<ToolRef> {
+        let mut tools = host.tools();
+        if let Some(report) = serpis_agent::challenge::report_of(self.custom_entries.iter()) {
+            tools.retain(|t| serpis_agent::challenge::tool_of(t.name()).is_none());
+            tools.extend(serpis_agent::challenge::tools(&report));
+        }
+        tools
     }
 
     /// Run the agent on the history plus `prompts` (none: continue, e.g. after compacting).
@@ -717,10 +728,26 @@ impl Chat {
         // Its commands run for an agent, as serpis's own agent's do (a shell config can tell).
         env.push((serpis_agent::AGENT_ENV.0.into(), serpis_agent::AGENT_ENV.1.into()));
         env.push(("SERPIS_SESSION_ID".into(), self.session_id.clone()));
-        let args: Vec<String> = match host.var("claude-code-args") {
+        let mut args: Vec<String> = match host.var("claude-code-args") {
             Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
             _ => Vec::new(),
         };
+        // A challenger's tools, from this node's own binary as an MCP server, allowed without asking.
+        if let Some(report) = serpis_agent::challenge::report_of(self.custom_entries.iter()) {
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    let config = serpis_agent::challenge::mcp_config(&exe, &report).to_string();
+                    // `--mcp-config` takes several: one the person gave gets ours beside it.
+                    match args.iter().position(|a| a == "--mcp-config") {
+                        Some(i) => args.insert(i + 1, config),
+                        None => args.extend(["--mcp-config".to_string(), config]),
+                    }
+                    let allowed = serpis_agent::challenge::NAMES.iter().map(|n| format!("mcp__{}__{n}", serpis_agent::challenge::MCP_SERVER)).collect::<Vec<_>>().join(",");
+                    args.extend(["--allowedTools".to_string(), allowed]);
+                }
+                Err(e) => host.notify(Level::Warn, format!("The challenger's tools aren't available: {e}")),
+            }
+        }
         // serpis's skills (pi's), for it to load as its own: those it has already (its
         // ~/.claude/skills) left out.
         let skills = host.var_bool("claude-code-skills", true).then(|| {
@@ -1190,7 +1217,7 @@ impl Chat {
 
     fn finish_resume(&mut self, host: &mut dyn Host, p: PendingResume) {
         use cache_watch::{Sent, declaration_key, ttl};
-        let tools = host.tools();
+        let tools = self.tools(host);
         let current: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
         // With other tools the next request misses anyway, and the prompt is rebuilt for them.
         if current == p.names {

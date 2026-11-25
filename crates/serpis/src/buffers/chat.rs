@@ -3047,6 +3047,19 @@ impl ChatBuffer {
         lines[at + 1..].iter().copied().take_while(|i| self.lines[*i].face != Face::Heading).filter(|i| self.lines[*i].marker.is_some()).nth(n.checked_sub(1)?)
     }
 
+    /// A challenger's calls of its tools (serpis_agent::challenge) that succeeded, from entry
+    /// `from` on, oldest first: (which tool, its arguments).
+    pub fn challenge_calls(&self, from: usize) -> Vec<(&'static str, Value)> {
+        self.entries
+            .iter()
+            .skip(from)
+            .filter_map(|e| match e {
+                Entry::Tool { name, args, result: Some(r), .. } if !r.is_error => serpis_agent::challenge::tool_of(name).map(|t| (t, args.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// How many transcript entries it has (a challenger's reply comes after those it had).
     pub fn entry_count(&self) -> usize {
         self.entries.len()

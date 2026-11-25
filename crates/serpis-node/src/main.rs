@@ -13,6 +13,8 @@
 //!   as JSON (what the menu bar indicator shows). It starts neither.
 //! - `serpis-node system`: what serpis calls this machine when picking a node for it.
 //! - `serpis-node version`.
+//! - `serpis-node mcp-challenge`: a challenger's tools as an MCP server on stdin and stdout, for
+//!   the report in `SERPIS_CHALLENGE_REPORT` (what a challenger on a CLI harness is given).
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some("mcp-challenge") => serpis_agent::challenge::serve_mcp_stdio(&std::env::var(serpis_agent::challenge::REPORT_ENV).unwrap_or_default()),
         Some("stop-terminals") => rt.block_on(serpis_node::terminals::stop(&serpis_node::terminals::socket())),
         // stdout is the protocol: logs go to stderr, which ssh shows the client.
         Some("agent") => rt.block_on(serpis_node::bridge::agent(&serpis_node::socket_path())),

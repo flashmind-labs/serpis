@@ -147,9 +147,15 @@ now on" (`chat-report-challenge-model`, `-thinking`), and what you type as a not
 starts it. A fresh agent, in a new worktree of the chat's checkout with its uncommitted work
 copied in, is sent the report with the `challenge` skill (`skills/challenge`) and tries to prove
 its claims wrong, running its checks again where it may (`chat-report-challenge-run`). The
-header shows it running (Open chat, Stop), then how it went (Again). What it finds goes to your
-review as drafts under the claims it disputes, each marked confirmed (it ran something) or
-plausible (it read the code), with its evidence; claims it couldn't break are marked held. On a
+header shows it running (Open chat, Stop), then how it went (Again). It records each finding
+with a tool of its own (`challenge_finding`; `challenge_held` for a claim it couldn't break,
+`challenge_proof` to answer "prove it"), which checks that the claim exists and the quote is the
+report's own words and tells it what to fix if not; serpis's agent gets them as tools, a Claude
+Code challenger from `serpis-node mcp-challenge` over MCP. A challenger without them (on Codex or
+Antigravity, for now) lists its findings in its report in the skill's shape instead. Each
+finding goes to your review as soon as it is recorded, a draft under the claim it disputes,
+marked confirmed (it ran something) or plausible (it read the code), with its evidence; claims
+it couldn't break are marked held. On a
 finding: click to add your note, dismiss it, or "prove it" (a plausible one): its challenger is
 asked to show it by running something, and it comes back confirmed, or withdrawn and out of your
 review (keep anyway puts it back). Sent, findings go first, under their own heading, and the

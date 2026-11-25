@@ -1,8 +1,10 @@
 //! Challenging an agent's report: a fresh agent, in a worktree of its own (the chat's commits
-//! with its uncommitted changes copied in), tries to prove the report's claims wrong. Its own
-//! report lists what it found in the `challenge` skill's shape (skills/challenge); each finding
-//! goes to the challenged chat's review as a draft under the claim it disputes, to send with
-//! the rest. The worktree is removed a while after the challenge ends
+//! with its uncommitted changes copied in), tries to prove the report's claims wrong. It says
+//! what it found with its own tools (serpis_agent::challenge: its chat's session holds the
+//! report they check calls against), each finding going to the challenged chat's review as a
+//! draft under the claim it disputes, to send with the rest, as soon as it is made. A challenger
+//! without them (a harness they couldn't reach) lists its findings in its report instead, in
+//! the shape skills/challenge gives. The worktree is removed a while after the challenge ends
 //! (chat-report-challenge-worktree-ttl), unless kept or its chat is still open.
 
 use std::path::{Path, PathBuf};
@@ -38,6 +40,9 @@ pub struct Run {
     /// What came of it: findings placed on the report, claims that held, or why it failed.
     pub findings: usize,
     pub held: Vec<String>,
+    /// Findings already placed on the report, of those its challenger recorded with its tool.
+    #[serde(default)]
+    pub placed: usize,
     pub error: Option<String>,
     /// Kept: its worktree isn't removed by itself.
     pub keep: bool,
@@ -188,7 +193,7 @@ pub fn start(ed: &mut Editor, buf: BufferId, entry: Option<usize>, opts: Options
                     ed.warn(format!("Challenge: couldn't copy the chat's uncommitted changes: {e:#}"));
                 }
                 let prompt = challenge_prompt(ed, &report, &source, &path, head.trim(), &note);
-                launch(ed, run, path, model, thinking, prompt);
+                launch(ed, run, path, model, thinking, &report, prompt);
             });
         });
     });
@@ -196,7 +201,7 @@ pub fn start(ed: &mut Editor, buf: BufferId, entry: Option<usize>, opts: Options
 }
 
 /// Start the challenger's chat in the worktree and send it the challenge.
-fn launch(ed: &mut Editor, mut run: Run, worktree: PathBuf, model: Option<String>, thinking: Option<String>, prompt: String) {
+fn launch(ed: &mut Editor, mut run: Run, worktree: PathBuf, model: Option<String>, thinking: Option<String>, report: &str, prompt: String) {
     let mut params = json!({"cwd": worktree.to_string_lossy()});
     if let Some(m) = &model {
         params["model"] = json!(m);
@@ -213,6 +218,8 @@ fn launch(ed: &mut Editor, mut run: Run, worktree: PathBuf, model: Option<String
         if let Some(level) = thinking.as_deref().and_then(serpis_ai::ThinkingLevel::parse) {
             c.set_thinking(level);
         }
+        // What gives it its tools, before its first turn asks for them.
+        c.append_entry(serpis_agent::challenge::ENTRY, json!({"report": report.trim()}));
         c.submit(ed, prompt, false);
         c.set_session_name(&title);
         c.chat_id()
@@ -297,6 +304,34 @@ pub struct Found {
     pub quote: String,
     pub text: String,
     pub evidence: String,
+}
+
+/// A finding as the challenger recorded it with `challenge_finding`.
+pub fn found_of(args: &Value) -> Found {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    Found { confirmed: s("status") == "confirmed", label: s("claim"), quote: s("quote").trim_start_matches('>').trim().to_string(), text: s("finding"), evidence: s("evidence") }
+}
+
+/// The findings and the claims that held, as challenger buffer `buf` recorded them with its
+/// tools; None when it used neither (its report has them, then).
+fn recorded(ed: &mut Editor, challenger: &str) -> Option<(Vec<Found>, Vec<String>)> {
+    use serpis_agent::challenge::{FINDING, HELD};
+    let buf = crate::remote::chat_buffer(ed, crate::remote::LOCAL, challenger)?;
+    let calls = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| c.challenge_calls(0))?;
+    // The same finding twice (recorded again after it was retried or continued): once.
+    let mut found: Vec<Found> = Vec::new();
+    for f in calls.iter().filter(|(t, _)| *t == FINDING).map(|(_, a)| found_of(a)) {
+        if !found.iter().any(|g| g.label.eq_ignore_ascii_case(&f.label) && plain(&g.quote) == plain(&f.quote)) {
+            found.push(f);
+        }
+    }
+    let mut held: Vec<String> = Vec::new();
+    for c in calls.iter().filter(|(t, _)| *t == HELD).filter_map(|(_, a)| a["claim"].as_str().map(|c| c.trim().to_string())) {
+        if !held.contains(&c) {
+            held.push(c);
+        }
+    }
+    (!found.is_empty() || !held.is_empty()).then_some((found, held))
 }
 
 /// The findings under the challenger's `## Needs you`, and the claims it says held (under
@@ -424,6 +459,24 @@ pub fn tick(ed: &mut Editor) {
             ed.message("The challenge goes on");
         }
     }
+    // Findings recorded while it works go on the report at once.
+    for i in 0..ed.challenges.runs.len() {
+        let run = ed.challenges.runs[i].clone();
+        if run.ended.is_some() || run.challenger.is_empty() {
+            continue;
+        }
+        let Some((found, _)) = recorded(ed, &run.challenger) else { continue };
+        if found.len() > run.placed {
+            let new: Vec<Found> = found[run.placed..].to_vec();
+            ed.challenges.runs[i].placed = found.len();
+            changed = true;
+            ed.message(match &new[..] {
+                [f] => format!("The challenge found something wrong with {}: it is in your review", if f.label.is_empty() { "the report" } else { &f.label }),
+                _ => format!("The challenge found {} more things wrong: they are in your review", new.len()),
+            });
+            place(ed, &run, new);
+        }
+    }
     for i in 0..ed.challenges.runs.len() {
         let run = ed.challenges.runs[i].clone();
         if run.ended.is_some() || run.challenger.is_empty() {
@@ -451,10 +504,22 @@ pub fn tick(ed: &mut Editor) {
             changed = true;
             continue;
         };
-        let Some(Some(done)) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| (c.entry_count() > before + 1).then(|| c.finished_reply()).flatten()) else { continue };
+        let Some(Some((done, proof))) = ed.with_buffer_as::<ChatBuffer, _>(buf, |c, _| {
+            let proof = c.challenge_calls(before).into_iter().rev().find(|(t, _)| *t == serpis_agent::challenge::PROOF).map(|(_, a)| a);
+            (c.entry_count() > before + 1).then(|| c.finished_reply().map(|d| (d, proof))).flatten()
+        }) else {
+            continue;
+        };
         ed.challenges.runs[i].proving = None;
         changed = true;
-        let answer = done.map(|t| parse_proof(&t));
+        // Its challenge_proof call, else what its reply says.
+        let answer = match proof {
+            Some(a) => {
+                let evidence = a["evidence"].as_str().unwrap_or("").trim().to_string();
+                Ok(if a["outcome"] == "confirmed" { Proof::Confirmed(evidence) } else { Proof::Withdrawn(evidence) })
+            }
+            None => done.map(|t| parse_proof(&t)),
+        };
         set_finding(ed, &run, id, |f| {
             f.proving = false;
             match answer {
@@ -493,11 +558,26 @@ fn end(ed: &mut Editor, i: usize, done: Result<String, String>) {
     r.ended = Some(now());
     match done {
         Ok(text) => {
-            let (found, held) = parse_findings(&text);
+            let challenger = r.challenger.clone();
+            // What it recorded with its tools (those not placed yet), else its report's list.
+            let (found, held, before) = match recorded(ed, &challenger) {
+                Some((found, held)) => (found, held, ed.challenges.runs[i].placed),
+                None => {
+                    let (found, held) = parse_findings(&text);
+                    (found, held, 0)
+                }
+            };
+            let r = &mut ed.challenges.runs[i];
             r.findings = found.len();
+            r.placed = found.len();
             r.held = held;
             let run = r.clone();
-            deliver(ed, &run, found);
+            place(ed, &run, found.into_iter().skip(before).collect());
+            ed.message(match run.findings {
+                0 => "The challenge found nothing wrong with the report".to_string(),
+                1 => "The challenge found 1 thing wrong: it is in your review".to_string(),
+                n => format!("The challenge found {n} things wrong: they are in your review"),
+            });
         }
         Err(why) => {
             r.error = Some(why.clone());
@@ -509,8 +589,10 @@ fn end(ed: &mut Editor, i: usize, done: Result<String, String>) {
 }
 
 /// Place the findings on the challenged chat's report, as drafts of its review.
-fn deliver(ed: &mut Editor, run: &Run, found: Vec<Found>) {
-    let n = found.len();
+fn place(ed: &mut Editor, run: &Run, found: Vec<Found>) {
+    if found.is_empty() {
+        return;
+    }
     match crate::remote::chat_buffer(ed, crate::remote::LOCAL, &run.chat) {
         Some(buf) => {
             ed.with_buffer_as::<ChatBuffer, _>(buf, |c, ed| c.add_findings(ed, run.entry, &run.opening, found));
@@ -524,11 +606,6 @@ fn deliver(ed: &mut Editor, run: &Run, found: Vec<Found>) {
             }
         }
     }
-    ed.message(match n {
-        0 => "The challenge found nothing wrong with the report".to_string(),
-        1 => "The challenge found 1 thing wrong: it is in your review".to_string(),
-        n => format!("The challenge found {n} things wrong: they are in your review"),
-    });
 }
 
 /// A finding as a draft comment of the review (`quote`: where it was found on the report).
@@ -645,7 +722,7 @@ pub fn prove(ed: &mut Editor, buf: BufferId, id: u64) -> anyhow::Result<()> {
     let place = if comment.label.is_empty() { "In the report".to_string() } else { comment.label.clone() };
     let quote: String = comment.quote.lines().map(|l| format!("> {l}\n")).collect();
     let prompt = format!(
-        "Prove this finding of yours, or take it back.\n\n{place}:\n{quote}Your finding: {}\n\nRun something that shows it. Then answer with a line starting `[confirmed]` and a line `Evidence: what you ran and what it showed`, or a line starting `[withdrawn]` and why it doesn't hold.",
+        "Prove this finding of yours, or take it back.\n\n{place}:\n{quote}Your finding: {}\n\nRun something that shows it. Then answer with `challenge_proof`: confirmed, with what you ran and what it showed, or withdrawn, with why it doesn't hold. Without that tool, answer with a line starting `[confirmed]` and a line `Evidence: what you ran and what it showed`, or a line starting `[withdrawn]` and why it doesn't hold.",
         finding.text
     );
     let before = ed.with_buffer_as::<ChatBuffer, _>(challenger, |c, ed| {

@@ -1,6 +1,6 @@
 ---
 name: challenge
-description: Challenge another agent's report. Try to prove its claims wrong by reading its changes and running its checks again, then report each claim you broke in a shape serpis places on that report. Used by serpis's Challenge button on a report, by name only.
+description: Challenge another agent's report. Try to prove its claims wrong by reading its changes and running its checks again, then record each claim you broke with the challenge tools, which place it on that report. Used by serpis's Challenge button on a report, by name only.
 disable-model-invocation: true
 ---
 
@@ -35,10 +35,32 @@ Prefer running something to arguing. A finding you reproduced is worth ten you r
 - Claims you checked and could not break. Say they held, under Checked.
 - Guesses with no failure case. Each finding needs a concrete way it goes wrong.
 
+## Recording what you find
+
+Record each finding with the `challenge_finding` tool as soon as you have it, not at the end.
+serpis places it on the report you challenge, under the words you quote, for the person to
+review. Its arguments:
+
+- **claim:** the claim's section and number, as above, or `Headline`.
+- **status:** `confirmed` when you ran something that shows it, `plausible` when you only read
+  the code.
+- **quote:** the exact words of the claim you dispute, copied from the report. One sentence,
+  not the whole item.
+- **finding:** what is wrong, in two sentences at most.
+- **evidence:** what you ran and what it showed, or what you read. One line.
+
+The tool checks the claim and the quote against the report. When it says one is wrong, fix it
+and call again.
+
+Record each claim that held with `challenge_held`: the claim, and one line on how you checked.
+
 ## Your report
 
-End with a report, as the `report` skill says. Put each finding under `## Needs you`, in
-exactly this shape, so serpis can place it on the report it challenges:
+End with a report, as the `report` skill says. The first line says how many findings you
+recorded and how many claims held. No findings at all: say so in that line.
+
+**No `challenge_finding` tool?** Then serpis reads your findings from the report. Put each
+one under `## Needs you`, in exactly this shape:
 
 ```
 ## Needs you
@@ -50,13 +72,5 @@ exactly this shape, so serpis can place it on the report it challenges:
    Evidence: `retries_respect_limit` with 8 workers failed 3 of 500 runs.
 ```
 
-- **The tag:** `[confirmed]` when you ran something that shows it, `[plausible]` when you only
-  read the code.
-- **The place:** the claim's section and number, as above, or `Headline`.
-- **The quote:** the exact words of the claim you dispute, copied from the report, on a line
-  starting with `> `. Quote one sentence, not the whole item.
-- **The finding:** what is wrong, in two sentences at most.
-- **Evidence:** what you ran and what it showed, or what you read. One line.
-
 Under `## Checked`, list the claims that held, one per line: `- **Changed 2:** held. Read the
-backoff, it adds ±20%.` No findings at all: say so in your first line.
+backoff, it adds ±20%.`
