@@ -1,8 +1,9 @@
 -- Challenging a report, through real clicks and keys: a chat in a git checkout with uncommitted
 -- work ends with a report; its header's Challenge sets the challenge up in the composer (model,
 -- thinking, default from now on, a note), and RET starts it: a worktree with that work copied in,
--- the challenger there (the mock model's challenge.md answers the challenge skill), and its
--- findings in the chat's review under the claims they dispute, the claims that held marked. One
+-- the challenger there, recording challenge.md's findings with its tools (one turned down for a
+-- quote not in the report, then fixed), and its findings in the chat's review under the claims
+-- they dispute, the claims that held marked. One
 -- is dismissed, one proven (Prove it), one gets a note; sent, they go first, under their own
 -- heading. Once its chat is closed and its time is up (chat-report-challenge-worktree-ttl), the
 -- worktree goes.
@@ -44,10 +45,13 @@ local function asked()
   end
   return out
 end
+-- The latest such request (the mock model's log is shared with the tests run before this one).
 local function find_asked(prefix)
+  local found
   for _, t in ipairs(asked()) do
-    if t:sub(1, #prefix) == prefix then return t end
+    if t:sub(1, #prefix) == prefix then found = t end
   end
+  return found
 end
 
 -- The transcript line (1-based) holding `text`, and the column it starts at (in characters).
@@ -90,7 +94,6 @@ end
 
 local chat, run
 local claim = "This is the likely cause of the flaky retries_respect_limit test in CI."
-local check2 = "retries_respect_limit, 200 runs in a loop: passed every time."
 local steps = {
   function() serpis.command.run("new-chat", proj); return 600 end,
   function()
@@ -174,7 +177,12 @@ local steps = {
     T.check("its place", a and a.label, "Changed 1")
     T.check("confirmed", a and a.challenge and a.challenge.verdict, "confirmed")
     T.check("with its evidence", a and a.challenge and a.challenge.evidence, "`retries_respect_limit` with 8 workers failed 3 of 500 runs.")
-    T.check("a quote not in the report: the claim it names", b and b.quote, check2)
+    T.check("a quote the tool turned down, fixed: the words it then quoted", b and b.quote, "passed every time.")
+    local told = false
+    for line in (read(os.getenv("SERPIS_TEST_MOCK_LOG")) or ""):gmatch("[^\n]+") do
+      if line:find("The quote isn't in the report", 1, true) then told = true end
+    end
+    T.check("the tool told it its first quote wasn't the report's", told, true)
     T.check("plausible", b and b.challenge and b.challenge.verdict, "plausible")
     local t = serpis.chat.transcript(chat) or ""
     T.check("its card is under the claim", t:find("Challenge   CONFIRMED   ·  draft · click to add a note", 1, true) ~= nil, true)

@@ -171,7 +171,8 @@ pub struct ChatBuffer {
 }
 
 /// How a report's challenge is set up, in the composer: the challenger's model and thinking
-/// (None: new chats' default), and whether they become the default.
+/// (None: new chats' default), and whether they are the default (chat-report-challenge-model,
+/// -thinking): ticked when it opens on a default there is, which unticked goes.
 #[derive(Debug, Clone, Default)]
 pub struct ChallengeForm {
     pub entry: usize,
@@ -3047,6 +3048,23 @@ impl ChatBuffer {
         lines[at + 1..].iter().copied().take_while(|i| self.lines[*i].face != Face::Heading).filter(|i| self.lines[*i].marker.is_some()).nth(n.checked_sub(1)?)
     }
 
+    /// A challenger's calls of its tools (serpis_agent::challenge) that succeeded, from entry
+    /// `from` on, oldest first: (which tool, its arguments). Each is checked against the report
+    /// again here, whatever its harness said of it.
+    pub fn challenge_calls(&self, from: usize) -> Vec<(&'static str, Value)> {
+        use serpis_agent::challenge;
+        let Some(report) = challenge::report_of(self.node.state.custom.iter()) else { return Vec::new() };
+        self.entries
+            .iter()
+            .skip(from)
+            .filter_map(|e| match e {
+                Entry::Tool { name, args, result: Some(r), .. } if !r.is_error => challenge::call_of(name, args),
+                _ => None,
+            })
+            .filter(|(t, args)| challenge::check(t, &report, args).is_ok())
+            .collect()
+    }
+
     /// How many transcript entries it has (a challenger's reply comes after those it had).
     pub fn entry_count(&self) -> usize {
         self.entries.len()
@@ -3081,11 +3099,14 @@ impl ChatBuffer {
             ed.message("No report to challenge here");
             return;
         };
-        let model = ed.var_str("chat-report-challenge-model").filter(|m| !m.is_empty()).or_else(|| self.node.state.model.clone());
+        let default_model = ed.var_str("chat-report-challenge-model").filter(|m| !m.is_empty());
         let thinking = ed.var_str("chat-report-challenge-thinking").filter(|t| !t.is_empty());
+        // Opened on a default: the box says so, and unticking it drops that default.
+        let remember = default_model.is_some() || thinking.is_some();
+        let model = default_model.or_else(|| self.node.state.model.clone());
         let stash = self.prompt.text();
         self.prompt.set_text("");
-        self.challenge_form = Some((ChallengeForm { entry, model, thinking, remember: false }, stash));
+        self.challenge_form = Some((ChallengeForm { entry, model, thinking, remember }, stash));
         self.focus_comment(ed);
         self.dirty = true;
     }
@@ -3110,9 +3131,13 @@ impl ChatBuffer {
         self.prompt.set_text(&stash);
         self.prompt.move_to_end();
         self.dirty = true;
-        if f.remember {
-            ed.set_var("chat-report-challenge-model", f.model.clone().map(Value::String).unwrap_or(Value::Null));
-            ed.set_var("chat-report-challenge-thinking", f.thinking.clone().map(Value::String).unwrap_or(Value::Null));
+        // Ticked: these are the default. Unticked: there is none (the chat's own model next time).
+        let (model, thinking) = if f.remember { (f.model.clone(), f.thinking.clone()) } else { (None, None) };
+        // From now on: after a restart too.
+        for (name, v) in [("chat-report-challenge-model", model), ("chat-report-challenge-thinking", thinking)] {
+            let v = v.map(Value::String).unwrap_or(Value::Null);
+            ed.set_var(name, v.clone());
+            ed.persist_state(name, v);
         }
         let Some(id) = ed.this_buffer() else { return };
         let opts = crate::chat_challenge::Options { model: f.model, thinking: f.thinking, note };

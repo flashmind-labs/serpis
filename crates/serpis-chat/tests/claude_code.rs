@@ -588,6 +588,29 @@ fn chats_run_on_claude_code() {
     assert_eq!(sub.state().usage.cost.total, 0.0);
     drop(sub);
 
+    // A challenger (its session's serpis-challenge entry) gets the challenge tools: this
+    // binary as their MCP server, with the report, beside an --mcp-config of the person's own,
+    // and allowed without asking.
+    w.host.vars.insert("claude-code-args".into(), json!(["--mcp-config", "/theirs.json"]));
+    let mut ch = w.chat();
+    ch.append_entry(&mut w.host, serpis_agent::challenge::ENTRY, json!({"report": "Done: it works.\n\n## Changed\n\n- A thing.\n"}));
+    w.send(&mut ch, "hello");
+    let id = ch.session_id.clone();
+    let start = w.log().0.into_iter().rfind(|s| s.iter().any(|a| *a == id)).unwrap();
+    let at = start.iter().position(|a| a == "--mcp-config").unwrap();
+    let config: Value = serde_json::from_str(&start[at + 1]).unwrap();
+    let server = &config["mcpServers"]["serpis"];
+    assert_eq!(server["command"], json!(std::env::current_exe().unwrap().to_string_lossy()));
+    assert_eq!(server["args"], json!(["mcp-challenge"]));
+    assert_eq!(server["env"]["SERPIS_CHALLENGE_REPORT"], "Done: it works.\n\n## Changed\n\n- A thing.\n");
+    assert_eq!(start[at + 2], "/theirs.json", "theirs is kept");
+    assert_eq!(after(&start, "--allowedTools"), Some("mcp__serpis__challenge_finding,mcp__serpis__challenge_held,mcp__serpis__challenge_proof"));
+    w.host.vars.remove("claude-code-args");
+    drop(ch);
+    // Any other chat: none of it.
+    let (starts, _) = w.log();
+    assert!(!starts[0].iter().any(|a| a == "--mcp-config" || a == "--allowedTools"));
+
     assert!(w.host.notices.is_empty(), "{:?}", w.host.notices);
     let _ = std::fs::remove_dir_all(&w.home);
 }

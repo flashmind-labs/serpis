@@ -97,6 +97,7 @@ fn setup() -> World {
     unsafe {
         std::env::set_var("HOME", &home);
         std::env::set_var("SERPIS_CODEX_PATH", serpis_testkit::fake_codex());
+        std::env::set_var("SERPIS_NODE_EXE", serpis_testkit::serpis_node());
     }
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let host = TestHost {
@@ -169,4 +170,28 @@ fn chats_run_on_codex_and_answer_approvals() {
         matches!(tool, Entry::Tool { name, result: Some(result), .. } if name == "bash" && !result.is_error && result.content.iter().any(|part| matches!(part, serpis_ai::UserContent::Text { text } if text == "ok\n")))
     );
     assert_eq!(last_text(&chat), "Command finished.");
+
+    // A challenger (its session's serpis-challenge entry) is given the challenge tools as an MCP
+    // server (-c overrides): Codex's asking before a call to it is answered yes, and the call
+    // runs on serpis-node mcp-challenge, which checks it against the report.
+    let mut challenger = world.chat();
+    let report = "Done: it works.\n\n## Changed\n\n- Retries back off.\n";
+    challenger.append_entry(&mut world.host, serpis_agent::challenge::ENTRY, json!({"report": report}));
+    let finding = json!({"claim": "Changed 1", "status": "plausible", "quote": "Retries back off.", "finding": "They don't.", "evidence": "Read it."});
+    challenger.submit(&mut world.host, format!("challenge {finding}"), vec![], false, None).unwrap();
+    world.finish(&mut challenger);
+    assert!(challenger.asking().is_empty());
+    let tool = serpis_proto::find_tool(challenger.entries(), "mcp-1").unwrap();
+    let Entry::Tool { name, args, result: Some(result), .. } = tool else { panic!("{tool:#?}") };
+    assert_eq!(serpis_agent::challenge::call_of(name, args), Some((serpis_agent::challenge::FINDING, finding)));
+    assert!(!result.is_error, "{result:#?}");
+    assert!(result.content.iter().any(|part| matches!(part, serpis_ai::UserContent::Text { text } if text.contains("Recorded: Changed 1, plausible."))), "{result:#?}");
+    // A quote not in the report: the server says so.
+    let wrong = json!({"claim": "Changed 1", "status": "plausible", "quote": "Retries never back off.", "finding": "x", "evidence": "y"});
+    challenger.submit(&mut world.host, format!("challenge {wrong}"), vec![], false, None).unwrap();
+    world.finish(&mut challenger);
+    let tools: Vec<_> = challenger.entries().iter().filter(|e| matches!(e, Entry::Tool { .. })).collect();
+    let Some(Entry::Tool { result: Some(result), .. }) = tools.last() else { panic!() };
+    assert!(result.is_error && result.content.iter().any(|part| matches!(part, serpis_ai::UserContent::Text { text } if text.contains("The quote isn't in the report"))), "{result:#?}");
+    assert!(world.host.notices.is_empty(), "{:?}", world.host.notices);
 }

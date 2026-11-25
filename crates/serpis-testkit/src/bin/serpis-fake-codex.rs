@@ -1,4 +1,8 @@
 //! A small `codex app-server` stand-in for integration tests.
+//!
+//! "challenge {args}" calls `challenge_finding` with those arguments through the MCP server its
+//! `-c mcp_servers.serpis.*` overrides name (asking first, as Codex does, with an MCP
+//! elicitation), and reports it as an `mcpToolCall` item.
 
 use std::io::{BufRead, Write};
 
@@ -15,12 +19,33 @@ fn main() {
     if args.get(1).map(String::as_str) != Some("app-server") {
         return;
     }
+    let server = mcp_server(&args);
     let stdin = std::io::stdin();
     let mut pending_command: Option<(Value, String, String)> = None;
+    // (elicitation id, thread, turn, the call's arguments)
+    let mut pending_mcp: Option<(Value, String, String, Value)> = None;
     for line in stdin.lock().lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if let Some((ask_id, thread, turn, arguments)) = pending_mcp.take() {
+            if message["id"] == ask_id {
+                let accepted = message.pointer("/result/action").and_then(Value::as_str) == Some("accept");
+                let item = |status: &str, result: Value| json!({"type":"mcpToolCall","id":"mcp-1","server":"serpis","tool":"challenge_finding","arguments":arguments,"status":status,"result":result});
+                let (status, result) = match (&server, accepted) {
+                    (Some((command, args, env)), true) => {
+                        let r = serpis_testkit::mcp_call(command, args, env, "challenge_finding", &arguments);
+                        (if r["isError"] == true { "failed" } else { "completed" }, r)
+                    }
+                    _ => ("declined", Value::Null),
+                };
+                send(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"completedAtMs":3,"item":item(status, result)}}));
+                send(json!({"method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":turn,"itemId":"answer-1","delta":format!("Finding {status}.")}}));
+                finish_turn(&thread, &turn, true);
+                continue;
+            }
+            pending_mcp = Some((ask_id, thread, turn, arguments));
+        }
         if let Some((approval_id, thread, turn)) = pending_command.take() {
             if message["id"] == approval_id {
                 let accepted = message
@@ -90,7 +115,16 @@ fn main() {
                     .filter_map(|v| v["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if text.contains("run a command") {
+                if let Some(arguments) = text.strip_prefix("challenge ").and_then(|a| serde_json::from_str::<Value>(a).ok()) {
+                    send(
+                        json!({"method":"item/started","params":{"threadId":thread,"turnId":turn,"startedAtMs":1,"item":{"type":"mcpToolCall","id":"mcp-1","server":"serpis","tool":"challenge_finding","arguments":arguments,"status":"inProgress"}}}),
+                    );
+                    let ask = json!(9002);
+                    send(
+                        json!({"id":ask,"method":"mcpServer/elicitation/request","params":{"serverName":"serpis","threadId":thread,"turnId":turn,"mode":"form","message":"Allow the serpis MCP server to run tool \"challenge_finding\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"challenge_finding"}}}),
+                    );
+                    pending_mcp = Some((ask, thread, turn, arguments));
+                } else if text.contains("run a command") {
                     send(
                         json!({"method":"item/started","params":{"threadId":thread,"turnId":turn,"startedAtMs":1,"item":{"type":"commandExecution","id":"cmd-1","command":"printf ok","cwd":"/tmp","commandActions":[],"status":"inProgress"}}}),
                     );
@@ -113,6 +147,23 @@ fn main() {
             _ => {}
         }
     }
+}
+
+/// The MCP server `-c mcp_servers.serpis.command=..`, `.args=[..]` and `.env={K=".."}` name:
+/// (command, args, env). Their values are TOML; these are also JSON, but for the env table.
+type Server = (String, Vec<String>, Vec<(String, String)>);
+
+fn mcp_server(args: &[String]) -> Option<Server> {
+    let value = |key: &str| args.iter().find_map(|a| a.strip_prefix(&format!("mcp_servers.serpis.{key}=")));
+    let command: String = serde_json::from_str(value("command")?).ok()?;
+    let list: Vec<String> = value("args").and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+    let env = value("env")
+        .and_then(|t| t.strip_prefix('{')?.strip_suffix('}'))
+        .and_then(|t| t.split_once('='))
+        .and_then(|(k, v)| Some((k.trim().to_string(), serde_json::from_str::<String>(v.trim()).ok()?)))
+        .into_iter()
+        .collect();
+    Some((command, list, env))
 }
 
 fn finish_turn(thread: &str, turn: &str, success: bool) {

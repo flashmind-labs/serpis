@@ -97,6 +97,7 @@ fn setup() -> World {
     unsafe {
         std::env::set_var("HOME", &home);
         std::env::set_var("SERPIS_ANTIGRAVITY_PATH", serpis_testkit::fake_agy());
+        std::env::set_var("SERPIS_NODE_EXE", serpis_testkit::serpis_node());
     }
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let host = TestHost {
@@ -303,4 +304,33 @@ fn modes_restore_only_on_their_harness() {
     let mut other = world.chat();
     other.restore(&mut world.host, &loaded);
     assert_eq!(other.state().permission_mode.as_deref(), Some("default"));
+}
+
+#[test]
+fn a_challenger_gets_its_tools_over_mcp() {
+    // Its session's serpis-challenge entry: the challenge tools as an MCP server of its ACP
+    // session, a call to them allowed without asking (the person's prompts are "ask"), run on
+    // serpis-node mcp-challenge, which checks it against the report. Antigravity calls it
+    // through a tool of its own: the call is still told apart by what it wraps.
+    let mut world = setup();
+    let mut chat = world.chat();
+    let report = "Done: it works.\n\n## Changed\n\n- Retries back off.\n";
+    chat.append_entry(&mut world.host, serpis_agent::challenge::ENTRY, json!({"report": report}));
+    let finding = json!({"claim": "Changed 1", "status": "plausible", "quote": "Retries back off.", "finding": "They don't.", "evidence": "Read it."});
+    chat.submit(&mut world.host, format!("challenge {finding}"), vec![], false, None).unwrap();
+    world.finish(&mut chat);
+    assert!(chat.asking().is_empty());
+    let tool = serpis_proto::find_tool(chat.entries(), "mcp-1").unwrap();
+    let Entry::Tool { name, args, result: Some(result), .. } = tool else { panic!("{tool:#?}") };
+    assert_eq!(serpis_agent::challenge::call_of(name, args), Some((serpis_agent::challenge::FINDING, finding)));
+    assert!(!result.is_error && result.content.iter().any(|part| matches!(part, serpis_ai::UserContent::Text { text } if text == "Recorded: Changed 1, plausible. It goes on the report as a draft for the person to review.")), "{result:#?}");
+    assert_eq!(last_text(&chat), "Finding completed.");
+
+    // Any other chat's sessions get no MCP server: the stand-in says so when asked for one.
+    let mut other = world.chat();
+    other.submit(&mut world.host, format!("challenge {}", json!({"claim": "x"})), vec![], false, None).unwrap();
+    let id = world.wait_for_ask(&mut other);
+    assert!(other.answer(&id, Decision::Allow));
+    world.finish(&mut other);
+    assert_eq!(last_text(&other), "Finding failed.");
 }

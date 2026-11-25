@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod antigravity;
+pub mod challenge;
 pub mod claude_code;
 pub mod codex;
 pub mod compaction;

@@ -14,8 +14,13 @@ models.json). What it says depends on the last user message:
   /skill:challenge, expanded (a report's challenge): reply with challenge.md, what a
                   challenger found wrong with report-skill.md; with NO REPORT in it, think and
                   stop out of output tokens, no text; with SLOW in it, call bash `sleep 20`
-  CHALLENGE       the same reply, sent in a challenger's chat (it goes on after it stopped)
+  CHALLENGE       the same reply, sent in a challenger's chat (it goes on after it stopped).
+                  Offered the challenge tools (and without NO TOOLS, NO REPORT or SLOW), it
+                  first records challenge.md's findings and held claims with them, one call a
+                  request: the third finding's quote is not in the report, and it calls again
+                  with one that is once told so
   Prove this finding ...   (Prove it on a challenge's finding) confirm it, with evidence
+                  (with challenge_proof when offered)
   Review comments on what you wrote. ...   (a review serpis sent) answer each comment,
                   quoting it as asked: "> quote" then "Answer N."
   READ:<path>     call read on that path
@@ -45,6 +50,22 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port_file, log_file = sys.argv[1], sys.argv[2]
+
+# What a challenger offered its tools records (challenge.md's findings), one call a request.
+CHALLENGE_CALLS = [
+    ("challenge_finding", {"claim": "Changed 1", "status": "confirmed", "quote": "This is the likely cause of the flaky `retries_respect_limit` test in CI.",
+                           "finding": "The race is still there: `push_front` runs before the counter is stored. It reads the old count.",
+                           "evidence": "`retries_respect_limit` with 8 workers failed 3 of 500 runs."}),
+    ("challenge_finding", {"claim": "Changed 3", "status": "plausible", "quote": "Nothing calls it after this change.",
+                           "finding": "A test helper in `tests/common.rs` still calls it.", "evidence": "Read tests/common.rs:12."}),
+    # Not the report's words: the tool says so, and it tries again with words that are.
+    ("challenge_finding", {"claim": "Checked 2", "status": "plausible", "quote": "passed two hundred times",
+                           "finding": "The loop ran on one thread, which can't hit a race between workers.", "evidence": "Read the test."}),
+    ("challenge_finding", {"claim": "Checked 2", "status": "plausible", "quote": "passed every time.",
+                           "finding": "The loop ran on one thread, which can't hit a race between workers.", "evidence": "Read the test."}),
+    ("challenge_held", {"claim": "Changed 2", "note": "The backoff adds ±20%."}),
+    ("challenge_held", {"claim": "Checked 1", "note": "Reran it."}),
+]
 count = 0
 busy = set()
 
@@ -117,9 +138,21 @@ class Handler(BaseHTTPRequestHandler):
         after = messages[len(messages) - messages[::-1].index(users[-1]):] if users else []
         ran = sum(1 for m in after if m.get("role") == "tool")
         call = None
-        if ran < len(step_list) and step_list:
+        tools = [t["function"]["name"] for t in body.get("tools", [])]
+        challenging = (asked.startswith('<skill name="challenge"') or asked.startswith("CHALLENGE")) and "challenge_finding" in tools \
+            and not any(k in asked for k in ("NO TOOLS", "NO REPORT", "SLOW"))
+        if ran < len(CHALLENGE_CALLS) and challenging:
+            call = CHALLENGE_CALLS[ran]
+        elif asked.startswith("Prove this finding") and "challenge_proof" in tools and ran == 0:
+            call = ("challenge_proof", {"outcome": "confirmed", "evidence": "3 of 500 runs failed with 8 threads."})
+        elif ran < len(step_list) and step_list:
             description, command = step_list[ran].split("|", 1)
             call = ("bash", {"command": command, "description": description})
+        elif last.get("role") == "tool" and challenging:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "challenge.md")) as f:
+                delta["content"] = f.read()
+        elif last.get("role") == "tool" and asked.startswith("Prove this finding"):
+            delta["content"] = "Confirmed: with 8 threads it fails."
         elif last.get("role") == "tool":
             delta["content"] = "done"
         else:

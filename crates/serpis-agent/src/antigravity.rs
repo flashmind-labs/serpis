@@ -36,6 +36,8 @@ pub struct RunConfig {
     pub mode: Option<String>,
     pub hooks: Option<Arc<dyn ToolHooks>>,
     pub prompts: Prompts,
+    /// MCP servers for its sessions (`session/new`'s `mcpServers`): a challenger's tools.
+    pub mcp_servers: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -404,7 +406,7 @@ impl Process {
             meta = Some(json!({"antigravity": {"systemPrompt": {"append": instructions}}}));
         }
         if let Some(session_id) = saved.filter(|_| self.supports_load) {
-            let mut params = json!({"sessionId": session_id, "cwd": cfg.launch.cwd, "mcpServers": []});
+            let mut params = json!({"sessionId": session_id, "cwd": cfg.launch.cwd, "mcpServers": cfg.mcp_servers});
             if let Some(m) = &meta {
                 params["_meta"] = m.clone();
             }
@@ -415,7 +417,7 @@ impl Process {
                 return Ok(());
             }
         }
-        let mut params = json!({"cwd": cfg.launch.cwd, "mcpServers": []});
+        let mut params = json!({"cwd": cfg.launch.cwd, "mcpServers": cfg.mcp_servers});
         if let Some(m) = meta {
             params["_meta"] = m;
         }
@@ -737,6 +739,9 @@ impl Process {
             state.start_tool(id.clone(), name.clone(), args.clone());
         }
 
+        // A challenger's own tools (crate::challenge) only record what they are given: allowed,
+        // in a session it gave them to.
+        let challenge = !is_question && !cfg.mcp_servers.is_empty() && crate::challenge::call_of(&name, &args).is_some();
         let mode = self.effective_mode(cfg);
         let auto_allow = !is_question
             && match mode.as_deref() {
@@ -751,6 +756,7 @@ impl Process {
         let answer = match gate {
             ToolGate::Block(reason) => Answer::Deny(Some(reason)),
             ToolGate::Allow(_) => match cfg.prompts {
+                _ if challenge => Answer::Allow,
                 Prompts::Deny => {
                     Answer::Deny(Some("Refused by antigravity-permission-prompts".into()))
                 }
