@@ -151,7 +151,9 @@ fn main() {
 
 /// The MCP server `-c mcp_servers.serpis.command=..`, `.args=[..]` and `.env={K=".."}` name:
 /// (command, args, env). Their values are TOML; these are also JSON, but for the env table.
-fn mcp_server(args: &[String]) -> Option<(String, Vec<String>, Vec<(String, String)>)> {
+type Server = (String, Vec<String>, Vec<(String, String)>);
+
+fn mcp_server(args: &[String]) -> Option<Server> {
     let value = |key: &str| args.iter().find_map(|a| a.strip_prefix(&format!("mcp_servers.serpis.{key}=")));
     let command: String = serde_json::from_str(value("command")?).ok()?;
     let list: Vec<String> = value("args").and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
