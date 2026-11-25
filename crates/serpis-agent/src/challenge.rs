@@ -31,9 +31,27 @@ pub fn report_of<'a>(entries: impl DoubleEndedIterator<Item = &'a (String, Value
 }
 
 /// Which challenge tool a transcript's tool name is, however its harness spells it:
-/// `challenge_finding`, `mcp__serpis__challenge_finding`, `serpis.challenge_finding`, ...
+/// `challenge_finding`, `mcp__serpis__challenge_finding`, `serpis.challenge_finding`,
+/// `serpis/challenge_finding (MCP)`: the name as a word of it.
 pub fn tool_of(name: &str) -> Option<&'static str> {
-    NAMES.into_iter().find(|t| name == *t || name.strip_suffix(t).is_some_and(|p| p.ends_with(|c: char| !c.is_alphanumeric() && c != '_') || p.ends_with("__")))
+    let word = |c: char| c.is_ascii_alphanumeric();
+    NAMES.into_iter().find(|t| {
+        name.match_indices(t).any(|(at, _)| !name[..at].ends_with(word) && !name[at + t.len()..].starts_with(word) && !name[at + t.len()..].starts_with('_'))
+    })
+}
+
+/// A transcript's tool call as a challenge tool's: which, and its arguments. A harness that
+/// calls MCP tools through a tool of its own names the tool and wraps the arguments in its
+/// input (`{"tool_name": .., "arguments": {..}}`); both are looked for.
+pub fn call_of(name: &str, args: &Value) -> Option<(&'static str, Value)> {
+    let named = ["tool_name", "toolName", "tool", "name"].iter().find_map(|k| args.get(*k).and_then(Value::as_str).and_then(tool_of));
+    let tool = tool_of(name).or(named)?;
+    let inner = ["arguments", "args", "input", "params"].iter().find_map(|k| args.get(*k).filter(|v| v.is_object()));
+    let args = match inner {
+        Some(a) if args.get("claim").is_none() && args.get("outcome").is_none() => a.clone(),
+        _ => args.clone(),
+    };
+    Some((tool, args))
 }
 
 /// The three tools, for the report `report`.
@@ -183,10 +201,32 @@ impl AgentTool for ChallengeTool {
     }
 }
 
-/// The harnesses' MCP server config for the tools: `exe mcp-challenge`, the report in its
-/// environment. Claude Code's `--mcp-config` shape: `{"mcpServers": {"serpis": {...}}}`.
+/// The harnesses' MCP server for the tools is `exe mcp-challenge` (serpis-node's), the report
+/// in its environment. Claude Code's `--mcp-config` shape: `{"mcpServers": {"serpis": {...}}}`.
 pub fn mcp_config(exe: &std::path::Path, report: &str) -> Value {
     json!({"mcpServers": {MCP_SERVER: {"command": exe.to_string_lossy(), "args": ["mcp-challenge"], "env": {REPORT_ENV: report}}}})
+}
+
+/// The same for Codex: `-c` overrides of its config (TOML values), its tools approved without
+/// asking.
+pub fn codex_args(exe: &std::path::Path, report: &str) -> Vec<String> {
+    // A JSON string is a TOML basic string: the same escapes.
+    let s = |v: &str| Value::from(v).to_string();
+    let key = |k: &str| format!("mcp_servers.{MCP_SERVER}.{k}");
+    [
+        format!("{}={}", key("command"), s(&exe.to_string_lossy())),
+        format!("{}=[\"mcp-challenge\"]", key("args")),
+        format!("{}={{{REPORT_ENV}={}}}", key("env"), s(report)),
+        format!("{}=\"approve\"", key("default_tools_approval_mode")),
+    ]
+    .into_iter()
+    .flat_map(|kv| ["-c".to_string(), kv])
+    .collect()
+}
+
+/// The same for an ACP agent (Antigravity): an entry of `session/new`'s `mcpServers`.
+pub fn acp_server(exe: &std::path::Path, report: &str) -> Value {
+    json!({"name": MCP_SERVER, "command": exe.to_string_lossy(), "args": ["mcp-challenge"], "env": [{"name": REPORT_ENV, "value": report}]})
 }
 
 /// Serve the tools over MCP on stdin and stdout (JSON-RPC, one message a line) for the report
@@ -222,7 +262,8 @@ pub fn mcp_reply(report: &str, line: &str) -> Option<Value> {
             "serverInfo": {"name": MCP_SERVER, "version": env!("CARGO_PKG_VERSION")},
         }),
         "ping" => json!({}),
-        "tools/list" => json!({"tools": NAMES.iter().map(|n| json!({"name": n, "description": description(n), "inputSchema": parameters(n)})).collect::<Vec<_>>()}),
+        // They only record what they are given: nothing to ask the person about.
+        "tools/list" => json!({"tools": NAMES.iter().map(|n| json!({"name": n, "description": description(n), "inputSchema": parameters(n), "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}})).collect::<Vec<_>>()}),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let (text, is_error) = match check(name, report, &params["arguments"]) {
@@ -269,8 +310,34 @@ mod tests {
         assert_eq!(tool_of("challenge_finding"), Some(FINDING));
         assert_eq!(tool_of("mcp__serpis__challenge_held"), Some(HELD));
         assert_eq!(tool_of("serpis.challenge_proof"), Some(PROOF));
-        assert_eq!(tool_of("my_challenge_finding"), None);
+        assert_eq!(tool_of("serpis/challenge_finding (MCP)"), Some(FINDING));
+        assert_eq!(tool_of("mcp_serpis_challenge_finding"), Some(FINDING));
+        assert_eq!(tool_of("challenge_findings"), None);
+        assert_eq!(tool_of("challenge_finding_x"), None);
         assert_eq!(tool_of("read"), None);
+        // Through a harness's own tool for MCP calls.
+        let wrapped = json!({"server_name": "serpis", "tool_name": "challenge_held", "arguments": {"claim": "Changed 1", "note": "x"}});
+        assert_eq!(call_of("call_mcp_tool", &wrapped), Some((HELD, json!({"claim": "Changed 1", "note": "x"}))));
+        assert_eq!(call_of("challenge_held", &json!({"claim": "Changed 1"})), Some((HELD, json!({"claim": "Changed 1"}))));
+        assert_eq!(call_of("call_mcp_tool", &json!({"tool_name": "other"})), None);
+    }
+
+    #[test]
+    fn codex_is_given_the_server_as_config() {
+        let args = codex_args(std::path::Path::new("/bin/serpis-node"), "Say \"hi\"\nnow");
+        assert_eq!(
+            args,
+            [
+                "-c",
+                "mcp_servers.serpis.command=\"/bin/serpis-node\"",
+                "-c",
+                "mcp_servers.serpis.args=[\"mcp-challenge\"]",
+                "-c",
+                "mcp_servers.serpis.env={SERPIS_CHALLENGE_REPORT=\"Say \\\"hi\\\"\\nnow\"}",
+                "-c",
+                "mcp_servers.serpis.default_tools_approval_mode=\"approve\"",
+            ]
+        );
     }
 
     #[test]

@@ -150,9 +150,10 @@ its claims wrong, running its checks again where it may (`chat-report-challenge-
 header shows it running (Open chat, Stop), then how it went (Again). It records each finding
 with a tool of its own (`challenge_finding`; `challenge_held` for a claim it couldn't break,
 `challenge_proof` to answer "prove it"), which checks that the claim exists and the quote is the
-report's own words and tells it what to fix if not; serpis's agent gets them as tools, a Claude
-Code challenger from `serpis-node mcp-challenge` over MCP. A challenger without them (on Codex or
-Antigravity, for now) lists its findings in its report in the skill's shape instead. Each
+report's own words and tells it what to fix if not; serpis's agent gets them as tools, a
+challenger on Claude Code, Codex or Antigravity from `serpis-node mcp-challenge` over MCP, its
+calls allowed without asking. A challenger without them (its machine's serpis-node older than
+this) lists its findings in its report in the skill's shape instead. Each
 finding goes to your review as soon as it is recorded, a draft under the claim it disputes,
 marked confirmed (it ran something) or plausible (it read the code), with its evidence; claims
 it couldn't break are marked held. On a

@@ -1,4 +1,7 @@
 //! A small `agy` stand-in (`agy acp` and `agy -p /usage`) for integration tests.
+//!
+//! "challenge {args}" calls `challenge_finding` with those arguments on the `serpis` MCP server
+//! its session was given (`mcpServers`), through a tool of its own for MCP calls, asking first.
 
 use std::io::{BufRead, Write};
 
@@ -46,11 +49,41 @@ fn main() {
     let mut current_model = "gemini-4-neon".to_string();
     let mut current_thought = "high".to_string();
     let mut current_mode = "default".to_string();
+    // The MCP servers its session was given, and a call to one waiting for permission:
+    // (request id, prompt, session, arguments).
+    let mut mcp_servers: Vec<Value> = Vec::new();
+    let mut pending_mcp: Option<(Value, Value, String, Value)> = None;
 
     for line in stdin.lock().lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if let Some((perm_id, prompt_id, session_id, arguments)) = pending_mcp.take() {
+            if message["id"] == perm_id {
+                let option = message.pointer("/result/outcome/optionId").and_then(Value::as_str);
+                let server = mcp_servers.iter().find(|s| s["name"] == "serpis");
+                let (status, text) = match (server, matches!(option, Some("once" | "always"))) {
+                    (Some(s), true) => {
+                        let strings = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+                        let env: Vec<(String, String)> = s["env"].as_array().into_iter().flatten().map(|e| (e["name"].as_str().unwrap_or("").to_string(), e["value"].as_str().unwrap_or("").to_string())).collect();
+                        let r = serpis_testkit::mcp_call(s["command"].as_str().unwrap_or(""), &strings(&s["args"]), &env, "challenge_finding", &arguments);
+                        (if r["isError"] == true { "failed" } else { "completed" }, r["content"][0]["text"].as_str().unwrap_or("").to_string())
+                    }
+                    (None, _) => ("failed", "no serpis MCP server".to_string()),
+                    _ => ("failed", "denied".to_string()),
+                };
+                send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "mcp-1", "status": status,
+                    "content": [{"type": "content", "content": {"type": "text", "text": text}}]
+                }}}));
+                send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("Finding {status}.")}
+                }}}));
+                finish_prompt(prompt_id, &session_id);
+                continue;
+            }
+            pending_mcp = Some((perm_id, prompt_id, session_id, arguments));
+        }
         if let Some((perm_id, prompt_id, session_id, tool_id)) = pending_permission.take() {
             if message["id"] == perm_id {
                 let outcome = message.pointer("/result/outcome/outcome").and_then(Value::as_str);
@@ -106,6 +139,7 @@ fn main() {
                 }
             })),
             Some("session/new" | "session/load") => {
+                mcp_servers = message.pointer("/params/mcpServers").and_then(Value::as_array).cloned().unwrap_or_default();
                 let sid = message
                     .pointer("/params/sessionId")
                     .and_then(Value::as_str)
@@ -184,7 +218,25 @@ fn main() {
                     .filter_map(|v| v["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if text.contains("edit a file") {
+                if let Some(arguments) = text.strip_prefix("challenge ").and_then(|a| serde_json::from_str::<Value>(a).ok()) {
+                    let tool_call = json!({
+                        "toolCallId": "mcp-1", "title": "Call MCP tool", "kind": "other",
+                        "rawInput": {"server_name": "serpis", "tool_name": "challenge_finding", "arguments": arguments}
+                    });
+                    let mut update = tool_call.clone();
+                    update["sessionUpdate"] = json!("tool_call");
+                    update["status"] = json!("pending");
+                    send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
+                    send(json!({"jsonrpc": "2.0", "id": 9003, "method": "session/request_permission", "params": {
+                        "sessionId": session_id, "toolCall": tool_call,
+                        "options": [
+                            {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                            {"optionId": "always", "name": "Allow always", "kind": "allow_always"},
+                            {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
+                        ]
+                    }}));
+                    pending_mcp = Some((json!(9003), id, session_id, arguments));
+                } else if text.contains("edit a file") {
                     send(json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",

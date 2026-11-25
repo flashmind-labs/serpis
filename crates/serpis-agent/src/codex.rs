@@ -431,6 +431,12 @@ impl Process {
     ) -> Result<()> {
         let method = request["method"].as_str().unwrap_or("");
         let params = &request["params"];
+        // A challenger's own tools (crate::challenge) only record what they are given: allowed,
+        // when it was started with them (not a server of the person's by that name).
+        let ours = cfg.launch.args.iter().any(|a| a.starts_with(&format!("mcp_servers.{}.args=[\"mcp-challenge\"]", crate::challenge::MCP_SERVER)));
+        if method == "mcpServer/elicitation/request" && params["serverName"] == crate::challenge::MCP_SERVER && ours {
+            return self.send(&json!({"id":request["id"],"result":{"action":"accept","content":{}}})).await;
+        }
         let id = params["itemId"]
             .as_str()
             .or_else(|| params["callId"].as_str())

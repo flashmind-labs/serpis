@@ -3048,15 +3048,19 @@ impl ChatBuffer {
     }
 
     /// A challenger's calls of its tools (serpis_agent::challenge) that succeeded, from entry
-    /// `from` on, oldest first: (which tool, its arguments).
+    /// `from` on, oldest first: (which tool, its arguments). Each is checked against the report
+    /// again here, whatever its harness said of it.
     pub fn challenge_calls(&self, from: usize) -> Vec<(&'static str, Value)> {
+        use serpis_agent::challenge;
+        let Some(report) = challenge::report_of(self.node.state.custom.iter()) else { return Vec::new() };
         self.entries
             .iter()
             .skip(from)
             .filter_map(|e| match e {
-                Entry::Tool { name, args, result: Some(r), .. } if !r.is_error => serpis_agent::challenge::tool_of(name).map(|t| (t, args.clone())),
+                Entry::Tool { name, args, result: Some(r), .. } if !r.is_error => challenge::call_of(name, args),
                 _ => None,
             })
+            .filter(|(t, args)| challenge::check(t, &report, args).is_ok())
             .collect()
     }
 
