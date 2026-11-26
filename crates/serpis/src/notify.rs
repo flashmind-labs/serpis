@@ -151,15 +151,14 @@ pub fn send(ed: &mut Editor, mut title: String, mut body: String, event: &str, b
     let main = ed.main_sender();
     let ctx = ed.ctx.clone();
     let target = buffer.map(buffer_id_to_u64);
-    std::thread::spawn(move || {
-        if deliver(&title, &body, sound, app) {
-            // Clicked: back to serpis, at that buffer.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            if let Some(b) = target {
-                main.send(move |ed| bring(ed, buffer_id_from_u64(b)));
-            }
+    // Clicked: back to serpis, at that buffer.
+    let clicked = move || {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        if let Some(b) = target {
+            main.send(move |ed| bring(ed, buffer_id_from_u64(b)));
         }
-    });
+    };
+    std::thread::spawn(move || deliver(&title, &body, sound, app, Box::new(clicked)));
 }
 
 /// Show `id`: in its window if one shows it, else in the focused one.
@@ -173,15 +172,22 @@ fn bring(ed: &mut Editor, id: BufferId) {
     }
 }
 
-/// Show it, and wait for a click on it: true when clicked.
+/// What a click on a notification does, run once.
+type OnClick = Box<dyn FnOnce() + Send>;
+
+/// Show it; `on_click` runs if it is clicked.
 ///
 /// macOS shows a process's notifications as some app's: serpis's own when Serpis.app is
 /// installed. Not the terminal it was started from: such an app sends its own notifications
 /// (the newer API), and macOS refuses the older one this uses under the same app ("can't mix
 /// modern clients with legacy clients"), silently. With no app to send as, AppleScript shows it.
+///
+/// A click reaches the notification center's delegate (`mac::Delegate`), whenever it comes:
+/// nothing waits for it. (mac-notification-sys's wait for a click polls the notification
+/// center from the main thread twice a second, a blocking call, for as long as a notification
+/// is unclicked: a day's worth of them stalled every frame.)
 #[cfg(target_os = "macos")]
-fn deliver(title: &str, body: &str, sound: bool, app: Option<String>) -> bool {
-    use mac_notification_sys::{Notification, NotificationResponse};
+fn deliver(title: &str, body: &str, sound: bool, app: Option<String>, on_click: OnClick) {
     static APP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let app = APP.get_or_init(|| {
         let app = app.or_else(|| mac_notification_sys::get_bundle_identifier("Serpis"))?;
@@ -194,26 +200,83 @@ fn deliver(title: &str, body: &str, sound: bool, app: Option<String>) -> bool {
         }
     });
     if app.is_none() {
-        return applescript(title, body, sound);
+        applescript(title, body, sound);
+        return;
     }
-    let mut n = Notification::new();
-    n.title(title).message(body).wait_for_click(true);
-    if sound {
-        n.default_sound();
-    }
-    match n.send() {
-        Ok(NotificationResponse::Click | NotificationResponse::ActionButton(_)) => true,
-        Ok(_) => false,
-        Err(e) => {
-            tracing::warn!("couldn't show a notification: {e}");
-            false
+    mac::deliver(title, body, sound, on_click);
+}
+
+// NSUserNotification: deprecated, and what serpis can send as from a terminal (see deliver).
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+mod mac {
+    use std::sync::{Mutex, Once};
+
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2::{AllocAnyThread, define_class, msg_send};
+    use objc2_foundation::{NSObject, NSObjectProtocol, NSString, NSUserNotification, NSUserNotificationCenter, NSUserNotificationCenterDelegate, NSUserNotificationDefaultSoundName};
+
+    use super::OnClick;
+
+    /// Notifications not clicked yet, by identifier: what a click on each does (the last 100).
+    static PENDING: Mutex<Vec<(String, OnClick)>> = Mutex::new(Vec::new());
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "SerpisNotificationDelegate"]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl NSUserNotificationCenterDelegate for Delegate {
+            #[unsafe(method(userNotificationCenter:didActivateNotification:))]
+            fn did_activate(&self, center: &NSUserNotificationCenter, n: &NSUserNotification) {
+                center.removeDeliveredNotification(n);
+                let Some(id) = n.identifier().map(|i| i.to_string()) else { return };
+                let click = {
+                    let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+                    p.iter().position(|(i, _)| *i == id).map(|at| p.remove(at).1)
+                };
+                if let Some(click) = click {
+                    click();
+                }
+            }
         }
+    );
+
+    pub(super) fn deliver(title: &str, body: &str, sound: bool, on_click: OnClick) {
+        static DELEGATE: Once = Once::new();
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let center = NSUserNotificationCenter::defaultUserNotificationCenter();
+        DELEGATE.call_once(|| {
+            let d: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(), init] };
+            // The center holds its delegate weakly: this one is kept for good.
+            unsafe { center.setDelegate(Some(ProtocolObject::from_ref(&*d))) };
+            std::mem::forget(d);
+        });
+        let id = format!("serpis-{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        {
+            let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            if p.len() >= 100 {
+                drop(p.remove(0));
+            }
+            p.push((id.clone(), on_click));
+        }
+        let n = NSUserNotification::new();
+        n.setIdentifier(Some(&NSString::from_str(&id)));
+        n.setTitle(Some(&NSString::from_str(title)));
+        n.setInformativeText(Some(&NSString::from_str(body)));
+        if sound {
+            n.setSoundName(Some(unsafe { NSUserNotificationDefaultSoundName }));
+        }
+        center.deliverNotification(&n);
     }
 }
 
 /// Show it with AppleScript's `display notification` (as Script Editor's; no click to wait for).
 #[cfg(target_os = "macos")]
-fn applescript(title: &str, body: &str, sound: bool) -> bool {
+fn applescript(title: &str, body: &str, sound: bool) {
     let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
     let mut script = format!("display notification {} with title {}", q(body), q(title));
     if sound {
@@ -222,14 +285,12 @@ fn applescript(title: &str, body: &str, sound: bool) -> bool {
     if let Err(e) = std::process::Command::new("osascript").args(["-e", &script]).status() {
         tracing::warn!("couldn't show a notification (osascript: {e})");
     }
-    false
 }
 
 /// Show it with `notify-send` (no click to wait for).
 #[cfg(not(target_os = "macos"))]
-fn deliver(title: &str, body: &str, _sound: bool, _app: Option<String>) -> bool {
+fn deliver(title: &str, body: &str, _sound: bool, _app: Option<String>, _on_click: OnClick) {
     if let Err(e) = std::process::Command::new("notify-send").args(["-a", "serpis", title, body]).status() {
         tracing::warn!("couldn't show a notification (notify-send: {e})");
     }
-    false
 }

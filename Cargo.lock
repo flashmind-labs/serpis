@@ -4671,6 +4671,8 @@ dependencies = [
  "mlua",
  "nix 0.29.0",
  "notify",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "proptest",
  "qrcode",
  "regex",

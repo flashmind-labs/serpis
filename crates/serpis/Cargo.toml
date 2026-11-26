@@ -56,6 +56,9 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-f
 winit = "0.30"
 # Desktop notifications (works for a binary run from a terminal, outside an app bundle).
 mac-notification-sys = "0.6"
+# Sending them and hearing of a click through the notification center's delegate (notify.rs).
+objc2 = "0.6"
+objc2-foundation = "0.3"
 
 [dev-dependencies]
 proptest = "1"
