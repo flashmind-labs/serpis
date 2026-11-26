@@ -967,7 +967,7 @@ impl ChatBuffer {
                 Entry::Info { text, .. } if tool_compact && prev_tool && crate::cache_watch::is_miss_notice(text) => continue,
                 Entry::Info { text, tone } => {
                     let face = match tone {
-                        Tone::Meta => Face::Meta,
+                        Tone::Meta | Tone::OwnTurn => Face::Meta,
                         Tone::MetaWarn => Face::MetaWarn,
                         Tone::Warning => Face::Warning,
                         Tone::Error => Face::Error,
@@ -1687,7 +1687,8 @@ fn finished_reply(entries: &[Entry], running: bool) -> Option<Result<String, Str
 }
 
 /// Markdown to styled lines for a column `avail` points wide.
-/// The reports in a transcript: in each run (from a prompt to the next), the last assistant
+/// The reports in a transcript: in each run (from a prompt, or from where the agent went on by
+/// itself, to the next), the last assistant
 /// message with text, once the run is over and if it has the report shape or at least
 /// `min_words`. Entry index → its words. Prompts sent while a run goes on (queued) steer it
 /// rather than end it.
@@ -1710,7 +1711,9 @@ fn report_entries(entries: &[Entry], running: bool, min_words: usize) -> HashMap
     };
     for (i, e) in entries.iter().enumerate() {
         match e {
-            Entry::User { queued: false, .. } => finish(&mut last),
+            // A run ends at the next prompt, or where the agent went on by itself: the reply
+            // that turn writes is its own, not the report of the run before.
+            Entry::User { queued: false, .. } | Entry::Info { tone: Tone::OwnTurn, .. } => finish(&mut last),
             Entry::Assistant { .. } if words(e) > 0 => last = Some(i),
             _ => {}
         }
@@ -5087,6 +5090,33 @@ mod tests {
         assert!(!failed_turn(&[user.clone(), tool(Some(failed)), note("Cache miss", Tone::MetaWarn)], false));
         assert!(!failed_turn(&[user.clone(), tool(None), note("Web search failed", Tone::Error)], false));
         assert!(!failed_turn(&[user], false));
+    }
+
+    #[test]
+    fn a_turn_the_agent_starts_by_itself_leaves_the_report_before_it() {
+        // Antigravity's order (crates/serpis-chat/tests/antigravity.rs): after the run's
+        // report, a tool call it makes on its own, then a turn it starts with a line of text.
+        let said = |text: &str| Entry::Assistant {
+            blocks: if text.is_empty() { vec![] } else { vec![AssistantContent::Text { text: text.into(), text_signature: None }] },
+            model: "m".into(),
+            streaming: false,
+            continuation: false,
+            usage: None,
+            error: None,
+            cache: None,
+            elapsed_ms: None,
+        };
+        let report = "Partly done: 5 of 6 findings are fixed.\n\n## Needs you\n\n1. **Must-fix** the verdict.";
+        let tool = Entry::Tool { id: "bg-1".into(), name: "bash".into(), args: serde_json::json!({}), partial: None, result: None, running_ms: None, elapsed_ms: None, ask: None, task: None, steps: vec![] };
+        let mut entries = vec![Entry::User { text: "review".into(), queued: false, images: vec![] }, said(report), said(""), tool, said("")];
+        entries.push(Entry::Info { text: "Antigravity went on by itself".into(), tone: Tone::OwnTurn });
+        entries.push(said("Command finished."));
+        let reports = report_entries(&entries, false, 80);
+        assert!(reports.contains_key(&1), "{reports:?}");
+        assert_eq!(reports.len(), 1, "the short reply of the turn it started isn't one: {reports:?}");
+        // A plain notice (a compaction, say) doesn't end the run.
+        entries[5] = Entry::Info { text: "Compacted".into(), tone: Tone::Meta };
+        assert!(report_entries(&entries, false, 80).is_empty());
     }
 
     #[test]

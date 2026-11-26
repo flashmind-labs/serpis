@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use serpis_agent::ToolGate;
 use serpis_ai::{AssistantContent, ThinkingLevel};
 use serpis_chat::{Chat, ChatInit, Host, Level};
-use serpis_proto::{Decision, Entry};
+use serpis_proto::{Decision, Entry, Tone};
 
 struct TestHost {
     vars: HashMap<String, Value>,
@@ -492,7 +492,8 @@ fn chats_run_on_claude_code() {
     let agents: Vec<Entry> = back.entries().iter().filter(|e| matches!(e, Entry::Tool { name, .. } if name == "Agent")).cloned().collect();
     assert!(agents.iter().all(|e| matches!(e, Entry::Tool { steps, task: Some(t), .. } if steps.len() == 2 && t.status == "completed")), "{agents:#?}");
     assert!(back.entries().iter().any(|e| matches!(e, Entry::Tool { name, task: Some(t), .. } if name == "Monitor" && t.kind == "monitor" && t.status == "stopped")));
-    let note = back.entries().iter().position(|e| matches!(e, Entry::Info { text, .. } if text == "Background command finished: sleep then echo bg-done")).expect("the note");
+    // Still marked as a run of its own: the report before it stays one.
+    let note = back.entries().iter().position(|e| matches!(e, Entry::Info { text, tone: Tone::OwnTurn } if text == "Background command finished: sleep then echo bg-done")).expect("the note");
     assert!(matches!(&back.entries()[note + 1], Entry::Assistant { blocks, .. } if matches!(&blocks[0], AssistantContent::Text { text, .. } if text == "The background command finished: bg-done.")), "in its place");
     assert_eq!(back.state().permission_mode.as_deref(), Some("acceptEdits"));
 

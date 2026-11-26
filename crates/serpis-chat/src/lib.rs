@@ -1771,7 +1771,7 @@ impl Chat {
                     None => format!("{how}: {} tokens summarized", fmt_tokens(before)),
                 };
                 // Kept where it happened: a resumed chat shows it there.
-                self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len()}));
+                self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len(), "own_turn": false}));
                 self.entries.push(Entry::Info { text, tone: Tone::Meta });
             }
             AgentEvent::TaskOutput { tool, output, bytes } => {
@@ -1803,8 +1803,8 @@ impl Chat {
                     _ => "Claude Code",
                 };
                 let text = why.unwrap_or_else(|| format!("{who} went on by itself"));
-                self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len()}));
-                self.entries.push(Entry::Info { text, tone: Tone::Meta });
+                self.append_entry(host, CLAUDE_NOTE, json!({"text": text, "at": self.history.len(), "own_turn": true}));
+                self.entries.push(Entry::Info { text, tone: Tone::OwnTurn });
             }
         }
     }
@@ -1939,11 +1939,17 @@ impl Chat {
             self.thinking = self.model.as_ref().map(|m| clamp_thinking_level(m, t)).unwrap_or(t);
         }
         let mut first_prompt = None;
-        let notes: Vec<(usize, String)> = l
+        let notes: Vec<(usize, String, Tone)> = l
             .entries
             .iter()
             .filter(|(k, _)| k == CLAUDE_NOTE)
-            .filter_map(|(_, d)| Some((d["at"].as_u64()? as usize, d["text"].as_str()?.to_string())))
+            .filter_map(|(_, d)| {
+                let text = d["text"].as_str()?.to_string();
+                // Notes are compactions and turns the agent went on with by itself; ones saved
+                // before `own_turn` was are told apart by their words.
+                let own = d["own_turn"].as_bool().unwrap_or(!text.starts_with("Compacted"));
+                Some((d["at"].as_u64()? as usize, text, if own { Tone::OwnTurn } else { Tone::Meta }))
+            })
             .collect();
         let times: HashMap<&str, u64> = l
             .entries
@@ -1953,8 +1959,8 @@ impl Chat {
             .collect();
         for (i, m) in l.messages.iter().enumerate() {
             // Why Claude Code went on by itself, where it did.
-            for (_, text) in notes.iter().filter(|(at, _)| *at == i) {
-                self.entries.push(Entry::Info { text: text.clone(), tone: Tone::Meta });
+            for (_, text, tone) in notes.iter().filter(|(at, ..)| *at == i) {
+                self.entries.push(Entry::Info { text: text.clone(), tone: *tone });
             }
             match m {
                 Message::User { content, .. } => {

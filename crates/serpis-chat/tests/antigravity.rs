@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use serpis_ai::{AssistantContent, ThinkingLevel};
 use serpis_chat::{Chat, ChatInit, Host, Level};
-use serpis_proto::{Decision, Entry};
+use serpis_proto::{Decision, Entry, Tone};
 
 struct TestHost {
     vars: HashMap<String, Value>,
@@ -260,6 +260,8 @@ fn asks_between_runs_are_answered_once() {
         assert!(chat.answer(&id, Decision::Allow));
         world.until(&mut chat, prompt, |c| last_text(c) == "Command finished.");
         assert_eq!(tool_cards(&chat, "bg-1"), 1, "{prompt}: one card for the tool: {:#?}", chat.entries());
+        // Where it went on by itself is marked as a run of its own (a report before it stays one).
+        assert!(chat.entries().iter().any(|e| matches!(e, Entry::Info { tone: Tone::OwnTurn, .. })), "{prompt}: {:#?}", chat.entries());
         assert!(
             matches!(serpis_proto::find_tool(chat.entries(), "bg-1"), Some(Entry::Tool { result: Some(r), .. }) if !r.is_error),
             "{prompt}"

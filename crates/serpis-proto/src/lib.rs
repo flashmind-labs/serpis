@@ -251,6 +251,9 @@ pub enum Tone {
     MetaWarn,
     Warning,
     Error,
+    /// Where the agent went on by itself (work it left running finished): a run of its own
+    /// starts here, not part of the one before. Shown as `Meta`.
+    OwnTurn,
 }
 
 /// The transcript from entry `from` on is now `entries` (anything after it is gone).
