@@ -17,10 +17,42 @@ pub type Spans = Vec<(Range<usize>, Face)>;
 
 /// Code larger than this is shown plain (parsing it would stall the UI).
 const MAX_BYTES: usize = 512 * 1024;
-const CACHE_ENTRIES: usize = 256;
+/// What the cache keeps, in bytes of the code highlighted, per generation (two are kept).
+/// A transcript rebuilds every block in order, so the cache must hold all of a long one:
+/// one that fills up and is dropped highlights every block again on every rebuild.
+const CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
-static CACHE: OnceLock<Mutex<HashMap<u64, Vec<Spans>>>> = OnceLock::new();
+static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+/// Highlights by key, in two generations: what was used since `old` was retired is in `new`.
+/// When `new` holds CACHE_BYTES, it becomes `old` and what wasn't used again is dropped.
+#[derive(Default)]
+struct Cache {
+    new: HashMap<u64, Vec<Spans>>,
+    old: HashMap<u64, Vec<Spans>>,
+    new_bytes: usize,
+}
+
+impl Cache {
+    fn get(&mut self, key: u64, bytes: usize) -> Option<Vec<Spans>> {
+        if let Some(v) = self.new.get(&key) {
+            return Some(v.clone());
+        }
+        let v = self.old.remove(&key)?;
+        self.insert(key, v.clone(), bytes);
+        Some(v)
+    }
+
+    fn insert(&mut self, key: u64, v: Vec<Spans>, bytes: usize) {
+        if self.new_bytes + bytes > CACHE_BYTES && !self.new.is_empty() {
+            self.old = std::mem::take(&mut self.new);
+            self.new_bytes = 0;
+        }
+        self.new_bytes += bytes;
+        self.new.insert(key, v);
+    }
+}
 
 fn syntaxes() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
@@ -146,15 +178,16 @@ pub fn shell(lines: &[&str]) -> Option<Vec<Spans>> {
 }
 
 fn run(hint: &str, lines: &[&str], base: Face, classes: &[(Scope, Face)]) -> Option<Vec<Spans>> {
-    if lines.iter().map(|l| l.len() + 1).sum::<usize>() > MAX_BYTES {
+    let bytes = lines.iter().map(|l| l.len() + 1).sum::<usize>();
+    if bytes > MAX_BYTES {
         return None;
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (hint, lines, base as u8, classes.as_ptr() as usize).hash(&mut h);
     let key = h.finish();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(v) = cache.lock().unwrap().get(&key) {
-        return Some(v.clone());
+    if let Some(v) = cache.lock().unwrap().get(key, bytes) {
+        return Some(v);
     }
     let syntax = find(hint, lines.first().copied().unwrap_or(""))?;
     let ss = syntaxes();
@@ -189,17 +222,45 @@ fn run(hint: &str, lines: &[&str], base: Face, classes: &[(Scope, Face)]) -> Opt
         push(at..buf.len(), face_of(stack.as_slice(), base, classes), &mut spans);
         out.push(spans);
     }
-    let mut c = cache.lock().unwrap();
-    if c.len() >= CACHE_ENTRIES {
-        c.clear();
-    }
-    c.insert(key, out.clone());
+    cache.lock().unwrap().insert(key, out.clone(), bytes);
     Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_keeps_a_long_transcripts_blocks_across_rebuilds() {
+        // More blocks than the old 256-entry cache held, each looked up once per rebuild, in order.
+        let mut c = Cache::default();
+        let spans = |i: usize| vec![vec![(0..i % 7, Face::SynKeyword)]];
+        for i in 0..2000 {
+            assert!(c.get(i as u64, 80).is_none());
+            c.insert(i as u64, spans(i), 80);
+        }
+        for _ in 0..3 {
+            for i in 0..2000 {
+                assert_eq!(c.get(i as u64, 80), Some(spans(i)), "block {i} highlighted again");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cache_drops_what_was_not_used_since_it_filled() {
+        let mut c = Cache::default();
+        let big = CACHE_BYTES / 4;
+        c.insert(1, vec![], big);
+        c.insert(2, vec![], big);
+        // 1 is used again: it is kept when the cache fills; 2 is not.
+        assert!(c.get(1, big).is_some());
+        for k in 3..12 {
+            c.insert(k, vec![], big);
+            assert!(c.get(1, big).is_some());
+        }
+        assert!(c.get(2, big).is_none());
+        assert!(c.new_bytes <= CACHE_BYTES);
+    }
 
     fn faces(hint: &str, code: &str) -> Vec<(String, Face)> {
         let lines: Vec<&str> = code.lines().collect();
