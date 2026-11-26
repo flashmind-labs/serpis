@@ -20,6 +20,8 @@ serpis.var.set("remote-rayfish", false)
 serpis.var.set("sidebar-visible", false)
 local shots = os.getenv("SERPIS_TEST_SHOTS")
 local function shot(name) if shots then d.screenshot(shots .. "/" .. name .. ".png", true) end end
+-- What the header showed while the challenge ran.
+local seen = {}
 
 -- A project with a commit, a change not committed and a file not added.
 local home = os.getenv("HOME")
@@ -138,6 +140,15 @@ local steps = {
   function()
     shot("2-form-filled")
     T.press("RET")
+    -- The mock's challenger can end within a few frames: the header is watched from here on.
+    local tries = 0
+    local function watch()
+      if d.rect("report-challenge-spinner") and d.rect("report-challenge-stop") then seen.spinner = true end
+      if d.rect("report-challenge-status") then seen.status = true end
+      tries = tries + 1
+      if not (seen.spinner and seen.status) and tries < 250 then serpis.defer(20, watch) end
+    end
+    watch()
     return 300
   end,
   function()
@@ -149,8 +160,8 @@ local steps = {
   end,
   function()
     shot("3-running")
-    T.check("the header shows it running, with a spinner", d.rect("report-challenge-spinner") ~= nil and d.rect("report-challenge-stop") ~= nil, true)
-    T.check("and says so", d.rect("report-challenge-status") ~= nil, true)
+    T.check("the header shows it running, with a spinner", seen.spinner, true)
+    T.check("and says so", seen.status, true)
     return 5000
   end,
   function()

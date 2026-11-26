@@ -20,6 +20,8 @@ f:write('{"providers":{"fake":{"baseUrl":"http://127.0.0.1:9/v1","api":"openai-c
 f:close()
 serpis.agent.reload_models()
 serpis.agent.model("fake/m")
+-- Not retried (agent-max-retries waits a minute in all for a connection that is refused).
+serpis.var.set("agent-max-retries", 0)
 serpis.var.set("session-directories", {})
 
 local function steps(list)

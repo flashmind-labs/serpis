@@ -76,6 +76,14 @@ def text_of(content):
     return "".join(p.get("text", "") for p in content or [] if isinstance(p, dict))
 
 
+def prompt_of(content):
+    """The message as typed: what a before-prompt hook put before it (<serpis-context>) skipped."""
+    text = text_of(content)
+    if text.startswith("<serpis-context>\n") and "\n</serpis-context>\n\n" in text:
+        return text.split("\n</serpis-context>\n\n", 1)[1]
+    return text
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -119,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
                 "diagrams_skill": "<name>diagrams</name>" in text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else False,
             }) + "\n")
 
-        prompt = text_of(last.get("content"))
+        prompt = prompt_of(last.get("content"))
         if last.get("role") == "user" and prompt.startswith("BUSY") and prompt not in busy:
             busy.add(prompt)
             payload = json.dumps({"error": {"message": "Rate limit exceeded", "code": 429}}).encode()
@@ -156,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         elif last.get("role") == "tool":
             delta["content"] = "done"
         else:
-            prompt = text_of(last.get("content"))
+            prompt = prompt_of(last.get("content"))
             if prompt.startswith("THINK"):
                 delta["reasoning_content"] = "\n".join(f"step {i}" for i in range(1, 7))
             if prompt.startswith("LONG"):
